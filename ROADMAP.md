@@ -172,6 +172,11 @@ Goal: Add AI-driven detection without compromising DNS latency.
 - [ ] Add model explainability payload (`top features`, confidence, reason code).
 - [ ] Add drift detection and retrain triggers from live feature distributions.
 
+Current implementation notes:
+
+- Classifier settings are now persisted in backend storage and exposed through settings/update APIs for future GUI control.
+- Remaining work is focused on stronger models, behavioral features, richer explainability, and production-quality rollout logic.
+
 Exit criteria:
 
 - Classifier stays within latency budget in background operation.
@@ -195,6 +200,7 @@ Goal: Deliver a highly polished, low-cognitive-load GUI with a Rust backend.
 Current implementation notes:
 
 - Backend summaries already exist for future UI consumption: dashboard, settings, services, runtime health, rulesets, and audit events.
+- Classifier settings are already editable via backend API, so the future UI can wire directly into persisted control-plane state.
 - Remaining work is the actual `shadcn/ui` application, richer operator workflows, and client-side state management.
 
 Exit criteria:

@@ -27,7 +27,7 @@ pub struct DnsRuntimeConfig {
 pub struct DnsRuntime {
     resolver: TokioResolver,
     policy: Arc<RwLock<Arc<PolicyEngine>>>,
-    classifier_settings: ClassifierSettings,
+    classifier_settings: Arc<RwLock<ClassifierSettings>>,
     cache: Cache<String, CachedLookup>,
     fallback_cache: Cache<String, CachedLookup>,
     stats: Arc<DnsRuntimeStats>,
@@ -72,7 +72,7 @@ impl DnsRuntime {
         Self {
             resolver,
             policy: Arc::new(RwLock::new(policy)),
-            classifier_settings,
+            classifier_settings: Arc::new(RwLock::new(classifier_settings)),
             cache: Cache::new(10_000),
             fallback_cache: Cache::new(10_000),
             stats: Arc::new(DnsRuntimeStats::default()),
@@ -82,6 +82,19 @@ impl DnsRuntime {
     pub fn replace_policy(&self, policy: Arc<PolicyEngine>) {
         if let Ok(mut guard) = self.policy.write() {
             *guard = policy;
+        }
+    }
+
+    pub fn classifier_settings(&self) -> ClassifierSettings {
+        self.classifier_settings
+            .read()
+            .expect("classifier settings lock poisoned")
+            .clone()
+    }
+
+    pub fn replace_classifier_settings(&self, settings: ClassifierSettings) {
+        if let Ok(mut guard) = self.classifier_settings.write() {
+            *guard = settings;
         }
     }
 
@@ -172,7 +185,8 @@ impl DnsRuntime {
         let name = query.name().to_utf8();
         let domain = name.trim_end_matches('.').to_ascii_lowercase();
 
-        if let Some(classification) = classify_domain(&domain, &self.classifier_settings) {
+        let classifier_settings = self.classifier_settings();
+        if let Some(classification) = classify_domain(&domain, &classifier_settings) {
             tracing::debug!(domain, score = classification.score, "domain classified");
         }
 

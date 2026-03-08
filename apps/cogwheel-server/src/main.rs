@@ -101,6 +101,12 @@ struct UpdateServiceToggleRequest {
     mode: ServiceToggleMode,
 }
 
+#[derive(serde::Deserialize)]
+struct UpdateClassifierSettingsRequest {
+    mode: cogwheel_classifier::ClassifierMode,
+    threshold: f32,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
@@ -180,11 +186,8 @@ async fn main() -> Result<()> {
     let registry = Arc::new(registry);
 
     let resolver = build_resolver(&config.upstream.servers)?;
-    let dns_runtime = Arc::new(DnsRuntime::new(
-        resolver,
-        policy,
-        ClassifierSettings::default(),
-    ));
+    let classifier_settings = load_classifier_settings(&storage).await?;
+    let dns_runtime = Arc::new(DnsRuntime::new(resolver, policy, classifier_settings));
 
     let dns_handle = tokio::spawn({
         let runtime = dns_runtime.clone();
@@ -274,6 +277,10 @@ fn admin_router() -> Router<ServerState> {
         .route("/api/v1/sources/refresh", post(refresh_sources))
         .route("/api/v1/services", get(list_services))
         .route("/api/v1/services/toggles", post(update_service_toggle))
+        .route(
+            "/api/v1/settings/classifier",
+            post(update_classifier_settings),
+        )
         .route("/api/v1/runtime", get(runtime_snapshot))
         .route("/api/v1/runtime/health", get(runtime_health))
         .route("/api/v1/rulesets", get(list_rulesets))
@@ -361,7 +368,7 @@ async fn settings_summary(
         data: SettingsSummary {
             blocklists,
             services,
-            classifier: ClassifierSettings::default(),
+            classifier: state.dns_runtime.classifier_settings(),
             runtime_guard: state.runtime_guard.clone(),
         },
     }))
@@ -514,6 +521,36 @@ async fn update_service_toggle(
         .await
         .map(|data| Json(ApiEnvelope { data }))
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn update_classifier_settings(
+    State(state): State<ServerState>,
+    Json(request): Json<UpdateClassifierSettingsRequest>,
+) -> Result<Json<ApiEnvelope<ClassifierSettings>>, axum::http::StatusCode> {
+    let settings = ClassifierSettings {
+        mode: request.mode,
+        threshold: request.threshold,
+    };
+
+    persist_classifier_settings(&state.storage, &settings)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    state
+        .dns_runtime
+        .replace_classifier_settings(settings.clone());
+    state
+        .storage
+        .record_audit_event(&AuditEvent {
+            id: Uuid::new_v4(),
+            event_type: "classifier-settings.updated".to_string(),
+            payload: serde_json::to_string(&settings)
+                .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?,
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(ApiEnvelope { data: settings }))
 }
 
 async fn refresh_sources_once(state: &ServerState, reason: &str) -> Result<RefreshResponse> {
@@ -675,6 +712,13 @@ async fn load_service_toggle_snapshot(storage: &Storage) -> Result<ServiceToggle
     Ok(ServiceToggleSnapshot::from_json(&value).unwrap_or_default())
 }
 
+async fn load_classifier_settings(storage: &Storage) -> Result<ClassifierSettings> {
+    let Some(value) = storage.get_setting("classifier_settings").await? else {
+        return Ok(ClassifierSettings::default());
+    };
+    Ok(serde_json::from_str(&value).unwrap_or_default())
+}
+
 async fn build_service_toggle_views(state: &ServerState) -> Result<Vec<ServiceToggleView>> {
     let manifests = built_in_service_manifests();
     let snapshot = load_service_toggle_snapshot(&state.storage).await?;
@@ -715,6 +759,16 @@ async fn persist_service_toggle_snapshot(
 ) -> Result<()> {
     storage
         .upsert_setting("service_toggles", &snapshot.to_json()?)
+        .await?;
+    Ok(())
+}
+
+async fn persist_classifier_settings(
+    storage: &Storage,
+    settings: &ClassifierSettings,
+) -> Result<()> {
+    storage
+        .upsert_setting("classifier_settings", &serde_json::to_string(settings)?)
         .await?;
     Ok(())
 }
@@ -828,6 +882,7 @@ fn to_ruleset_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cogwheel_classifier::ClassifierMode;
 
     #[test]
     fn runtime_regression_thresholds_trigger_degraded_state() {
@@ -877,5 +932,18 @@ mod tests {
         let report = evaluate_runtime_regressions(&before, &after, &guard);
         assert!(!report.degraded);
         assert!(report.notes.is_empty());
+    }
+
+    #[test]
+    fn classifier_settings_round_trip_json() {
+        let settings = ClassifierSettings {
+            mode: ClassifierMode::Protect,
+            threshold: 0.77,
+        };
+
+        let encoded = serde_json::to_string(&settings).expect("encode settings");
+        let decoded: ClassifierSettings = serde_json::from_str(&encoded).expect("decode settings");
+        assert_eq!(decoded.mode, ClassifierMode::Protect);
+        assert!((decoded.threshold - 0.77).abs() < f32::EPSILON);
     }
 }
