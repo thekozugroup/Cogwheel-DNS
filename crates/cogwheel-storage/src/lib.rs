@@ -11,6 +11,7 @@ const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_ruleset_artifacts.sql");
 const MIGRATION_0003: &str = include_str!("../migrations/0003_source_metadata.sql");
 const MIGRATION_0004: &str = include_str!("../migrations/0004_source_verification_strictness.sql");
+const MIGRATION_0005: &str = include_str!("../migrations/0005_devices_security_events.sql");
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -55,6 +56,27 @@ pub struct AuditEvent {
     pub id: Uuid,
     pub event_type: String,
     pub payload: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceRecord {
+    pub id: Uuid,
+    pub name: String,
+    pub ip_address: String,
+    pub policy_mode: String,
+    pub blocklist_profile_override: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecurityEventRecord {
+    pub id: Uuid,
+    pub device_id: Option<Uuid>,
+    pub device_name: Option<String>,
+    pub client_ip: String,
+    pub domain: String,
+    pub classifier_score: f64,
+    pub severity: String,
     pub created_at: DateTime<Utc>,
 }
 
@@ -147,6 +169,116 @@ impl Storage {
             params![source_id.to_string()],
         )?;
         Ok(changed > 0)
+    }
+
+    pub async fn upsert_device(&self, device: &DeviceRecord) -> Result<(), StorageError> {
+        let connection = self.connection.lock().expect("storage mutex poisoned");
+        connection.execute(
+            "INSERT OR REPLACE INTO devices (id, name, ip_address, policy_mode, blocklist_profile_override, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            params![
+                device.id.to_string(),
+                device.name,
+                device.ip_address,
+                device.policy_mode,
+                device.blocklist_profile_override,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub async fn list_devices(&self) -> Result<Vec<DeviceRecord>, StorageError> {
+        let connection = self.connection.lock().expect("storage mutex poisoned");
+        let mut statement = connection.prepare(
+            "SELECT id, name, ip_address, policy_mode, blocklist_profile_override FROM devices ORDER BY name ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(DeviceRecord {
+                id: Uuid::parse_str(&row.get::<_, String>(0)?).expect("valid uuid in database"),
+                name: row.get(1)?,
+                ip_address: row.get(2)?,
+                policy_mode: row.get(3)?,
+                blocklist_profile_override: row.get(4)?,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::from)
+    }
+
+    pub async fn find_device_by_ip(
+        &self,
+        ip_address: &str,
+    ) -> Result<Option<DeviceRecord>, StorageError> {
+        let connection = self.connection.lock().expect("storage mutex poisoned");
+        let mut statement = connection.prepare(
+            "SELECT id, name, ip_address, policy_mode, blocklist_profile_override FROM devices WHERE ip_address = ?1",
+        )?;
+
+        statement
+            .query_row(params![ip_address], |row| {
+                Ok(DeviceRecord {
+                    id: Uuid::parse_str(&row.get::<_, String>(0)?).expect("valid uuid in database"),
+                    name: row.get(1)?,
+                    ip_address: row.get(2)?,
+                    policy_mode: row.get(3)?,
+                    blocklist_profile_override: row.get(4)?,
+                })
+            })
+            .optional()
+            .map_err(StorageError::from)
+    }
+
+    pub async fn record_security_event(
+        &self,
+        event: &SecurityEventRecord,
+    ) -> Result<(), StorageError> {
+        let connection = self.connection.lock().expect("storage mutex poisoned");
+        connection.execute(
+            "INSERT INTO security_events (id, device_id, device_name, client_ip, domain, classifier_score, severity, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                event.id.to_string(),
+                event.device_id.map(|value| value.to_string()),
+                event.device_name,
+                event.client_ip,
+                event.domain,
+                event.classifier_score,
+                event.severity,
+                event.created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub async fn recent_security_events(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<SecurityEventRecord>, StorageError> {
+        let connection = self.connection.lock().expect("storage mutex poisoned");
+        let mut statement = connection.prepare(
+            "SELECT id, device_id, device_name, client_ip, domain, classifier_score, severity, created_at FROM security_events ORDER BY created_at DESC LIMIT ?1",
+        )?;
+        let rows = statement.query_map(params![limit], |row| {
+            let device_id = row.get::<_, Option<String>>(1)?;
+            Ok(SecurityEventRecord {
+                id: Uuid::parse_str(&row.get::<_, String>(0)?).expect("valid uuid in database"),
+                device_id: device_id
+                    .as_deref()
+                    .map(Uuid::parse_str)
+                    .transpose()
+                    .expect("valid optional uuid in database"),
+                device_name: row.get(2)?,
+                client_ip: row.get(3)?,
+                domain: row.get(4)?,
+                classifier_score: row.get(5)?,
+                severity: row.get(6)?,
+                created_at: parse_datetime(&row.get::<_, String>(7)?).map_err(to_sqlite_error)?,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::from)
     }
 
     pub async fn record_ruleset(&self, ruleset: &RulesetRecord) -> Result<(), StorageError> {
@@ -267,6 +399,7 @@ fn apply_migrations(connection: &Connection) -> Result<(), StorageError> {
     let _ = connection.execute_batch(MIGRATION_0002);
     let _ = connection.execute_batch(MIGRATION_0003);
     let _ = connection.execute_batch(MIGRATION_0004);
+    let _ = connection.execute_batch(MIGRATION_0005);
     Ok(())
 }
 

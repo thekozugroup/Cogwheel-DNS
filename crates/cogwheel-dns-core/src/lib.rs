@@ -23,11 +23,14 @@ pub struct DnsRuntimeConfig {
     pub tcp_bind_addr: SocketAddr,
 }
 
-#[derive(Debug, Clone)]
+type ClassificationObserver = Arc<dyn Fn(ClassificationEvent) + Send + Sync>;
+
+#[derive(Clone)]
 pub struct DnsRuntime {
     resolver: TokioResolver,
     policy: Arc<RwLock<Arc<PolicyEngine>>>,
     classifier_settings: Arc<RwLock<ClassifierSettings>>,
+    classification_observer: Arc<RwLock<Option<ClassificationObserver>>>,
     cache: Cache<String, CachedLookup>,
     fallback_cache: Cache<String, CachedLookup>,
     stats: Arc<DnsRuntimeStats>,
@@ -36,6 +39,7 @@ pub struct DnsRuntime {
 #[derive(Debug, Clone, Serialize)]
 pub struct ClassificationEvent {
     pub domain: String,
+    pub client_ip: Option<String>,
     pub classification: Classification,
     pub observed_at: DateTime<Utc>,
 }
@@ -73,6 +77,7 @@ impl DnsRuntime {
             resolver,
             policy: Arc::new(RwLock::new(policy)),
             classifier_settings: Arc::new(RwLock::new(classifier_settings)),
+            classification_observer: Arc::new(RwLock::new(None)),
             cache: Cache::new(10_000),
             fallback_cache: Cache::new(10_000),
             stats: Arc::new(DnsRuntimeStats::default()),
@@ -100,6 +105,12 @@ impl DnsRuntime {
         }
     }
 
+    pub fn set_classification_observer(&self, observer: ClassificationObserver) {
+        if let Ok(mut guard) = self.classification_observer.write() {
+            *guard = Some(observer);
+        }
+    }
+
     pub fn snapshot(&self) -> DnsRuntimeSnapshot {
         DnsRuntimeSnapshot {
             upstream_failures_total: self.stats.upstream_failures_total.load(Ordering::Relaxed),
@@ -116,7 +127,7 @@ impl DnsRuntime {
         record_type: RecordType,
     ) -> Result<ResponseCode> {
         let request = build_probe_request(domain, record_type)?;
-        let response = self.handle_wire_query(&request.to_vec()?).await?;
+        let response = self.handle_wire_query(&request.to_vec()?, None).await?;
         Ok(response.response_code())
     }
 
@@ -136,7 +147,7 @@ impl DnsRuntime {
         loop {
             let (size, peer) = socket.recv_from(&mut buffer).await?;
             let response = self
-                .handle_wire_query(&buffer[..size])
+                .handle_wire_query(&buffer[..size], Some(peer))
                 .await
                 .unwrap_or_else(|error| {
                     tracing::warn!(%error, "failed to handle udp dns query");
@@ -152,23 +163,23 @@ impl DnsRuntime {
             .await
             .context("bind tcp listener")?;
         loop {
-            let (stream, _) = listener.accept().await?;
+            let (stream, peer) = listener.accept().await?;
             let runtime = self.clone();
             tokio::spawn(async move {
-                if let Err(error) = runtime.handle_tcp_stream(stream).await {
+                if let Err(error) = runtime.handle_tcp_stream(stream, peer).await {
                     tracing::warn!(%error, "failed to handle tcp dns query");
                 }
             });
         }
     }
 
-    async fn handle_tcp_stream(&self, mut stream: TcpStream) -> Result<()> {
+    async fn handle_tcp_stream(&self, mut stream: TcpStream, peer: SocketAddr) -> Result<()> {
         let mut len_buffer = [0u8; 2];
         stream.read_exact(&mut len_buffer).await?;
         let length = u16::from_be_bytes(len_buffer) as usize;
         let mut payload = vec![0u8; length];
         stream.read_exact(&mut payload).await?;
-        let response = self.handle_wire_query(&payload).await?;
+        let response = self.handle_wire_query(&payload, Some(peer)).await?;
         let response_bytes = response.to_vec()?;
         stream
             .write_all(&(response_bytes.len() as u16).to_be_bytes())
@@ -177,7 +188,11 @@ impl DnsRuntime {
         Ok(())
     }
 
-    async fn handle_wire_query(&self, payload: &[u8]) -> Result<Message> {
+    async fn handle_wire_query(
+        &self,
+        payload: &[u8],
+        client_addr: Option<SocketAddr>,
+    ) -> Result<Message> {
         let request = Message::from_vec(payload)?;
         let query = request
             .queries()
@@ -190,6 +205,9 @@ impl DnsRuntime {
         let classifier_settings = self.classifier_settings();
         if let Some(classification) = classify_domain(&domain, &classifier_settings) {
             tracing::debug!(domain, score = classification.score, "domain classified");
+            if classification.score >= classifier_settings.threshold {
+                self.emit_classification_event(&domain, client_addr, classification);
+            }
         }
 
         if let Some(cached) = self.cache.get(&domain).await {
@@ -263,6 +281,23 @@ impl DnsRuntime {
         Ok(response)
     }
 
+    fn emit_classification_event(
+        &self,
+        domain: &str,
+        client_addr: Option<SocketAddr>,
+        classification: Classification,
+    ) {
+        let event = build_classification_event(domain, client_addr, classification);
+        let observer = self
+            .classification_observer
+            .read()
+            .expect("classification observer lock poisoned")
+            .clone();
+        if let Some(observer) = observer {
+            observer(event);
+        }
+    }
+
     async fn resolve_upstream(&self, request: &Message, domain: &str) -> Result<Message> {
         let query = request
             .queries()
@@ -321,6 +356,19 @@ fn extract_cname_target(record: &Record) -> Option<String> {
     match record.data() {
         RData::CNAME(target) => Some(target.0.to_utf8()),
         _ => None,
+    }
+}
+
+fn build_classification_event(
+    domain: &str,
+    client_addr: Option<SocketAddr>,
+    classification: Classification,
+) -> ClassificationEvent {
+    ClassificationEvent {
+        domain: domain.to_string(),
+        client_ip: client_addr.map(|addr| addr.ip().to_string()),
+        observed_at: classification.observed_at,
+        classification,
     }
 }
 
@@ -465,5 +513,24 @@ mod tests {
         let response = error_response_for_payload(&request.to_vec().expect("wire request"));
         assert_eq!(response.id(), request.id());
         assert_eq!(response.response_code(), ResponseCode::ServFail);
+    }
+
+    #[test]
+    fn build_classification_event_preserves_client_ip() {
+        let observed_at = Utc::now();
+        let event = build_classification_event(
+            "tracker.example",
+            Some(SocketAddr::from(([192, 168, 1, 4], 5353))),
+            Classification {
+                score: 0.98,
+                reasons: vec!["entropy".to_string()],
+                observed_at,
+            },
+        );
+
+        assert_eq!(event.domain, "tracker.example");
+        assert_eq!(event.client_ip.as_deref(), Some("192.168.1.4"));
+        assert_eq!(event.observed_at, observed_at);
+        assert_eq!(event.classification.score, 0.98);
     }
 }

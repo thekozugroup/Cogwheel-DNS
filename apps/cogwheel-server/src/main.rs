@@ -4,7 +4,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use cogwheel_api::{ApiEnvelope, ApiState, AppConfig, RuntimeGuardConfig, router};
 use cogwheel_classifier::ClassifierSettings;
-use cogwheel_dns_core::{DnsRuntime, DnsRuntimeConfig, DnsRuntimeSnapshot};
+use cogwheel_dns_core::{ClassificationEvent, DnsRuntime, DnsRuntimeConfig, DnsRuntimeSnapshot};
 use cogwheel_lists::{
     SourceDefinition, SourceKind, build_policy_engine, fetch_and_parse_source, parse_source,
     synthetic_source, verify_candidate,
@@ -14,7 +14,9 @@ use cogwheel_services::{
     ServiceManifest, ServiceToggleMode, ServiceToggleSnapshot, built_in_service_manifests,
     compile_service_rule_layer,
 };
-use cogwheel_storage::{AuditEvent, RulesetRecord, SourceRecord, Storage};
+use cogwheel_storage::{
+    AuditEvent, DeviceRecord, RulesetRecord, SecurityEventRecord, SourceRecord, Storage,
+};
 use hickory_resolver::TokioResolver;
 use hickory_resolver::config::{
     NameServerConfig, NameServerConfigGroup, ResolverConfig, ResolverOpts,
@@ -71,14 +73,17 @@ struct DashboardSummary {
     source_count: usize,
     enabled_source_count: usize,
     service_toggle_count: usize,
+    device_count: usize,
     runtime_health: RuntimeHealthResponse,
     latest_audit_events: Vec<AuditEvent>,
+    recent_security_events: Vec<SecurityEventRecord>,
 }
 
 #[derive(serde::Serialize)]
 struct SettingsSummary {
     blocklists: Vec<SourceRecord>,
     blocklist_statuses: Vec<BlocklistStatusView>,
+    devices: Vec<DeviceRecord>,
     services: Vec<ServiceToggleView>,
     classifier: ClassifierSettings,
     runtime_guard: RuntimeGuardConfig,
@@ -178,6 +183,15 @@ struct DeleteBlocklistRequest {
     refresh_now: Option<bool>,
 }
 
+#[derive(serde::Deserialize)]
+struct UpsertDeviceRequest {
+    id: Option<Uuid>,
+    name: String,
+    ip_address: String,
+    policy_mode: Option<String>,
+    blocklist_profile_override: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
@@ -263,6 +277,18 @@ async fn main() -> Result<()> {
     let resolver = build_resolver(&config.upstream.servers)?;
     let classifier_settings = load_classifier_settings(&storage).await?;
     let dns_runtime = Arc::new(DnsRuntime::new(resolver, policy, classifier_settings));
+    dns_runtime.set_classification_observer(Arc::new({
+        let storage = storage.clone();
+        move |event| {
+            let storage = storage.clone();
+            tokio::spawn(async move {
+                if let Err(error) = record_security_event_from_classification(storage, event).await
+                {
+                    tracing::warn!(%error, "failed to record security event");
+                }
+            });
+        }
+    }));
 
     let dns_handle = tokio::spawn({
         let runtime = dns_runtime.clone();
@@ -365,6 +391,9 @@ fn admin_router() -> Router<ServerState> {
             post(update_blocklist_state),
         )
         .route("/api/v1/settings/blocklists/delete", post(delete_blocklist))
+        .route("/api/v1/devices", get(list_devices))
+        .route("/api/v1/devices", post(upsert_device))
+        .route("/api/v1/security-events", get(list_security_events))
         .route("/api/v1/sources", get(list_sources))
         .route("/api/v1/sources/refresh", post(refresh_sources))
         .route("/api/v1/services", get(list_services))
@@ -386,6 +415,63 @@ async fn list_sources(
     state
         .storage
         .list_sources()
+        .await
+        .map(|data| Json(ApiEnvelope { data }))
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn list_devices(
+    State(state): State<ServerState>,
+) -> Result<Json<ApiEnvelope<Vec<DeviceRecord>>>, axum::http::StatusCode> {
+    state
+        .storage
+        .list_devices()
+        .await
+        .map(|data| Json(ApiEnvelope { data }))
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn upsert_device(
+    State(state): State<ServerState>,
+    Json(request): Json<UpsertDeviceRequest>,
+) -> Result<Json<ApiEnvelope<DeviceRecord>>, axum::http::StatusCode> {
+    let device = DeviceRecord {
+        id: request.id.unwrap_or_else(Uuid::new_v4),
+        name: request.name,
+        ip_address: request.ip_address,
+        policy_mode: normalize_device_policy_mode(
+            request.policy_mode.as_deref().unwrap_or("global"),
+        )
+        .ok_or(axum::http::StatusCode::BAD_REQUEST)?,
+        blocklist_profile_override: request.blocklist_profile_override,
+    };
+
+    state
+        .storage
+        .upsert_device(&device)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    state
+        .storage
+        .record_audit_event(&AuditEvent {
+            id: Uuid::new_v4(),
+            event_type: "device.upserted".to_string(),
+            payload: serde_json::to_string(&device)
+                .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?,
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(ApiEnvelope { data: device }))
+}
+
+async fn list_security_events(
+    State(state): State<ServerState>,
+) -> Result<Json<ApiEnvelope<Vec<SecurityEventRecord>>>, axum::http::StatusCode> {
+    state
+        .storage
+        .recent_security_events(20)
         .await
         .map(|data| Json(ApiEnvelope { data }))
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)
@@ -419,6 +505,16 @@ async fn dashboard_summary(
         .recent_audit_events(5)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let devices = state
+        .storage
+        .list_devices()
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let recent_security_events = state
+        .storage
+        .recent_security_events(5)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     let snapshot = load_service_toggle_snapshot(&state.storage)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -438,8 +534,10 @@ async fn dashboard_summary(
                 .iter()
                 .filter(|toggle| !matches!(toggle.mode, ServiceToggleMode::Inherit))
                 .count(),
+            device_count: devices.len(),
             runtime_health,
             latest_audit_events,
+            recent_security_events,
         },
     }))
 }
@@ -455,6 +553,11 @@ async fn settings_summary(
     let services = build_service_toggle_views(&state)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let devices = state
+        .storage
+        .list_devices()
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     let blocklist_statuses = build_blocklist_status_views(&state, &blocklists)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -463,6 +566,7 @@ async fn settings_summary(
         data: SettingsSummary {
             blocklists,
             blocklist_statuses,
+            devices,
             services,
             classifier: state.dns_runtime.classifier_settings(),
             runtime_guard: state.runtime_guard.clone(),
@@ -1229,6 +1333,48 @@ fn normalize_verification_strictness(strictness: &str) -> Option<String> {
     }
 }
 
+fn normalize_device_policy_mode(mode: &str) -> Option<String> {
+    let normalized = mode.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "global" | "custom" => Some(normalized),
+        _ => None,
+    }
+}
+
+fn severity_for_classifier_score(score: f32) -> &'static str {
+    if score >= 0.99 {
+        "critical"
+    } else if score >= 0.96 {
+        "high"
+    } else {
+        "medium"
+    }
+}
+
+async fn record_security_event_from_classification(
+    storage: Arc<Storage>,
+    event: ClassificationEvent,
+) -> Result<()> {
+    let Some(client_ip) = event.client_ip.clone() else {
+        return Ok(());
+    };
+    let device = storage.find_device_by_ip(&client_ip).await?;
+    let severity = severity_for_classifier_score(event.classification.score).to_string();
+    storage
+        .record_security_event(&SecurityEventRecord {
+            id: Uuid::new_v4(),
+            device_id: device.as_ref().map(|record| record.id),
+            device_name: device.as_ref().map(|record| record.name.clone()),
+            client_ip,
+            domain: event.domain,
+            classifier_score: f64::from(event.classification.score),
+            severity,
+            created_at: event.observed_at,
+        })
+        .await?;
+    Ok(())
+}
+
 fn is_reserved_source_id(source_id: Uuid) -> bool {
     source_id == Uuid::from_u128(1)
 }
@@ -1361,6 +1507,26 @@ mod tests {
             Some("balanced".to_string())
         );
         assert_eq!(normalize_verification_strictness("unknown"), None);
+    }
+
+    #[test]
+    fn normalize_device_policy_mode_accepts_known_values() {
+        assert_eq!(
+            normalize_device_policy_mode("GLOBAL"),
+            Some("global".to_string())
+        );
+        assert_eq!(
+            normalize_device_policy_mode(" custom "),
+            Some("custom".to_string())
+        );
+        assert_eq!(normalize_device_policy_mode("invalid"), None);
+    }
+
+    #[test]
+    fn severity_for_classifier_score_uses_expected_bands() {
+        assert_eq!(severity_for_classifier_score(0.995), "critical");
+        assert_eq!(severity_for_classifier_score(0.97), "high");
+        assert_eq!(severity_for_classifier_score(0.92), "medium");
     }
 
     #[test]

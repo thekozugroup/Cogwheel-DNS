@@ -55,19 +55,41 @@ export type ServiceToggle = {
   mode: "Inherit" | "Allow" | "Block";
 };
 
+export type DeviceRecord = {
+  id: string;
+  name: string;
+  ip_address: string;
+  policy_mode: "global" | "custom";
+  blocklist_profile_override: string | null;
+};
+
+export type SecurityEventRecord = {
+  id: string;
+  device_id: string | null;
+  device_name: string | null;
+  client_ip: string;
+  domain: string;
+  classifier_score: number;
+  severity: string;
+  created_at: string;
+};
+
 export type DashboardSummary = {
   protection_status: string;
   active_ruleset: RulesetSummary | null;
   source_count: number;
   enabled_source_count: number;
   service_toggle_count: number;
+  device_count: number;
   runtime_health: RuntimeHealth;
   latest_audit_events: AuditEvent[];
+  recent_security_events: SecurityEventRecord[];
 };
 
 export type SettingsSummary = {
   blocklists: SourceRecord[];
   blocklist_statuses: BlocklistStatus[];
+  devices: DeviceRecord[];
   services: ServiceToggle[];
   classifier: {
     mode: "Off" | "Monitor" | "Protect";
@@ -97,6 +119,17 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   dashboard: () => fetchJson<DashboardSummary>("/api/v1/dashboard"),
   settings: () => fetchJson<SettingsSummary>("/api/v1/settings"),
+  refreshSources: () =>
+    fetchJson<{ outcome: string; notes: string[] }>("/api/v1/sources/refresh", {
+      method: "POST",
+    }),
+  rollbackRuleset: () =>
+    fetchJson<{ id: string; hash: string; status: string; created_at: string }>(
+      "/api/v1/rulesets/rollback",
+      {
+        method: "POST",
+      },
+    ),
   updateClassifier: (mode: SettingsSummary["classifier"]["mode"], threshold: number) =>
     fetchJson<SettingsSummary["classifier"]>("/api/v1/settings/classifier", {
       method: "POST",
@@ -122,4 +155,16 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ service_id, mode }),
     }),
+  upsertDevice: (input: {
+    id?: string;
+    name: string;
+    ip_address: string;
+    policy_mode?: DeviceRecord["policy_mode"];
+    blocklist_profile_override?: string | null;
+  }) =>
+    fetchJson<DeviceRecord>("/api/v1/devices", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  securityEvents: () => fetchJson<SecurityEventRecord[]>("/api/v1/security-events"),
 };

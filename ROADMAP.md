@@ -161,6 +161,22 @@ Exit criteria:
 - Service toggles compile into deterministic rulesets.
 - Users can change common-service behavior without writing domains manually.
 
+## Phase 3.6 - Device Awareness and Per-Device Policy
+
+Goal: Let operators name devices, understand device-level risk, and optionally override the global policy for specific devices.
+
+- [ ] Persist named devices with stable identifiers such as IP address and user-friendly labels.
+- [ ] Support per-device policy mode (`global` by default, `custom` when overridden).
+- [ ] Support per-device blocklist/profile override while keeping the default model global-first.
+- [ ] Record and expose risky DNS events with device attribution and severity.
+- [ ] Add notification hooks for risky events and degraded device-level activity.
+
+Current implementation notes:
+
+- Backend storage and API scaffolding now exist for named devices, device policy metadata, and recent security events.
+- The web control plane now includes device naming/editing, device policy override inputs, and operator-facing security event visibility.
+- Remaining work is live DNS-device attribution, security event generation from real query traffic, per-device rule evaluation in the data plane, and notification delivery.
+
 ## Phase 4 - Real-Time Classifier (Background First)
 
 Goal: Add AI-driven detection without compromising DNS latency.
