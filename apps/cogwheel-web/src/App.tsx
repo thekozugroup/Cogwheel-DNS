@@ -74,6 +74,7 @@ export default function App() {
   const [deviceIpAddress, setDeviceIpAddress] = useState("");
   const [devicePolicyMode, setDevicePolicyMode] = useState<"global" | "custom">("global");
   const [deviceProfileOverride, setDeviceProfileOverride] = useState("");
+  const [deviceProtectionOverride, setDeviceProtectionOverride] = useState<"inherit" | "bypass">("inherit");
 
   async function load() {
     setState("loading");
@@ -117,6 +118,7 @@ export default function App() {
     setDeviceIpAddress("");
     setDevicePolicyMode("global");
     setDeviceProfileOverride("");
+    setDeviceProtectionOverride("inherit");
   }
 
   const enabledBlocklists = useMemo(
@@ -302,6 +304,7 @@ export default function App() {
         ip_address: deviceIpAddress,
         policy_mode: devicePolicyMode,
         blocklist_profile_override: devicePolicyMode === "custom" ? deviceProfileOverride || null : null,
+        protection_override: devicePolicyMode === "custom" ? deviceProtectionOverride : "inherit",
       });
       pushToast(deviceId ? "Device updated" : "Device added", `${deviceName} is now tracked in the control plane.`, "success");
       resetDeviceForm();
@@ -319,6 +322,7 @@ export default function App() {
     setDeviceIpAddress(device.ip_address);
     setDevicePolicyMode(device.policy_mode);
     setDeviceProfileOverride(device.blocklist_profile_override ?? "");
+    setDeviceProtectionOverride(device.protection_override);
   }
 
   return (
@@ -669,7 +673,7 @@ export default function App() {
               <Input value={deviceName} onChange={(event) => setDeviceName(event.target.value)} placeholder="MacBook Pro" />
               <Input value={deviceIpAddress} onChange={(event) => setDeviceIpAddress(event.target.value)} placeholder="192.168.1.42" />
             </div>
-            <div className="grid gap-3 md:grid-cols-3">
+            <div className="grid gap-3 md:grid-cols-4">
               <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={devicePolicyMode} onChange={(event) => setDevicePolicyMode(event.target.value as "global" | "custom")}>
                 <option value="global">Global</option>
                 <option value="custom">Custom</option>
@@ -680,6 +684,10 @@ export default function App() {
                 placeholder="balanced"
                 disabled={devicePolicyMode !== "custom"}
               />
+              <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={deviceProtectionOverride} onChange={(event) => setDeviceProtectionOverride(event.target.value as "inherit" | "bypass")} disabled={devicePolicyMode !== "custom"}>
+                <option value="inherit">Inherit blocking</option>
+                <option value="bypass">Bypass blocking</option>
+              </select>
               <div className="flex gap-2">
                 <Button onClick={() => void handleDeviceSubmit()} disabled={!deviceName || !deviceIpAddress || busyAction === "device-submit"}>
                   {deviceId ? "Save device" : "Add device"}
@@ -705,6 +713,7 @@ export default function App() {
                     </div>
                     <div className="mt-3 flex flex-wrap gap-2 text-xs text-muted-foreground">
                       <Badge>{device.blocklist_profile_override ?? "inherits global profile"}</Badge>
+                      <Badge>{device.protection_override === "bypass" ? "blocking bypassed" : "inherits blocking"}</Badge>
                     </div>
                     <div className="mt-4">
                       <Button variant="ghost" size="sm" onClick={() => startDeviceEdit(device)}>

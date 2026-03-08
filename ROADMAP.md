@@ -179,7 +179,7 @@ Current implementation notes:
 - The dashboard now surfaces alert severity rollups and top affected devices, and high-severity detections emit internal audit alerts as a first notification hook.
 - External webhook delivery can now be configured from the control plane with a minimum severity threshold, using persisted notification settings and outbound alert delivery from the server.
 - Runtime startup now attempts to warm the profile policy catalog from persisted sources, and rollback rebuilds profile policies while restoring the selected global artifact.
-- Remaining work is richer per-device override models beyond profile selection.
+- Devices with custom policy mode can now bypass blocking entirely in addition to selecting a profile override, giving the control plane a richer per-device policy surface.
 
 ## Phase 4 - Real-Time Classifier (Background First)
 

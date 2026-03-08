@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use cogwheel_classifier::{Classification, ClassifierSettings, classify_domain};
-use cogwheel_policy::{BlockMode, DecisionKind, PolicyEngine, RuleAction, normalize_domain};
+use cogwheel_policy::{
+    BlockMode, DecisionKind, PolicyEngine, RuleAction, RulesetArtifact, normalize_domain,
+};
 use hickory_proto::op::{Message, MessageType, Query, ResponseCode};
 use hickory_proto::rr::rdata::{A, AAAA};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
@@ -29,6 +31,7 @@ type ClassificationObserver = Arc<dyn Fn(ClassificationEvent) + Send + Sync>;
 pub struct DnsRuntime {
     resolver: TokioResolver,
     policy: Arc<RwLock<Arc<PolicyEngine>>>,
+    allow_all_policy: Arc<RwLock<Arc<PolicyEngine>>>,
     profile_policies: Arc<RwLock<HashMap<String, Arc<PolicyEngine>>>>,
     devices_by_ip: Arc<RwLock<HashMap<IpAddr, DevicePolicyConfig>>>,
     classifier_settings: Arc<RwLock<ClassifierSettings>>,
@@ -51,6 +54,7 @@ pub struct DevicePolicyConfig {
     pub ip_address: String,
     pub policy_mode: String,
     pub blocklist_profile_override: Option<String>,
+    pub protection_override: String,
 }
 
 #[derive(Debug, Clone)]
@@ -84,7 +88,8 @@ impl DnsRuntime {
     ) -> Self {
         Self {
             resolver,
-            policy: Arc::new(RwLock::new(policy)),
+            policy: Arc::new(RwLock::new(policy.clone())),
+            allow_all_policy: Arc::new(RwLock::new(build_allow_all_policy(&policy))),
             profile_policies: Arc::new(RwLock::new(HashMap::new())),
             devices_by_ip: Arc::new(RwLock::new(HashMap::new())),
             classifier_settings: Arc::new(RwLock::new(classifier_settings)),
@@ -104,8 +109,12 @@ impl DnsRuntime {
         policy: Arc<PolicyEngine>,
         profile_policies: HashMap<String, Arc<PolicyEngine>>,
     ) {
+        let allow_all_policy = build_allow_all_policy(&policy);
         if let Ok(mut guard) = self.policy.write() {
             *guard = policy;
+        }
+        if let Ok(mut guard) = self.allow_all_policy.write() {
+            *guard = allow_all_policy;
         }
         if let Ok(mut guard) = self.profile_policies.write() {
             *guard = profile_policies;
@@ -354,6 +363,14 @@ impl DnsRuntime {
         if device.policy_mode != "custom" {
             return (global.clone(), global.artifact().hash.clone());
         }
+        if device.protection_override == "bypass" {
+            let allow_all_policy = self
+                .allow_all_policy
+                .read()
+                .expect("allow-all policy lock poisoned")
+                .clone();
+            return (allow_all_policy, "bypass".to_string());
+        }
 
         let Some(profile) = device.blocklist_profile_override.as_deref() else {
             return (global.clone(), global.artifact().hash.clone());
@@ -446,6 +463,15 @@ fn build_classification_event(
 
 fn policy_cache_key(scope: &str, domain: &str) -> String {
     format!("{scope}:{domain}")
+}
+
+fn build_allow_all_policy(global_policy: &Arc<PolicyEngine>) -> Arc<PolicyEngine> {
+    let artifact = global_policy.artifact();
+    Arc::new(PolicyEngine::new(RulesetArtifact::new(
+        Vec::new(),
+        artifact.protected_domains.clone(),
+        artifact.block_mode.clone(),
+    )))
 }
 
 fn build_probe_request(domain: &str, record_type: RecordType) -> Result<Message> {
@@ -616,5 +642,26 @@ mod tests {
             policy_cache_key("profile:balanced", "ads.example.com"),
             "profile:balanced:ads.example.com"
         );
+    }
+
+    #[test]
+    fn build_allow_all_policy_removes_block_rules() {
+        let policy = Arc::new(PolicyEngine::new(RulesetArtifact::new(
+            vec![cogwheel_policy::Rule {
+                pattern: cogwheel_policy::RulePattern::Exact("ads.example".to_string()),
+                action: cogwheel_policy::RuleAction::Block,
+                source: "test".to_string(),
+                comment: None,
+            }],
+            HashSet::new(),
+            BlockMode::NullIp,
+        )));
+
+        let allow_all = build_allow_all_policy(&policy);
+
+        assert!(matches!(
+            allow_all.evaluate("ads.example").kind,
+            DecisionKind::Allowed
+        ));
     }
 }

@@ -12,6 +12,7 @@ const MIGRATION_0002: &str = include_str!("../migrations/0002_ruleset_artifacts.
 const MIGRATION_0003: &str = include_str!("../migrations/0003_source_metadata.sql");
 const MIGRATION_0004: &str = include_str!("../migrations/0004_source_verification_strictness.sql");
 const MIGRATION_0005: &str = include_str!("../migrations/0005_devices_security_events.sql");
+const MIGRATION_0006: &str = include_str!("../migrations/0006_device_protection_override.sql");
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -66,6 +67,7 @@ pub struct DeviceRecord {
     pub ip_address: String,
     pub policy_mode: String,
     pub blocklist_profile_override: Option<String>,
+    pub protection_override: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,14 +176,15 @@ impl Storage {
     pub async fn upsert_device(&self, device: &DeviceRecord) -> Result<(), StorageError> {
         let connection = self.connection.lock().expect("storage mutex poisoned");
         connection.execute(
-            "INSERT OR REPLACE INTO devices (id, name, ip_address, policy_mode, blocklist_profile_override, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            "INSERT OR REPLACE INTO devices (id, name, ip_address, policy_mode, blocklist_profile_override, protection_override, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
             params![
                 device.id.to_string(),
                 device.name,
                 device.ip_address,
                 device.policy_mode,
                 device.blocklist_profile_override,
+                device.protection_override,
             ],
         )?;
         Ok(())
@@ -190,7 +193,7 @@ impl Storage {
     pub async fn list_devices(&self) -> Result<Vec<DeviceRecord>, StorageError> {
         let connection = self.connection.lock().expect("storage mutex poisoned");
         let mut statement = connection.prepare(
-            "SELECT id, name, ip_address, policy_mode, blocklist_profile_override FROM devices ORDER BY name ASC",
+            "SELECT id, name, ip_address, policy_mode, blocklist_profile_override, protection_override FROM devices ORDER BY name ASC",
         )?;
         let rows = statement.query_map([], |row| {
             Ok(DeviceRecord {
@@ -199,6 +202,7 @@ impl Storage {
                 ip_address: row.get(2)?,
                 policy_mode: row.get(3)?,
                 blocklist_profile_override: row.get(4)?,
+                protection_override: row.get(5)?,
             })
         })?;
 
@@ -212,7 +216,7 @@ impl Storage {
     ) -> Result<Option<DeviceRecord>, StorageError> {
         let connection = self.connection.lock().expect("storage mutex poisoned");
         let mut statement = connection.prepare(
-            "SELECT id, name, ip_address, policy_mode, blocklist_profile_override FROM devices WHERE ip_address = ?1",
+            "SELECT id, name, ip_address, policy_mode, blocklist_profile_override, protection_override FROM devices WHERE ip_address = ?1",
         )?;
 
         statement
@@ -223,6 +227,7 @@ impl Storage {
                     ip_address: row.get(2)?,
                     policy_mode: row.get(3)?,
                     blocklist_profile_override: row.get(4)?,
+                    protection_override: row.get(5)?,
                 })
             })
             .optional()
@@ -400,6 +405,7 @@ fn apply_migrations(connection: &Connection) -> Result<(), StorageError> {
     let _ = connection.execute_batch(MIGRATION_0003);
     let _ = connection.execute_batch(MIGRATION_0004);
     let _ = connection.execute_batch(MIGRATION_0005);
+    let _ = connection.execute_batch(MIGRATION_0006);
     Ok(())
 }
 

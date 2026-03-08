@@ -233,6 +233,7 @@ struct UpsertDeviceRequest {
     ip_address: String,
     policy_mode: Option<String>,
     blocklist_profile_override: Option<String>,
+    protection_override: Option<String>,
 }
 
 #[tokio::main]
@@ -516,6 +517,10 @@ async fn upsert_device(
             .blocklist_profile_override
             .as_deref()
             .and_then(normalize_profile_name),
+        protection_override: normalize_device_protection_override(
+            request.protection_override.as_deref().unwrap_or("inherit"),
+        )
+        .ok_or(axum::http::StatusCode::BAD_REQUEST)?,
     };
 
     state
@@ -1602,11 +1607,18 @@ fn runtime_device_policies_from_records(devices: Vec<DeviceRecord>) -> Vec<Devic
             } else {
                 None
             };
+            let protection_override = if policy_mode == "custom" {
+                normalize_device_protection_override(&device.protection_override)
+                    .unwrap_or_else(|| "inherit".to_string())
+            } else {
+                "inherit".to_string()
+            };
 
             DevicePolicyConfig {
                 ip_address: device.ip_address,
                 policy_mode,
                 blocklist_profile_override,
+                protection_override,
             }
         })
         .collect()
@@ -1647,6 +1659,14 @@ fn normalize_device_policy_mode(mode: &str) -> Option<String> {
     let normalized = mode.trim().to_ascii_lowercase();
     match normalized.as_str() {
         "global" | "custom" => Some(normalized),
+        _ => None,
+    }
+}
+
+fn normalize_device_protection_override(mode: &str) -> Option<String> {
+    let normalized = mode.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "inherit" | "bypass" => Some(normalized),
         _ => None,
     }
 }
@@ -1976,6 +1996,19 @@ mod tests {
     }
 
     #[test]
+    fn normalize_device_protection_override_accepts_known_values() {
+        assert_eq!(
+            normalize_device_protection_override(" BYPASS "),
+            Some("bypass".to_string())
+        );
+        assert_eq!(
+            normalize_device_protection_override("inherit"),
+            Some("inherit".to_string())
+        );
+        assert_eq!(normalize_device_protection_override("block"), None);
+    }
+
+    #[test]
     fn normalize_profile_name_accepts_non_empty_values() {
         assert_eq!(
             normalize_profile_name(" Balanced "),
@@ -2018,11 +2051,13 @@ mod tests {
             ip_address: "192.168.1.10".to_string(),
             policy_mode: "global".to_string(),
             blocklist_profile_override: Some("Aggressive".to_string()),
+            protection_override: "bypass".to_string(),
         }]);
 
         assert_eq!(configs.len(), 1);
         assert_eq!(configs[0].policy_mode, "global");
         assert_eq!(configs[0].blocklist_profile_override, None);
+        assert_eq!(configs[0].protection_override, "inherit");
     }
 
     #[test]
