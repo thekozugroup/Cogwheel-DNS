@@ -25,6 +25,7 @@ pub struct SourceDefinition {
     pub url: Url,
     pub kind: SourceKind,
     pub enabled: bool,
+    pub verification_strictness: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +53,7 @@ pub fn synthetic_source(name: &str, rules: Vec<Rule>) -> ParsedSource {
         url: Url::parse("data:text/plain,").expect("valid synthetic url"),
         kind: SourceKind::Domains,
         enabled: true,
+        verification_strictness: "balanced".to_string(),
     };
 
     let mut hasher = Sha256::new();
@@ -150,12 +152,29 @@ pub fn verify_candidate(
     if invalid_ratio > 0.2 {
         notes.push("invalid ratio exceeds 20%".to_string());
     }
+    for entry in parsed {
+        let total_lines = entry.rules.len() + entry.invalid_lines;
+        let per_source_invalid_ratio = if total_lines == 0 {
+            0.0
+        } else {
+            entry.invalid_lines as f32 / total_lines as f32
+        };
+        let allowed_invalid_ratio = invalid_ratio_threshold(&entry.source.verification_strictness);
+        if per_source_invalid_ratio > allowed_invalid_ratio {
+            notes.push(format!(
+                "source {} exceeds {} invalid ratio threshold {:.0}%",
+                entry.source.name,
+                entry.source.verification_strictness,
+                allowed_invalid_ratio * 100.0,
+            ));
+        }
+    }
     if !blocked_protected_domains.is_empty() {
         notes.push("candidate blocks protected domains".to_string());
     }
 
     VerificationResult {
-        passed: invalid_ratio <= 0.2 && blocked_protected_domains.is_empty(),
+        passed: notes.is_empty(),
         invalid_ratio,
         blocked_protected_domains,
         notes,
@@ -211,6 +230,14 @@ fn parse_data_url(url: &Url) -> String {
         .unwrap_or_default();
     }
     encoded.replace("%0A", "\n").replace("%0D", "\r")
+}
+
+fn invalid_ratio_threshold(strictness: &str) -> f32 {
+    match strictness {
+        "strict" => 0.05,
+        "relaxed" => 0.40,
+        _ => 0.20,
+    }
 }
 
 fn parse_domain_line(line: &str, source: &str) -> Option<Rule> {
@@ -279,6 +306,7 @@ mod tests {
             url: Url::parse("https://example.com/list.txt").unwrap(),
             kind: SourceKind::Adblock,
             enabled: true,
+            verification_strictness: "balanced".to_string(),
         };
         let parsed = parse_source(source, "||ads.example.com^\n@@||cdn.example.com^");
         assert_eq!(parsed.rules.len(), 2);
@@ -303,6 +331,7 @@ mod tests {
             url: Url::parse("https://example.com/list.txt").unwrap(),
             kind: SourceKind::Adblock,
             enabled: true,
+            verification_strictness: "balanced".to_string(),
         };
         let parsed = parse_source(source, "||gstatic.com^");
         let protected = HashSet::from(["connectivitycheck.gstatic.com".to_string()]);
@@ -327,5 +356,26 @@ mod tests {
         );
         assert_eq!(source.source.name, "service-toggles");
         assert_eq!(source.rules.len(), 1);
+    }
+
+    #[test]
+    fn strict_source_rejects_high_invalid_ratio() {
+        let source = SourceDefinition {
+            id: Uuid::new_v4(),
+            name: "strict-source".to_string(),
+            url: Url::parse("https://example.com/list.txt").unwrap(),
+            kind: SourceKind::Adblock,
+            enabled: true,
+            verification_strictness: "strict".to_string(),
+        };
+        let parsed = parse_source(source, "||good.example^\n$badmodifier");
+        let verification = verify_candidate(&[parsed], &HashSet::new());
+        assert!(!verification.passed);
+        assert!(
+            verification
+                .notes
+                .iter()
+                .any(|note| note.contains("strict-source exceeds strict invalid ratio threshold"))
+        );
     }
 }

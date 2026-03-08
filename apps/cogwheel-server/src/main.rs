@@ -78,15 +78,60 @@ struct DashboardSummary {
 #[derive(serde::Serialize)]
 struct SettingsSummary {
     blocklists: Vec<SourceRecord>,
+    blocklist_statuses: Vec<BlocklistStatusView>,
     services: Vec<ServiceToggleView>,
     classifier: ClassifierSettings,
     runtime_guard: RuntimeGuardConfig,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct BlocklistStatusView {
+    id: Uuid,
+    name: String,
+    last_refresh_attempt_at: Option<chrono::DateTime<chrono::Utc>>,
+    due_for_refresh: bool,
 }
 
 #[derive(Debug, Clone)]
 struct RuntimeRegressionReport {
     degraded: bool,
     notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct SourceRefreshState {
+    entries: Vec<SourceRefreshStateEntry>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct SourceRefreshStateEntry {
+    source_id: Uuid,
+    last_refresh_attempt_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl SourceRefreshState {
+    fn last_refresh_for(&self, source_id: Uuid) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.entries
+            .iter()
+            .find(|entry| entry.source_id == source_id)
+            .map(|entry| entry.last_refresh_attempt_at)
+    }
+
+    fn record_attempt(&mut self, source_id: Uuid, refreshed_at: chrono::DateTime<chrono::Utc>) {
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.source_id == source_id)
+        {
+            entry.last_refresh_attempt_at = refreshed_at;
+            return;
+        }
+
+        self.entries.push(SourceRefreshStateEntry {
+            source_id,
+            last_refresh_attempt_at: refreshed_at,
+        });
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -116,6 +161,7 @@ struct UpsertBlocklistRequest {
     enabled: bool,
     refresh_interval_minutes: Option<i64>,
     profile: Option<String>,
+    verification_strictness: Option<String>,
     refresh_now: Option<bool>,
 }
 
@@ -151,6 +197,7 @@ async fn main() -> Result<()> {
         enabled: true,
         refresh_interval_minutes: 60,
         profile: "essential".to_string(),
+        verification_strictness: "strict".to_string(),
     };
     storage.insert_source(&default_source).await?;
 
@@ -161,6 +208,7 @@ async fn main() -> Result<()> {
             url: Url::parse(&default_source.url)?,
             kind: SourceKind::Domains,
             enabled: true,
+            verification_strictness: default_source.verification_strictness.clone(),
         },
         "ads.example.com\ntracker.example.com",
     );
@@ -240,7 +288,18 @@ async fn main() -> Result<()> {
             ticker.tick().await;
             loop {
                 ticker.tick().await;
-                if let Err(error) = refresh_sources_once(&state, "scheduled").await {
+                let due_ids = match due_source_ids(&state).await {
+                    Ok(ids) => ids,
+                    Err(error) => {
+                        tracing::warn!(%error, "scheduled source selection failed");
+                        continue;
+                    }
+                };
+                if due_ids.is_empty() {
+                    continue;
+                }
+                if let Err(error) = refresh_sources_once(&state, "scheduled", Some(&due_ids)).await
+                {
                     tracing::warn!(%error, "scheduled source refresh failed");
                 }
             }
@@ -396,10 +455,14 @@ async fn settings_summary(
     let services = build_service_toggle_views(&state)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let blocklist_statuses = build_blocklist_status_views(&state, &blocklists)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(ApiEnvelope {
         data: SettingsSummary {
             blocklists,
+            blocklist_statuses,
             services,
             classifier: state.dns_runtime.classifier_settings(),
             runtime_guard: state.runtime_guard.clone(),
@@ -500,7 +563,7 @@ async fn runtime_health(
 async fn refresh_sources(
     State(state): State<ServerState>,
 ) -> Result<Json<ApiEnvelope<RefreshResponse>>, axum::http::StatusCode> {
-    refresh_sources_once(&state, "manual")
+    refresh_sources_once(&state, "manual", None)
         .await
         .map(|data| Json(ApiEnvelope { data }))
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)
@@ -550,7 +613,7 @@ async fn update_service_toggle(
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    refresh_sources_once(&state, "service-toggle")
+    refresh_sources_once(&state, "service-toggle", None)
         .await
         .map(|data| Json(ApiEnvelope { data }))
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)
@@ -602,6 +665,13 @@ async fn upsert_blocklist(
         enabled: request.enabled,
         refresh_interval_minutes: request.refresh_interval_minutes.unwrap_or(60).max(1),
         profile: request.profile.unwrap_or_else(|| "custom".to_string()),
+        verification_strictness: normalize_verification_strictness(
+            request
+                .verification_strictness
+                .as_deref()
+                .unwrap_or("balanced"),
+        )
+        .ok_or(axum::http::StatusCode::BAD_REQUEST)?,
     };
     state
         .storage
@@ -621,7 +691,7 @@ async fn upsert_blocklist(
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if request.refresh_now.unwrap_or(true) && source.enabled {
-        return refresh_sources_once(&state, "blocklist-update")
+        return refresh_sources_once(&state, "blocklist-update", None)
             .await
             .map(|data| Json(ApiEnvelope { data }))
             .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR);
@@ -672,7 +742,7 @@ async fn update_blocklist_state(
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if request.refresh_now.unwrap_or(true) {
-        return refresh_sources_once(&state, "blocklist-state-update")
+        return refresh_sources_once(&state, "blocklist-state-update", None)
             .await
             .map(|data| Json(ApiEnvelope { data }))
             .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR);
@@ -734,7 +804,7 @@ async fn delete_blocklist(
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if request.refresh_now.unwrap_or(true) {
-        return refresh_sources_once(&state, "blocklist-delete")
+        return refresh_sources_once(&state, "blocklist-delete", None)
             .await
             .map(|data| Json(ApiEnvelope { data }))
             .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR);
@@ -749,24 +819,47 @@ async fn delete_blocklist(
     }))
 }
 
-async fn refresh_sources_once(state: &ServerState, reason: &str) -> Result<RefreshResponse> {
+async fn refresh_sources_once(
+    state: &ServerState,
+    reason: &str,
+    only_source_ids: Option<&HashSet<Uuid>>,
+) -> Result<RefreshResponse> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
         .context("build refresh http client")?;
 
-    let enabled_sources = state
+    let selected_sources = state
         .storage
         .list_sources()
         .await?
         .into_iter()
         .filter(|source| source.enabled)
+        .filter(|source| {
+            only_source_ids
+                .map(|ids| ids.contains(&source.id))
+                .unwrap_or(true)
+        })
+        .collect::<Vec<_>>();
+
+    anyhow::ensure!(
+        !selected_sources.is_empty(),
+        "no enabled sources configured"
+    );
+
+    let source_ids = selected_sources
+        .iter()
+        .map(|source| source.id)
+        .collect::<Vec<_>>();
+    update_source_refresh_attempts(&state.storage, &source_ids, chrono::Utc::now()).await?;
+
+    let enabled_sources = selected_sources
+        .into_iter()
         .map(source_definition_from_record)
         .collect::<Result<Vec<_>>>()?;
 
-    anyhow::ensure!(!enabled_sources.is_empty(), "no enabled sources configured");
-
-    let mut parsed_sources = Vec::with_capacity(enabled_sources.len());
+    let enabled_source_count = enabled_sources.len();
+    let mut parsed_sources = Vec::with_capacity(enabled_source_count);
     for source in enabled_sources {
         parsed_sources.push(fetch_and_parse_source(&client, source).await?);
     }
@@ -891,13 +984,10 @@ async fn refresh_sources_once(state: &ServerState, reason: &str) -> Result<Refre
             "active",
             policy.artifact().created_at,
         )),
-        notes: vec![format!(
-            "refreshed {} source(s)",
-            state.storage.list_sources().await?.len()
-        )]
-        .into_iter()
-        .chain(service_layer.notes)
-        .collect(),
+        notes: vec![format!("refreshed {} source(s)", enabled_source_count)]
+            .into_iter()
+            .chain(service_layer.notes)
+            .collect(),
     })
 }
 
@@ -915,6 +1005,13 @@ async fn load_classifier_settings(storage: &Storage) -> Result<ClassifierSetting
     Ok(serde_json::from_str(&value).unwrap_or_default())
 }
 
+async fn load_source_refresh_state(storage: &Storage) -> Result<SourceRefreshState> {
+    let Some(value) = storage.get_setting("source_refresh_state").await? else {
+        return Ok(SourceRefreshState::default());
+    };
+    Ok(serde_json::from_str(&value).unwrap_or_default())
+}
+
 async fn build_service_toggle_views(state: &ServerState) -> Result<Vec<ServiceToggleView>> {
     let manifests = built_in_service_manifests();
     let snapshot = load_service_toggle_snapshot(&state.storage).await?;
@@ -924,6 +1021,28 @@ async fn build_service_toggle_views(state: &ServerState) -> Result<Vec<ServiceTo
         .map(|manifest| ServiceToggleView {
             mode: snapshot.mode_for(&manifest.service_id),
             manifest,
+        })
+        .collect())
+}
+
+async fn build_blocklist_status_views(
+    state: &ServerState,
+    blocklists: &[SourceRecord],
+) -> Result<Vec<BlocklistStatusView>> {
+    let refresh_state = load_source_refresh_state(&state.storage).await?;
+    let now = chrono::Utc::now();
+
+    Ok(blocklists
+        .iter()
+        .map(|source| BlocklistStatusView {
+            id: source.id,
+            name: source.name.clone(),
+            last_refresh_attempt_at: refresh_state.last_refresh_for(source.id),
+            due_for_refresh: source_due_for_refresh(
+                source,
+                refresh_state.last_refresh_for(source.id),
+                now,
+            ),
         })
         .collect())
 }
@@ -955,6 +1074,13 @@ async fn persist_service_toggle_snapshot(
 ) -> Result<()> {
     storage
         .upsert_setting("service_toggles", &snapshot.to_json()?)
+        .await?;
+    Ok(())
+}
+
+async fn persist_source_refresh_state(storage: &Storage, state: &SourceRefreshState) -> Result<()> {
+    storage
+        .upsert_setting("source_refresh_state", &serde_json::to_string(state)?)
         .await?;
     Ok(())
 }
@@ -1025,6 +1151,47 @@ fn evaluate_runtime_regressions(
     }
 }
 
+async fn update_source_refresh_attempts(
+    storage: &Storage,
+    source_ids: &[Uuid],
+    refreshed_at: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    let mut state = load_source_refresh_state(storage).await?;
+    for source_id in source_ids {
+        state.record_attempt(*source_id, refreshed_at);
+    }
+    persist_source_refresh_state(storage, &state).await
+}
+
+async fn due_source_ids(state: &ServerState) -> Result<HashSet<Uuid>> {
+    let now = chrono::Utc::now();
+    let refresh_state = load_source_refresh_state(&state.storage).await?;
+    let sources = state.storage.list_sources().await?;
+
+    Ok(sources
+        .into_iter()
+        .filter(|source| source.enabled)
+        .filter(|source| {
+            source_due_for_refresh(source, refresh_state.last_refresh_for(source.id), now)
+        })
+        .map(|source| source.id)
+        .collect())
+}
+
+fn source_due_for_refresh(
+    source: &SourceRecord,
+    last_refresh_attempt_at: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let Some(last_refresh_attempt_at) = last_refresh_attempt_at else {
+        return true;
+    };
+    let elapsed = now
+        .signed_duration_since(last_refresh_attempt_at)
+        .num_minutes();
+    elapsed >= source.refresh_interval_minutes.max(1)
+}
+
 fn source_definition_from_record(record: SourceRecord) -> Result<SourceDefinition> {
     let kind = source_kind_from_str(&record.kind)
         .ok_or_else(|| anyhow::anyhow!("unsupported source kind: {}", record.kind))?;
@@ -1035,6 +1202,7 @@ fn source_definition_from_record(record: SourceRecord) -> Result<SourceDefinitio
         url: Url::parse(&record.url)?,
         kind,
         enabled: record.enabled,
+        verification_strictness: record.verification_strictness,
     })
 }
 
@@ -1049,6 +1217,14 @@ fn source_kind_from_str(kind: &str) -> Option<SourceKind> {
         "domains" => Some(SourceKind::Domains),
         "hosts" => Some(SourceKind::Hosts),
         "adblock" => Some(SourceKind::Adblock),
+        _ => None,
+    }
+}
+
+fn normalize_verification_strictness(strictness: &str) -> Option<String> {
+    let normalized = strictness.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "strict" | "balanced" | "relaxed" => Some(normalized),
         _ => None,
     }
 }
@@ -1172,5 +1348,52 @@ mod tests {
     fn baseline_source_id_is_reserved() {
         assert!(is_reserved_source_id(Uuid::from_u128(1)));
         assert!(!is_reserved_source_id(Uuid::new_v4()));
+    }
+
+    #[test]
+    fn normalize_verification_strictness_accepts_known_values() {
+        assert_eq!(
+            normalize_verification_strictness("STRICT"),
+            Some("strict".to_string())
+        );
+        assert_eq!(
+            normalize_verification_strictness(" balanced "),
+            Some("balanced".to_string())
+        );
+        assert_eq!(normalize_verification_strictness("unknown"), None);
+    }
+
+    #[test]
+    fn source_refresh_state_tracks_attempts() {
+        let mut state = SourceRefreshState::default();
+        let source_id = Uuid::new_v4();
+        let now = chrono::Utc::now();
+        state.record_attempt(source_id, now);
+        assert_eq!(state.last_refresh_for(source_id), Some(now));
+    }
+
+    #[test]
+    fn source_due_for_refresh_respects_interval() {
+        let source = SourceRecord {
+            id: Uuid::new_v4(),
+            name: "scheduled".to_string(),
+            url: "data:text/plain,scheduled.example".to_string(),
+            kind: "domains".to_string(),
+            enabled: true,
+            refresh_interval_minutes: 30,
+            profile: "balanced".to_string(),
+            verification_strictness: "balanced".to_string(),
+        };
+        let now = chrono::Utc::now();
+        assert!(!source_due_for_refresh(
+            &source,
+            Some(now - chrono::TimeDelta::minutes(5)),
+            now,
+        ));
+        assert!(source_due_for_refresh(
+            &source,
+            Some(now - chrono::TimeDelta::minutes(45)),
+            now,
+        ));
     }
 }
