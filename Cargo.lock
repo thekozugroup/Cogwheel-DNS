@@ -316,7 +316,10 @@ dependencies = [
 name = "cogwheel-services"
 version = "0.1.0"
 dependencies = [
+ "chrono",
+ "cogwheel-policy",
  "serde",
+ "serde_json",
  "url",
 ]
 

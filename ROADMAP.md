@@ -121,7 +121,7 @@ Goal: Make list updates safe, auditable, and user-invisible.
 - [x] Implement source registry and scheduler.
 - [x] Parse domains-only, hosts-style, and Adblock-style inputs into canonical rules.
 - [x] Design service-bundle manifest format for optional common-service toggles (`service_id`, display name, category, allow rules, block rules, exceptions, risk notes).
-- [ ] Support layered compilation so service toggles merge cleanly with core blocklists, allowlists, and user overrides.
+- [x] Support layered compilation so service toggles merge cleanly with core blocklists, allowlists, and user overrides.
 - [x] Add verification gates (syntax, invalid ratio, volume anomaly, protected domain collisions).
 - [x] Build immutable ruleset artifacts with atomic active-pointer swap.
 - [x] Add automatic rollback on post-update breakage or SLO regression.
@@ -130,7 +130,7 @@ Goal: Make list updates safe, auditable, and user-invisible.
 Current implementation notes:
 
 - Bootstrap source registry, scheduled/manual source refresh, ruleset recording, audit events, list/ruleset/audit APIs, and rollback flows are in place.
-- Remaining Phase 3 gaps are service-toggle layered compilation and richer regression/SLO signals beyond protected-domain rollback guards.
+- Remaining Phase 3 gaps are richer regression/SLO signals beyond protected-domain rollback guards.
 
 Exit criteria:
 
@@ -141,10 +141,10 @@ Exit criteria:
 
 Goal: Let users allow or block well-known services with simple toggles instead of manual rules.
 
-- [ ] Add curated service bundle support for easy allowlist/blocklist actions.
+- [x] Add curated service bundle support for easy allowlist/blocklist actions.
 - [ ] Support per-service modes like `allow`, `block`, `inherit`, and `allow only this service subset` where applicable.
-- [ ] Build precedence rules so service toggles remain predictable alongside user custom rules and global lists.
-- [ ] Add plain-language metadata for each service toggle: what it affects, likely breakage, privacy impact.
+- [x] Build precedence rules so service toggles remain predictable alongside user custom rules and global lists.
+- [x] Add plain-language metadata for each service toggle: what it affects, likely breakage, privacy impact.
 - [ ] Expose toggles in GUI as searchable grouped controls, but keep feature optional until curated coverage is good enough.
 - [ ] Add sync support so service toggle choices replicate across nodes.
 
@@ -152,6 +152,7 @@ Notes:
 
 - Initial categories/services will be defined later.
 - This should be shipped only when the curated manifests are reliable enough to feel trustworthy.
+- Backend API support now exists for listing service manifests and updating toggle state; GUI work is still pending.
 
 Exit criteria:
 

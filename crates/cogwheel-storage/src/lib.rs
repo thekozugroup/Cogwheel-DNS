@@ -82,6 +82,18 @@ impl Storage {
         Ok(())
     }
 
+    pub async fn get_setting(&self, key: &str) -> Result<Option<String>, StorageError> {
+        let connection = self.connection.lock().expect("storage mutex poisoned");
+        connection
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1 LIMIT 1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StorageError::from)
+    }
+
     pub async fn insert_source(&self, source: &SourceRecord) -> Result<(), StorageError> {
         let connection = self.connection.lock().expect("storage mutex poisoned");
         connection.execute(

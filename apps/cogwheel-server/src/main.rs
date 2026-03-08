@@ -7,9 +7,13 @@ use cogwheel_classifier::ClassifierSettings;
 use cogwheel_dns_core::{DnsRuntime, DnsRuntimeConfig};
 use cogwheel_lists::{
     SourceDefinition, SourceKind, build_policy_engine, fetch_and_parse_source, parse_source,
-    verify_candidate,
+    synthetic_source, verify_candidate,
 };
 use cogwheel_policy::{BlockMode, DecisionKind, PolicyEngine};
+use cogwheel_services::{
+    ServiceManifest, ServiceToggleMode, ServiceToggleSnapshot, built_in_service_manifests,
+    compile_service_rule_layer,
+};
 use cogwheel_storage::{AuditEvent, RulesetRecord, SourceRecord, Storage};
 use hickory_resolver::TokioResolver;
 use hickory_resolver::config::{
@@ -49,6 +53,18 @@ struct RefreshResponse {
     outcome: String,
     ruleset: Option<RulesetSummary>,
     notes: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+struct ServiceToggleView {
+    manifest: ServiceManifest,
+    mode: ServiceToggleMode,
+}
+
+#[derive(serde::Deserialize)]
+struct UpdateServiceToggleRequest {
+    service_id: String,
+    mode: ServiceToggleMode,
 }
 
 #[tokio::main]
@@ -219,6 +235,8 @@ fn admin_router() -> Router<ServerState> {
     Router::new()
         .route("/api/v1/sources", get(list_sources))
         .route("/api/v1/sources/refresh", post(refresh_sources))
+        .route("/api/v1/services", get(list_services))
+        .route("/api/v1/services/toggles", post(update_service_toggle))
         .route("/api/v1/rulesets", get(list_rulesets))
         .route("/api/v1/rulesets/rollback", post(rollback_ruleset))
         .route("/api/v1/audit-events", get(list_audit_events))
@@ -318,6 +336,66 @@ async fn refresh_sources(
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)
 }
 
+async fn list_services(
+    State(state): State<ServerState>,
+) -> Result<Json<ApiEnvelope<Vec<ServiceToggleView>>>, axum::http::StatusCode> {
+    let manifests = built_in_service_manifests();
+    let snapshot = load_service_toggle_snapshot(&state.storage)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(ApiEnvelope {
+        data: manifests
+            .into_iter()
+            .map(|manifest| ServiceToggleView {
+                mode: snapshot.mode_for(&manifest.service_id),
+                manifest,
+            })
+            .collect(),
+    }))
+}
+
+async fn update_service_toggle(
+    State(state): State<ServerState>,
+    Json(request): Json<UpdateServiceToggleRequest>,
+) -> Result<Json<ApiEnvelope<RefreshResponse>>, axum::http::StatusCode> {
+    let manifests = built_in_service_manifests();
+    if !manifests
+        .iter()
+        .any(|item| item.service_id == request.service_id)
+    {
+        return Err(axum::http::StatusCode::NOT_FOUND);
+    }
+
+    let mut snapshot = load_service_toggle_snapshot(&state.storage)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    snapshot.upsert(&request.service_id, request.mode);
+    persist_service_toggle_snapshot(&state.storage, &snapshot)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    state
+        .storage
+        .record_audit_event(&AuditEvent {
+            id: Uuid::new_v4(),
+            event_type: "service-toggle.updated".to_string(),
+            payload: serde_json::json!({
+                "service_id": request.service_id,
+                "mode": snapshot.mode_for(&request.service_id),
+            })
+            .to_string(),
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    refresh_sources_once(&state, "service-toggle")
+        .await
+        .map(|data| Json(ApiEnvelope { data }))
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+}
+
 async fn refresh_sources_once(state: &ServerState, reason: &str) -> Result<RefreshResponse> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
@@ -338,6 +416,13 @@ async fn refresh_sources_once(state: &ServerState, reason: &str) -> Result<Refre
     let mut parsed_sources = Vec::with_capacity(enabled_sources.len());
     for source in enabled_sources {
         parsed_sources.push(fetch_and_parse_source(&client, source).await?);
+    }
+
+    let manifests = built_in_service_manifests();
+    let snapshot = load_service_toggle_snapshot(&state.storage).await?;
+    let service_layer = compile_service_rule_layer(&manifests, &snapshot);
+    if !service_layer.rules.is_empty() {
+        parsed_sources.push(synthetic_source("service-toggles", service_layer.rules));
     }
 
     let verification = verify_candidate(&parsed_sources, &state.protected_domains);
@@ -361,7 +446,11 @@ async fn refresh_sources_once(state: &ServerState, reason: &str) -> Result<Refre
         return Ok(RefreshResponse {
             outcome: "rejected".to_string(),
             ruleset: None,
-            notes: verification.notes,
+            notes: verification
+                .notes
+                .into_iter()
+                .chain(service_layer.notes)
+                .collect(),
         });
     }
 
@@ -444,8 +533,28 @@ async fn refresh_sources_once(state: &ServerState, reason: &str) -> Result<Refre
         notes: vec![format!(
             "refreshed {} source(s)",
             state.storage.list_sources().await?.len()
-        )],
+        )]
+        .into_iter()
+        .chain(service_layer.notes)
+        .collect(),
     })
+}
+
+async fn load_service_toggle_snapshot(storage: &Storage) -> Result<ServiceToggleSnapshot> {
+    let Some(value) = storage.get_setting("service_toggles").await? else {
+        return Ok(ServiceToggleSnapshot::default());
+    };
+    Ok(ServiceToggleSnapshot::from_json(&value).unwrap_or_default())
+}
+
+async fn persist_service_toggle_snapshot(
+    storage: &Storage,
+    snapshot: &ServiceToggleSnapshot,
+) -> Result<()> {
+    storage
+        .upsert_setting("service_toggles", &snapshot.to_json()?)
+        .await?;
+    Ok(())
 }
 
 fn source_definition_from_record(record: SourceRecord) -> Result<SourceDefinition> {

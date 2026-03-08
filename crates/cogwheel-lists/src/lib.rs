@@ -45,6 +45,33 @@ pub struct VerificationResult {
     pub notes: Vec<String>,
 }
 
+pub fn synthetic_source(name: &str, rules: Vec<Rule>) -> ParsedSource {
+    let source = SourceDefinition {
+        id: Uuid::new_v4(),
+        name: name.to_string(),
+        url: Url::parse("data:text/plain,").expect("valid synthetic url"),
+        kind: SourceKind::Domains,
+        enabled: true,
+    };
+
+    let mut hasher = Sha256::new();
+    for rule in &rules {
+        hasher.update(format!(
+            "{:?}:{:?}:{}",
+            rule.action, rule.pattern, rule.source
+        ));
+    }
+
+    ParsedSource {
+        source,
+        fetched_at: Utc::now(),
+        etag: None,
+        checksum: format!("{:x}", hasher.finalize()),
+        rules,
+        invalid_lines: 0,
+    }
+}
+
 pub async fn fetch_and_parse_source(
     client: &Client,
     source: SourceDefinition,
@@ -285,5 +312,20 @@ mod tests {
             verification.blocked_protected_domains,
             vec!["connectivitycheck.gstatic.com"]
         );
+    }
+
+    #[test]
+    fn synthetic_source_preserves_rules() {
+        let source = synthetic_source(
+            "service-toggles",
+            vec![Rule {
+                pattern: RulePattern::Suffix("tiktokv.com".to_string()),
+                action: RuleAction::Block,
+                source: "service:tiktok".to_string(),
+                comment: None,
+            }],
+        );
+        assert_eq!(source.source.name, "service-toggles");
+        assert_eq!(source.rules.len(), 1);
     }
 }
