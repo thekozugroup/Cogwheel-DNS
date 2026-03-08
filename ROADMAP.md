@@ -195,6 +195,8 @@ Current implementation notes:
 - The device editor now shows service overrides with friendly manifest labels in both edit chips and saved-device summaries, making per-device service policy easier to review.
 - Device service override summaries now expose manifest category and risk notes inline, so operators can understand why each per-device service rule exists without cross-referencing the global services panel.
 - The device editor now previews service override domain expansion before saving and blocks no-op additions when a service cannot produce device-specific rules for the selected mode.
+- Device upsert APIs now reject invalid service override payloads with operator-readable errors, keeping custom per-device policy data consistent even outside the web editor.
+- Remote notifications now cover refresh rejections plus manual and automatic rollback events, extending webhook visibility beyond risky-domain security alerts.
 
 ## Phase 4 - Real-Time Classifier (Background First)
 

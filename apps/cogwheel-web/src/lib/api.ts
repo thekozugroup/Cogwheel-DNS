@@ -104,6 +104,8 @@ export type NotificationSettings = {
 export type NotificationDeliveryEvent = {
   status: string;
   severity: string;
+  title: string;
+  summary: string;
   domain: string;
   device_name: string | null;
   client_ip: string;
@@ -190,7 +192,8 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
   });
   if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}`);
+    const detail = (await response.text()).trim();
+    throw new Error(detail || `${response.status} ${response.statusText}`);
   }
   const payload = (await response.json()) as { data: T };
   return payload.data;
