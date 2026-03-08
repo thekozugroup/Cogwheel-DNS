@@ -192,7 +192,7 @@ impl DnsRuntime {
 
         if let Some(cached) = self.cache.get(&domain).await {
             self.stats.cache_hits_total.fetch_add(1, Ordering::Relaxed);
-            return Ok(cached.response);
+            return Ok(response_for_request(&request, &cached.response));
         }
 
         let engine = self.policy.read().expect("policy lock poisoned").clone();
@@ -241,7 +241,7 @@ impl DnsRuntime {
                                 .fallback_served_total
                                 .fetch_add(1, Ordering::Relaxed);
                             tracing::warn!(%domain, %error, "serving fallback DNS response after upstream failure");
-                            fallback.response
+                            response_for_request(&request, &fallback.response)
                         } else {
                             return Err(error);
                         }
@@ -329,6 +329,12 @@ fn build_probe_request(domain: &str, record_type: RecordType) -> Result<Message>
     message.set_recursion_desired(true);
     message.add_query(Query::query(Name::from_ascii(domain)?, record_type));
     Ok(message)
+}
+
+fn response_for_request(request: &Message, cached: &Message) -> Message {
+    let mut response = cached.clone();
+    response.set_id(request.id());
+    response
 }
 
 fn build_base_response(request: &Message, code: ResponseCode) -> Message {
@@ -431,5 +437,16 @@ mod tests {
         assert_eq!(request.message_type(), MessageType::Query);
         assert_eq!(request.queries().len(), 1);
         assert_eq!(request.queries()[0].query_type(), RecordType::A);
+    }
+
+    #[test]
+    fn cached_response_adopts_request_id() {
+        let mut request = Message::new();
+        request.set_id(42);
+        let mut cached = Message::new();
+        cached.set_id(7);
+
+        let response = response_for_request(&request, &cached);
+        assert_eq!(response.id(), 42);
     }
 }

@@ -107,6 +107,16 @@ struct UpdateClassifierSettingsRequest {
     threshold: f32,
 }
 
+#[derive(serde::Deserialize)]
+struct UpsertBlocklistRequest {
+    id: Option<Uuid>,
+    name: String,
+    url: String,
+    kind: String,
+    enabled: bool,
+    refresh_now: Option<bool>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
@@ -273,6 +283,7 @@ fn admin_router() -> Router<ServerState> {
     Router::new()
         .route("/api/v1/dashboard", get(dashboard_summary))
         .route("/api/v1/settings", get(settings_summary))
+        .route("/api/v1/settings/blocklists", post(upsert_blocklist))
         .route("/api/v1/sources", get(list_sources))
         .route("/api/v1/sources/refresh", post(refresh_sources))
         .route("/api/v1/services", get(list_services))
@@ -553,6 +564,54 @@ async fn update_classifier_settings(
     Ok(Json(ApiEnvelope { data: settings }))
 }
 
+async fn upsert_blocklist(
+    State(state): State<ServerState>,
+    Json(request): Json<UpsertBlocklistRequest>,
+) -> Result<Json<ApiEnvelope<RefreshResponse>>, axum::http::StatusCode> {
+    let normalized_kind =
+        normalize_source_kind(&request.kind).ok_or(axum::http::StatusCode::BAD_REQUEST)?;
+    Url::parse(&request.url).map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
+
+    let source = SourceRecord {
+        id: request.id.unwrap_or_else(Uuid::new_v4),
+        name: request.name,
+        url: request.url,
+        kind: normalized_kind,
+        enabled: request.enabled,
+    };
+    state
+        .storage
+        .insert_source(&source)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    state
+        .storage
+        .record_audit_event(&AuditEvent {
+            id: Uuid::new_v4(),
+            event_type: "blocklist.upserted".to_string(),
+            payload: serde_json::to_string(&source)
+                .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?,
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if request.refresh_now.unwrap_or(true) && source.enabled {
+        return refresh_sources_once(&state, "blocklist-update")
+            .await
+            .map(|data| Json(ApiEnvelope { data }))
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    Ok(Json(ApiEnvelope {
+        data: RefreshResponse {
+            outcome: "saved".to_string(),
+            ruleset: None,
+            notes: vec![format!("saved blocklist {}", source.name)],
+        },
+    }))
+}
+
 async fn refresh_sources_once(state: &ServerState, reason: &str) -> Result<RefreshResponse> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
@@ -830,12 +889,8 @@ fn evaluate_runtime_regressions(
 }
 
 fn source_definition_from_record(record: SourceRecord) -> Result<SourceDefinition> {
-    let kind = match record.kind.as_str() {
-        "domains" => SourceKind::Domains,
-        "hosts" => SourceKind::Hosts,
-        "adblock" => SourceKind::Adblock,
-        other => anyhow::bail!("unsupported source kind: {other}"),
-    };
+    let kind = source_kind_from_str(&record.kind)
+        .ok_or_else(|| anyhow::anyhow!("unsupported source kind: {}", record.kind))?;
 
     Ok(SourceDefinition {
         id: record.id,
@@ -844,6 +899,21 @@ fn source_definition_from_record(record: SourceRecord) -> Result<SourceDefinitio
         kind,
         enabled: record.enabled,
     })
+}
+
+fn normalize_source_kind(kind: &str) -> Option<String> {
+    let normalized = kind.trim().to_ascii_lowercase();
+    source_kind_from_str(&normalized)?;
+    Some(normalized)
+}
+
+fn source_kind_from_str(kind: &str) -> Option<SourceKind> {
+    match kind {
+        "domains" => Some(SourceKind::Domains),
+        "hosts" => Some(SourceKind::Hosts),
+        "adblock" => Some(SourceKind::Adblock),
+        _ => None,
+    }
 }
 
 fn post_activation_regressions(
@@ -945,5 +1015,15 @@ mod tests {
         let decoded: ClassifierSettings = serde_json::from_str(&encoded).expect("decode settings");
         assert_eq!(decoded.mode, ClassifierMode::Protect);
         assert!((decoded.threshold - 0.77).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn normalize_source_kind_accepts_known_kinds() {
+        assert_eq!(normalize_source_kind("HOSTS"), Some("hosts".to_string()));
+        assert_eq!(
+            normalize_source_kind(" domains "),
+            Some("domains".to_string())
+        );
+        assert_eq!(normalize_source_kind("weird"), None);
     }
 }
