@@ -114,6 +114,8 @@ struct UpsertBlocklistRequest {
     url: String,
     kind: String,
     enabled: bool,
+    refresh_interval_minutes: Option<i64>,
+    profile: Option<String>,
     refresh_now: Option<bool>,
 }
 
@@ -147,6 +149,8 @@ async fn main() -> Result<()> {
         url: "data:text/plain,ads.example.com%0Atracker.example.com".to_string(),
         kind: "domains".to_string(),
         enabled: true,
+        refresh_interval_minutes: 60,
+        profile: "essential".to_string(),
     };
     storage.insert_source(&default_source).await?;
 
@@ -596,6 +600,8 @@ async fn upsert_blocklist(
         url: request.url,
         kind: normalized_kind,
         enabled: request.enabled,
+        refresh_interval_minutes: request.refresh_interval_minutes.unwrap_or(60).max(1),
+        profile: request.profile.unwrap_or_else(|| "custom".to_string()),
     };
     state
         .storage
