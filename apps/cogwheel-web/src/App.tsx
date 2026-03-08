@@ -30,6 +30,12 @@ const emptyDashboard: DashboardSummary = {
   },
   latest_audit_events: [],
   recent_security_events: [],
+  security_summary: {
+    medium_count: 0,
+    high_count: 0,
+    critical_count: 0,
+    top_devices: [],
+  },
 };
 
 const emptySettings: SettingsSummary = {
@@ -351,6 +357,32 @@ export default function App() {
             <Row label="Fallback served" value={String(dashboard.runtime_health.snapshot.fallback_served_total)} />
             <Row label="Cache hits" value={String(dashboard.runtime_health.snapshot.cache_hits_total)} />
             <Row label="Probe domains" value={settings.runtime_guard.probe_domains.join(", ") || "None"} />
+          </div>
+          <Separator className="my-6" />
+          <div className="space-y-3">
+            <div className="font-medium">Alert posture</div>
+            <div className="grid gap-3 sm:grid-cols-3">
+              <Metric label="Critical" value={String(dashboard.security_summary.critical_count)} icon={<ShieldCheck className="size-4" />} />
+              <Metric label="High" value={String(dashboard.security_summary.high_count)} icon={<Activity className="size-4" />} />
+              <Metric label="Medium" value={String(dashboard.security_summary.medium_count)} icon={<Sparkles className="size-4" />} />
+            </div>
+            <div className="grid gap-3">
+              {dashboard.security_summary.top_devices.length === 0 ? (
+                <div className="rounded-2xl border border-dashed border-border/80 bg-muted/30 p-4 text-sm text-muted-foreground">
+                  No devices are currently trending for risky activity.
+                </div>
+              ) : (
+                dashboard.security_summary.top_devices.map((device) => (
+                  <div key={device.label} className="rounded-2xl border border-border/70 bg-muted/60 p-3 text-sm">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="font-medium">{device.label}</div>
+                      <Badge>{device.highest_severity}</Badge>
+                    </div>
+                    <div className="mt-1 text-muted-foreground">{device.event_count} recent risky requests in the current alert window.</div>
+                  </div>
+                ))
+              )}
+            </div>
           </div>
           <Separator className="my-6" />
           <div className="space-y-3">

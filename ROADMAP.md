@@ -176,7 +176,8 @@ Current implementation notes:
 - Backend storage and API scaffolding now exist for named devices, device policy metadata, and recent security events.
 - The web control plane now includes device naming/editing, device policy override inputs, and operator-facing security event visibility.
 - The DNS data plane now selects per-device policy catalogs in memory, scopes cache entries by effective policy, and records risky events from live query traffic with device attribution when a named device is known.
-- Remaining work is notification delivery, richer per-device override models beyond profile selection, and polishing rollback/startup behavior for profile-specific catalogs.
+- The dashboard now surfaces alert severity rollups and top affected devices, and high-severity detections emit internal audit alerts as a first notification hook.
+- Remaining work is external notification delivery, richer per-device override models beyond profile selection, and polishing rollback/startup behavior for profile-specific catalogs.
 
 ## Phase 4 - Real-Time Classifier (Background First)
 

@@ -85,6 +85,22 @@ struct DashboardSummary {
     runtime_health: RuntimeHealthResponse,
     latest_audit_events: Vec<AuditEvent>,
     recent_security_events: Vec<SecurityEventRecord>,
+    security_summary: SecuritySummary,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct SecuritySummary {
+    medium_count: usize,
+    high_count: usize,
+    critical_count: usize,
+    top_devices: Vec<DeviceSecuritySummary>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DeviceSecuritySummary {
+    label: String,
+    event_count: usize,
+    highest_severity: String,
 }
 
 #[derive(serde::Serialize)]
@@ -527,11 +543,13 @@ async fn dashboard_summary(
         .list_devices()
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let recent_security_events = state
+    let security_events = state
         .storage
-        .recent_security_events(5)
+        .recent_security_events(25)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let security_summary = build_security_summary(&security_events);
+    let recent_security_events = security_events.into_iter().take(5).collect();
     let snapshot = load_service_toggle_snapshot(&state.storage)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -555,6 +573,7 @@ async fn dashboard_summary(
             runtime_health,
             latest_audit_events,
             recent_security_events,
+            security_summary,
         },
     }))
 }
@@ -1472,6 +1491,64 @@ fn severity_for_classifier_score(score: f32) -> &'static str {
     }
 }
 
+fn severity_rank(severity: &str) -> usize {
+    match severity {
+        "critical" => 3,
+        "high" => 2,
+        _ => 1,
+    }
+}
+
+fn build_security_summary(events: &[SecurityEventRecord]) -> SecuritySummary {
+    let mut medium_count = 0;
+    let mut high_count = 0;
+    let mut critical_count = 0;
+    let mut top_devices = HashMap::<String, DeviceSecuritySummary>::new();
+
+    for event in events {
+        match event.severity.as_str() {
+            "critical" => critical_count += 1,
+            "high" => high_count += 1,
+            _ => medium_count += 1,
+        }
+
+        let label = event
+            .device_name
+            .clone()
+            .unwrap_or_else(|| event.client_ip.clone());
+        let entry = top_devices
+            .entry(label.clone())
+            .or_insert_with(|| DeviceSecuritySummary {
+                label,
+                event_count: 0,
+                highest_severity: event.severity.clone(),
+            });
+        entry.event_count += 1;
+        if severity_rank(&event.severity) > severity_rank(&entry.highest_severity) {
+            entry.highest_severity = event.severity.clone();
+        }
+    }
+
+    let mut top_devices = top_devices.into_values().collect::<Vec<_>>();
+    top_devices.sort_by(|left, right| {
+        right
+            .event_count
+            .cmp(&left.event_count)
+            .then_with(|| {
+                severity_rank(&right.highest_severity).cmp(&severity_rank(&left.highest_severity))
+            })
+            .then_with(|| left.label.cmp(&right.label))
+    });
+    top_devices.truncate(3);
+
+    SecuritySummary {
+        medium_count,
+        high_count,
+        critical_count,
+        top_devices,
+    }
+}
+
 async fn record_security_event_from_classification(
     storage: Arc<Storage>,
     event: ClassificationEvent,
@@ -1481,18 +1558,33 @@ async fn record_security_event_from_classification(
     };
     let device = storage.find_device_by_ip(&client_ip).await?;
     let severity = severity_for_classifier_score(event.classification.score).to_string();
-    storage
-        .record_security_event(&SecurityEventRecord {
-            id: Uuid::new_v4(),
-            device_id: device.as_ref().map(|record| record.id),
-            device_name: device.as_ref().map(|record| record.name.clone()),
-            client_ip,
-            domain: event.domain,
-            classifier_score: f64::from(event.classification.score),
-            severity,
-            created_at: event.observed_at,
-        })
-        .await?;
+    let security_event = SecurityEventRecord {
+        id: Uuid::new_v4(),
+        device_id: device.as_ref().map(|record| record.id),
+        device_name: device.as_ref().map(|record| record.name.clone()),
+        client_ip,
+        domain: event.domain,
+        classifier_score: f64::from(event.classification.score),
+        severity,
+        created_at: event.observed_at,
+    };
+    storage.record_security_event(&security_event).await?;
+    if matches!(security_event.severity.as_str(), "high" | "critical") {
+        storage
+            .record_audit_event(&AuditEvent {
+                id: Uuid::new_v4(),
+                event_type: "security.alert_raised".to_string(),
+                payload: serde_json::to_string(&serde_json::json!({
+                    "severity": security_event.severity,
+                    "domain": security_event.domain,
+                    "client_ip": security_event.client_ip,
+                    "device_name": security_event.device_name,
+                    "classifier_score": security_event.classifier_score,
+                }))?,
+                created_at: event.observed_at,
+            })
+            .await?;
+    }
     Ok(())
 }
 
@@ -1536,6 +1628,7 @@ fn to_ruleset_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
     use cogwheel_classifier::ClassifierMode;
 
     #[test]
@@ -1665,6 +1758,50 @@ mod tests {
         assert_eq!(configs.len(), 1);
         assert_eq!(configs[0].policy_mode, "global");
         assert_eq!(configs[0].blocklist_profile_override, None);
+    }
+
+    #[test]
+    fn build_security_summary_tracks_severity_and_devices() {
+        let summary = build_security_summary(&[
+            SecurityEventRecord {
+                id: Uuid::new_v4(),
+                device_id: None,
+                device_name: Some("Laptop".to_string()),
+                client_ip: "192.168.1.10".to_string(),
+                domain: "alpha.example".to_string(),
+                classifier_score: 0.97,
+                severity: "high".to_string(),
+                created_at: Utc::now(),
+            },
+            SecurityEventRecord {
+                id: Uuid::new_v4(),
+                device_id: None,
+                device_name: Some("Laptop".to_string()),
+                client_ip: "192.168.1.10".to_string(),
+                domain: "beta.example".to_string(),
+                classifier_score: 0.995,
+                severity: "critical".to_string(),
+                created_at: Utc::now(),
+            },
+            SecurityEventRecord {
+                id: Uuid::new_v4(),
+                device_id: None,
+                device_name: None,
+                client_ip: "192.168.1.20".to_string(),
+                domain: "gamma.example".to_string(),
+                classifier_score: 0.93,
+                severity: "medium".to_string(),
+                created_at: Utc::now(),
+            },
+        ]);
+
+        assert_eq!(summary.medium_count, 1);
+        assert_eq!(summary.high_count, 1);
+        assert_eq!(summary.critical_count, 1);
+        assert_eq!(summary.top_devices.len(), 2);
+        assert_eq!(summary.top_devices[0].label, "Laptop");
+        assert_eq!(summary.top_devices[0].event_count, 2);
+        assert_eq!(summary.top_devices[0].highest_severity, "critical");
     }
 
     #[test]

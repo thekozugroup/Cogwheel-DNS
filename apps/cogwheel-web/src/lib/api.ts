@@ -74,6 +74,19 @@ export type SecurityEventRecord = {
   created_at: string;
 };
 
+export type DeviceSecuritySummary = {
+  label: string;
+  event_count: number;
+  highest_severity: string;
+};
+
+export type SecuritySummary = {
+  medium_count: number;
+  high_count: number;
+  critical_count: number;
+  top_devices: DeviceSecuritySummary[];
+};
+
 export type DashboardSummary = {
   protection_status: string;
   active_ruleset: RulesetSummary | null;
@@ -84,6 +97,7 @@ export type DashboardSummary = {
   runtime_health: RuntimeHealth;
   latest_audit_events: AuditEvent[];
   recent_security_events: SecurityEventRecord[];
+  security_summary: SecuritySummary;
 };
 
 export type SettingsSummary = {
