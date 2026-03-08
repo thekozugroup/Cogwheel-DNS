@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_ruleset_artifacts.sql");
+const MIGRATION_0003: &str = include_str!("../migrations/0003_source_metadata.sql");
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -34,6 +35,8 @@ pub struct SourceRecord {
     pub url: String,
     pub kind: String,
     pub enabled: bool,
+    pub refresh_interval_minutes: i64,
+    pub profile: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,14 +100,16 @@ impl Storage {
     pub async fn insert_source(&self, source: &SourceRecord) -> Result<(), StorageError> {
         let connection = self.connection.lock().expect("storage mutex poisoned");
         connection.execute(
-            "INSERT OR REPLACE INTO sources (id, name, url, kind, enabled, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            "INSERT OR REPLACE INTO sources (id, name, url, kind, enabled, refresh_interval_minutes, profile, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
             params![
                 source.id.to_string(),
                 source.name,
                 source.url,
                 source.kind,
                 source.enabled,
+                source.refresh_interval_minutes,
+                source.profile,
             ],
         )?;
         Ok(())
@@ -112,8 +117,9 @@ impl Storage {
 
     pub async fn list_sources(&self) -> Result<Vec<SourceRecord>, StorageError> {
         let connection = self.connection.lock().expect("storage mutex poisoned");
-        let mut statement = connection
-            .prepare("SELECT id, name, url, kind, enabled FROM sources ORDER BY name ASC")?;
+        let mut statement = connection.prepare(
+            "SELECT id, name, url, kind, enabled, refresh_interval_minutes, profile FROM sources ORDER BY name ASC",
+        )?;
         let rows = statement.query_map([], |row| {
             Ok(SourceRecord {
                 id: Uuid::parse_str(&row.get::<_, String>(0)?).expect("valid uuid in database"),
@@ -121,6 +127,8 @@ impl Storage {
                 url: row.get(2)?,
                 kind: row.get(3)?,
                 enabled: row.get(4)?,
+                refresh_interval_minutes: row.get(5)?,
+                profile: row.get(6)?,
             })
         })?;
 
@@ -253,6 +261,7 @@ impl Storage {
 fn apply_migrations(connection: &Connection) -> Result<(), StorageError> {
     connection.execute_batch(MIGRATION_0001)?;
     let _ = connection.execute_batch(MIGRATION_0002);
+    let _ = connection.execute_batch(MIGRATION_0003);
     Ok(())
 }
 
