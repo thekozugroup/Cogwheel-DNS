@@ -180,6 +180,7 @@ Current implementation notes:
 - External webhook delivery can now be configured from the control plane with a minimum severity threshold, using persisted notification settings and outbound alert delivery from the server.
 - Webhook delivery now retries with backoff and records explicit delivery success/failure audit events for operator visibility.
 - The control plane now surfaces recent webhook delivery outcomes so operators can see whether alert notifications were delivered or failed.
+- The dashboard now summarizes notification delivery health with delivered/failed counters and recency, and operators can trigger a test webhook send directly from the control plane.
 - Runtime startup now attempts to warm the profile policy catalog from persisted sources, and rollback rebuilds profile policies while restoring the selected global artifact.
 - Devices with custom policy mode can now bypass blocking entirely in addition to selecting a profile override, giving the control plane a richer per-device policy surface.
 - Devices with custom policy mode can now carry per-device allowed-domain lists, letting selected domains bypass blocking for a specific device without changing the global profile.
