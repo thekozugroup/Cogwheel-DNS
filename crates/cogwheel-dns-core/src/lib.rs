@@ -8,8 +8,8 @@ use hickory_proto::rr::{Name, RData, Record, RecordType};
 use hickory_resolver::TokioResolver;
 use moka::future::Cache;
 use serde::Serialize;
-use std::collections::HashSet;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::collections::{HashMap, HashSet};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -29,6 +29,8 @@ type ClassificationObserver = Arc<dyn Fn(ClassificationEvent) + Send + Sync>;
 pub struct DnsRuntime {
     resolver: TokioResolver,
     policy: Arc<RwLock<Arc<PolicyEngine>>>,
+    profile_policies: Arc<RwLock<HashMap<String, Arc<PolicyEngine>>>>,
+    devices_by_ip: Arc<RwLock<HashMap<IpAddr, DevicePolicyConfig>>>,
     classifier_settings: Arc<RwLock<ClassifierSettings>>,
     classification_observer: Arc<RwLock<Option<ClassificationObserver>>>,
     cache: Cache<String, CachedLookup>,
@@ -42,6 +44,13 @@ pub struct ClassificationEvent {
     pub client_ip: Option<String>,
     pub classification: Classification,
     pub observed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DevicePolicyConfig {
+    pub ip_address: String,
+    pub policy_mode: String,
+    pub blocklist_profile_override: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +85,8 @@ impl DnsRuntime {
         Self {
             resolver,
             policy: Arc::new(RwLock::new(policy)),
+            profile_policies: Arc::new(RwLock::new(HashMap::new())),
+            devices_by_ip: Arc::new(RwLock::new(HashMap::new())),
             classifier_settings: Arc::new(RwLock::new(classifier_settings)),
             classification_observer: Arc::new(RwLock::new(None)),
             cache: Cache::new(10_000),
@@ -85,11 +96,39 @@ impl DnsRuntime {
     }
 
     pub fn replace_policy(&self, policy: Arc<PolicyEngine>) {
+        self.replace_policy_catalog(policy, HashMap::new());
+    }
+
+    pub fn replace_policy_catalog(
+        &self,
+        policy: Arc<PolicyEngine>,
+        profile_policies: HashMap<String, Arc<PolicyEngine>>,
+    ) {
         if let Ok(mut guard) = self.policy.write() {
             *guard = policy;
         }
+        if let Ok(mut guard) = self.profile_policies.write() {
+            *guard = profile_policies;
+        }
         self.cache.invalidate_all();
         self.fallback_cache.invalidate_all();
+    }
+
+    pub fn replace_device_policies(&self, devices: Vec<DevicePolicyConfig>) {
+        let normalized = devices
+            .into_iter()
+            .filter_map(|device| {
+                device
+                    .ip_address
+                    .parse::<IpAddr>()
+                    .ok()
+                    .map(|ip| (ip, device))
+            })
+            .collect::<HashMap<_, _>>();
+        if let Ok(mut guard) = self.devices_by_ip.write() {
+            *guard = normalized;
+        }
+        self.cache.invalidate_all();
     }
 
     pub fn classifier_settings(&self) -> ClassifierSettings {
@@ -210,12 +249,13 @@ impl DnsRuntime {
             }
         }
 
-        if let Some(cached) = self.cache.get(&domain).await {
+        let (engine, cache_scope) = self.policy_for_client(client_addr);
+        let cache_key = policy_cache_key(&cache_scope, &domain);
+
+        if let Some(cached) = self.cache.get(&cache_key).await {
             self.stats.cache_hits_total.fetch_add(1, Ordering::Relaxed);
             return Ok(response_for_request(&request, &cached.response));
         }
-
-        let engine = self.policy.read().expect("policy lock poisoned").clone();
         let decision = engine.evaluate(&domain);
         let allow_matched = decision
             .matched_rule
@@ -230,7 +270,7 @@ impl DnsRuntime {
                         let response = build_blocked_response(&request, mode);
                         self.cache
                             .insert(
-                                domain,
+                                cache_key.clone(),
                                 CachedLookup {
                                     response: response.clone(),
                                 },
@@ -272,7 +312,7 @@ impl DnsRuntime {
 
         self.cache
             .insert(
-                domain,
+                cache_key,
                 CachedLookup {
                     response: response.clone(),
                 },
@@ -296,6 +336,38 @@ impl DnsRuntime {
         if let Some(observer) = observer {
             observer(event);
         }
+    }
+
+    fn policy_for_client(&self, client_addr: Option<SocketAddr>) -> (Arc<PolicyEngine>, String) {
+        let global = self.policy.read().expect("policy lock poisoned").clone();
+        let Some(client_ip) = client_addr.map(|addr| addr.ip()) else {
+            return (global.clone(), global.artifact().hash.clone());
+        };
+
+        let devices = self
+            .devices_by_ip
+            .read()
+            .expect("device policy lock poisoned");
+        let Some(device) = devices.get(&client_ip) else {
+            return (global.clone(), global.artifact().hash.clone());
+        };
+        if device.policy_mode != "custom" {
+            return (global.clone(), global.artifact().hash.clone());
+        }
+
+        let Some(profile) = device.blocklist_profile_override.as_deref() else {
+            return (global.clone(), global.artifact().hash.clone());
+        };
+
+        let profile_policies = self
+            .profile_policies
+            .read()
+            .expect("profile policies lock poisoned");
+        let Some(policy) = profile_policies.get(profile) else {
+            return (global.clone(), global.artifact().hash.clone());
+        };
+
+        (policy.clone(), format!("profile:{}", profile))
     }
 
     async fn resolve_upstream(&self, request: &Message, domain: &str) -> Result<Message> {
@@ -370,6 +442,10 @@ fn build_classification_event(
         observed_at: classification.observed_at,
         classification,
     }
+}
+
+fn policy_cache_key(scope: &str, domain: &str) -> String {
+    format!("{scope}:{domain}")
 }
 
 fn build_probe_request(domain: &str, record_type: RecordType) -> Result<Message> {
@@ -532,5 +608,13 @@ mod tests {
         assert_eq!(event.client_ip.as_deref(), Some("192.168.1.4"));
         assert_eq!(event.observed_at, observed_at);
         assert_eq!(event.classification.score, 0.98);
+    }
+
+    #[test]
+    fn policy_cache_key_scopes_by_policy() {
+        assert_eq!(
+            policy_cache_key("profile:balanced", "ads.example.com"),
+            "profile:balanced:ads.example.com"
+        );
     }
 }

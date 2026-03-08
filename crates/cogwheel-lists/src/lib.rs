@@ -25,6 +25,7 @@ pub struct SourceDefinition {
     pub url: Url,
     pub kind: SourceKind,
     pub enabled: bool,
+    pub profile: String,
     pub verification_strictness: String,
 }
 
@@ -53,6 +54,7 @@ pub fn synthetic_source(name: &str, rules: Vec<Rule>) -> ParsedSource {
         url: Url::parse("data:text/plain,").expect("valid synthetic url"),
         kind: SourceKind::Domains,
         enabled: true,
+        profile: "shared".to_string(),
         verification_strictness: "balanced".to_string(),
     };
 
@@ -306,6 +308,7 @@ mod tests {
             url: Url::parse("https://example.com/list.txt").unwrap(),
             kind: SourceKind::Adblock,
             enabled: true,
+            profile: "balanced".to_string(),
             verification_strictness: "balanced".to_string(),
         };
         let parsed = parse_source(source, "||ads.example.com^\n@@||cdn.example.com^");
@@ -331,6 +334,7 @@ mod tests {
             url: Url::parse("https://example.com/list.txt").unwrap(),
             kind: SourceKind::Adblock,
             enabled: true,
+            profile: "balanced".to_string(),
             verification_strictness: "balanced".to_string(),
         };
         let parsed = parse_source(source, "||gstatic.com^");
@@ -366,6 +370,7 @@ mod tests {
             url: Url::parse("https://example.com/list.txt").unwrap(),
             kind: SourceKind::Adblock,
             enabled: true,
+            profile: "strict".to_string(),
             verification_strictness: "strict".to_string(),
         };
         let parsed = parse_source(source, "||good.example^\n$badmodifier");

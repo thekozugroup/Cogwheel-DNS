@@ -4,10 +4,12 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use cogwheel_api::{ApiEnvelope, ApiState, AppConfig, RuntimeGuardConfig, router};
 use cogwheel_classifier::ClassifierSettings;
-use cogwheel_dns_core::{ClassificationEvent, DnsRuntime, DnsRuntimeConfig, DnsRuntimeSnapshot};
+use cogwheel_dns_core::{
+    ClassificationEvent, DevicePolicyConfig, DnsRuntime, DnsRuntimeConfig, DnsRuntimeSnapshot,
+};
 use cogwheel_lists::{
-    SourceDefinition, SourceKind, build_policy_engine, fetch_and_parse_source, parse_source,
-    synthetic_source, verify_candidate,
+    ParsedSource, SourceDefinition, SourceKind, build_policy_engine, fetch_and_parse_source,
+    parse_source, synthetic_source, verify_candidate,
 };
 use cogwheel_policy::{BlockMode, DecisionKind, PolicyEngine};
 use cogwheel_services::{
@@ -26,7 +28,7 @@ use hickory_resolver::proto::rr::RecordType;
 use hickory_resolver::proto::xfer::Protocol;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::registry::Registry;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::interval;
@@ -42,6 +44,12 @@ struct ServerState {
     dns_runtime: Arc<DnsRuntime>,
     protected_domains: Arc<HashSet<String>>,
     runtime_guard: RuntimeGuardConfig,
+}
+
+#[derive(Clone)]
+struct RuntimePolicyCatalog {
+    global_policy: Arc<PolicyEngine>,
+    profile_policies: HashMap<String, Arc<PolicyEngine>>,
 }
 
 #[derive(serde::Serialize)]
@@ -222,6 +230,7 @@ async fn main() -> Result<()> {
             url: Url::parse(&default_source.url)?,
             kind: SourceKind::Domains,
             enabled: true,
+            profile: default_source.profile.clone(),
             verification_strictness: default_source.verification_strictness.clone(),
         },
         "ads.example.com\ntracker.example.com",
@@ -306,6 +315,7 @@ async fn main() -> Result<()> {
         protected_domains,
         runtime_guard: config.runtime_guard,
     };
+    sync_runtime_device_policies(&app_state).await?;
     let refresh_handle = tokio::spawn({
         let state = app_state.clone();
         let refresh_every = config.updater.refresh_interval_secs.max(30);
@@ -443,7 +453,10 @@ async fn upsert_device(
             request.policy_mode.as_deref().unwrap_or("global"),
         )
         .ok_or(axum::http::StatusCode::BAD_REQUEST)?,
-        blocklist_profile_override: request.blocklist_profile_override,
+        blocklist_profile_override: request
+            .blocklist_profile_override
+            .as_deref()
+            .and_then(normalize_profile_name),
     };
 
     state
@@ -460,6 +473,10 @@ async fn upsert_device(
                 .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?,
             created_at: chrono::Utc::now(),
         })
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    sync_runtime_device_policies(&state)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -768,7 +785,8 @@ async fn upsert_blocklist(
         kind: normalized_kind,
         enabled: request.enabled,
         refresh_interval_minutes: request.refresh_interval_minutes.unwrap_or(60).max(1),
-        profile: request.profile.unwrap_or_else(|| "custom".to_string()),
+        profile: normalize_profile_name(request.profile.as_deref().unwrap_or("custom"))
+            .ok_or(axum::http::StatusCode::BAD_REQUEST)?,
         verification_strictness: normalize_verification_strictness(
             request
                 .verification_strictness
@@ -1004,28 +1022,36 @@ async fn refresh_sources_once(
         });
     }
 
-    let policy = Arc::new(build_policy_engine(
-        parsed_sources,
+    let catalog = build_runtime_policy_catalog(
+        &parsed_sources,
         state.protected_domains.as_ref().clone(),
         BlockMode::NullIp,
-    ));
+    );
 
     state
         .storage
         .record_ruleset(&RulesetRecord {
-            id: policy.artifact().id,
-            hash: policy.artifact().hash.clone(),
+            id: catalog.global_policy.artifact().id,
+            hash: catalog.global_policy.artifact().hash.clone(),
             status: "candidate".to_string(),
-            created_at: policy.artifact().created_at,
-            artifact_json: serde_json::to_string(policy.artifact())?,
+            created_at: catalog.global_policy.artifact().created_at,
+            artifact_json: serde_json::to_string(catalog.global_policy.artifact())?,
         })
         .await?;
     let runtime_before = state.dns_runtime.snapshot();
-    state.storage.activate_ruleset(policy.artifact().id).await?;
-    state.dns_runtime.replace_policy(policy.clone());
+    state
+        .storage
+        .activate_ruleset(catalog.global_policy.artifact().id)
+        .await?;
+    state.dns_runtime.replace_policy_catalog(
+        catalog.global_policy.clone(),
+        catalog.profile_policies.clone(),
+    );
+    sync_runtime_device_policies(state).await?;
 
     let mut regression_notes =
-        post_activation_regressions(policy.as_ref(), &state.protected_domains).unwrap_or_default();
+        post_activation_regressions(catalog.global_policy.as_ref(), &state.protected_domains)
+            .unwrap_or_default();
     let runtime_report = run_runtime_guard_probes(state, &runtime_before).await;
     if runtime_report.degraded {
         regression_notes.extend(runtime_report.notes);
@@ -1035,9 +1061,11 @@ async fn refresh_sources_once(
         let Some(artifact) = state.storage.rollback_to_previous_ruleset().await? else {
             anyhow::bail!("regression detected but no previous ruleset available for rollback");
         };
-        state
-            .dns_runtime
-            .replace_policy(Arc::new(PolicyEngine::new(artifact.clone())));
+        state.dns_runtime.replace_policy_catalog(
+            Arc::new(PolicyEngine::new(artifact.clone())),
+            HashMap::new(),
+        );
+        sync_runtime_device_policies(state).await?;
         state
             .storage
             .record_audit_event(&AuditEvent {
@@ -1071,8 +1099,8 @@ async fn refresh_sources_once(
             id: Uuid::new_v4(),
             event_type: "ruleset.activated".to_string(),
             payload: serde_json::json!({
-                "ruleset_id": policy.artifact().id,
-                "hash": policy.artifact().hash,
+                "ruleset_id": catalog.global_policy.artifact().id,
+                "hash": catalog.global_policy.artifact().hash,
                 "reason": reason,
             })
             .to_string(),
@@ -1083,10 +1111,10 @@ async fn refresh_sources_once(
     Ok(RefreshResponse {
         outcome: "activated".to_string(),
         ruleset: Some(to_ruleset_summary(
-            &policy.artifact().id,
-            &policy.artifact().hash,
+            &catalog.global_policy.artifact().id,
+            &catalog.global_policy.artifact().hash,
             "active",
-            policy.artifact().created_at,
+            catalog.global_policy.artifact().created_at,
         )),
         notes: vec![format!("refreshed {} source(s)", enabled_source_count)]
             .into_iter()
@@ -1306,8 +1334,101 @@ fn source_definition_from_record(record: SourceRecord) -> Result<SourceDefinitio
         url: Url::parse(&record.url)?,
         kind,
         enabled: record.enabled,
+        profile: normalize_profile_name(&record.profile)
+            .ok_or_else(|| anyhow::anyhow!("unsupported source profile: {}", record.profile))?,
         verification_strictness: record.verification_strictness,
     })
+}
+
+fn normalize_profile_name(profile: &str) -> Option<String> {
+    let normalized = profile.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn build_runtime_policy_catalog(
+    parsed_sources: &[ParsedSource],
+    protected_domains: HashSet<String>,
+    block_mode: BlockMode,
+) -> RuntimePolicyCatalog {
+    let global_policy = Arc::new(build_policy_engine(
+        parsed_sources.to_vec(),
+        protected_domains.clone(),
+        block_mode.clone(),
+    ));
+
+    let profiles = parsed_sources
+        .iter()
+        .filter_map(|source| normalize_profile_name(&source.source.profile))
+        .filter(|profile| profile != "shared")
+        .collect::<HashSet<_>>();
+
+    let mut profile_policies = HashMap::new();
+    for profile in profiles {
+        let scoped_sources = parsed_sources
+            .iter()
+            .filter(|source| {
+                normalize_profile_name(&source.source.profile)
+                    .is_some_and(|candidate| candidate == profile || candidate == "shared")
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if !scoped_sources.iter().any(|source| {
+            normalize_profile_name(&source.source.profile).as_deref() == Some(profile.as_str())
+        }) {
+            continue;
+        }
+
+        profile_policies.insert(
+            profile,
+            Arc::new(build_policy_engine(
+                scoped_sources,
+                protected_domains.clone(),
+                block_mode.clone(),
+            )),
+        );
+    }
+
+    RuntimePolicyCatalog {
+        global_policy,
+        profile_policies,
+    }
+}
+
+fn runtime_device_policies_from_records(devices: Vec<DeviceRecord>) -> Vec<DevicePolicyConfig> {
+    devices
+        .into_iter()
+        .map(|device| {
+            let policy_mode = normalize_device_policy_mode(&device.policy_mode)
+                .unwrap_or_else(|| "global".to_string());
+            let blocklist_profile_override = if policy_mode == "custom" {
+                device
+                    .blocklist_profile_override
+                    .as_deref()
+                    .and_then(normalize_profile_name)
+            } else {
+                None
+            };
+
+            DevicePolicyConfig {
+                ip_address: device.ip_address,
+                policy_mode,
+                blocklist_profile_override,
+            }
+        })
+        .collect()
+}
+
+async fn sync_runtime_device_policies(state: &ServerState) -> Result<()> {
+    let devices = state.storage.list_devices().await?;
+    state
+        .dns_runtime
+        .replace_device_policies(runtime_device_policies_from_records(devices));
+    Ok(())
 }
 
 fn normalize_source_kind(kind: &str) -> Option<String> {
@@ -1520,6 +1641,30 @@ mod tests {
             Some("custom".to_string())
         );
         assert_eq!(normalize_device_policy_mode("invalid"), None);
+    }
+
+    #[test]
+    fn normalize_profile_name_accepts_non_empty_values() {
+        assert_eq!(
+            normalize_profile_name(" Balanced "),
+            Some("balanced".to_string())
+        );
+        assert_eq!(normalize_profile_name("   "), None);
+    }
+
+    #[test]
+    fn runtime_device_policies_clear_global_overrides() {
+        let configs = runtime_device_policies_from_records(vec![DeviceRecord {
+            id: Uuid::new_v4(),
+            name: "Laptop".to_string(),
+            ip_address: "192.168.1.10".to_string(),
+            policy_mode: "global".to_string(),
+            blocklist_profile_override: Some("Aggressive".to_string()),
+        }]);
+
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].policy_mode, "global");
+        assert_eq!(configs[0].blocklist_profile_override, None);
     }
 
     #[test]
