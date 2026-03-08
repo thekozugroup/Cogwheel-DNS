@@ -367,6 +367,9 @@ async fn main() -> Result<()> {
         protected_domains,
         runtime_guard: config.runtime_guard,
     };
+    if let Err(error) = warm_runtime_policy_catalog(&app_state).await {
+        tracing::warn!(%error, "failed to warm runtime policy catalog on startup");
+    }
     sync_runtime_device_policies(&app_state).await?;
     let refresh_handle = tokio::spawn({
         let state = app_state.clone();
@@ -690,9 +693,20 @@ async fn rollback_ruleset(
         return Err(axum::http::StatusCode::NOT_FOUND);
     };
 
+    let rollback_policy = Arc::new(PolicyEngine::new(artifact.clone()));
+    let profile_policies = match load_current_runtime_policy_catalog(&state).await {
+        Ok(catalog) => catalog.profile_policies,
+        Err(error) => {
+            tracing::warn!(%error, "failed to rebuild profile policies during rollback");
+            HashMap::new()
+        }
+    };
     state
         .dns_runtime
-        .replace_policy(Arc::new(PolicyEngine::new(artifact.clone())));
+        .replace_policy_catalog(rollback_policy, profile_policies);
+    sync_runtime_device_policies(&state)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     state
         .storage
         .record_audit_event(&AuditEvent {
@@ -1435,6 +1449,56 @@ async fn due_source_ids(state: &ServerState) -> Result<HashSet<Uuid>> {
         .collect())
 }
 
+async fn warm_runtime_policy_catalog(state: &ServerState) -> Result<()> {
+    let catalog = load_current_runtime_policy_catalog(state).await?;
+    state
+        .dns_runtime
+        .replace_policy_catalog(catalog.global_policy, catalog.profile_policies);
+    Ok(())
+}
+
+async fn load_current_runtime_policy_catalog(state: &ServerState) -> Result<RuntimePolicyCatalog> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .context("build runtime policy catalog http client")?;
+
+    let enabled_sources = state
+        .storage
+        .list_sources()
+        .await?
+        .into_iter()
+        .filter(|source| source.enabled)
+        .map(source_definition_from_record)
+        .collect::<Result<Vec<_>>>()?;
+    anyhow::ensure!(!enabled_sources.is_empty(), "no enabled sources configured");
+
+    let mut parsed_sources = Vec::with_capacity(enabled_sources.len());
+    for source in enabled_sources {
+        parsed_sources.push(fetch_and_parse_source(&client, source).await?);
+    }
+
+    let manifests = built_in_service_manifests();
+    let snapshot = load_service_toggle_snapshot(&state.storage).await?;
+    let service_layer = compile_service_rule_layer(&manifests, &snapshot);
+    if !service_layer.rules.is_empty() {
+        parsed_sources.push(synthetic_source("service-toggles", service_layer.rules));
+    }
+
+    let verification = verify_candidate(&parsed_sources, &state.protected_domains);
+    anyhow::ensure!(
+        verification.passed,
+        "runtime policy catalog verification failed: {:?}",
+        verification.notes
+    );
+
+    Ok(build_runtime_policy_catalog(
+        &parsed_sources,
+        state.protected_domains.as_ref().clone(),
+        BlockMode::NullIp,
+    ))
+}
+
 fn source_due_for_refresh(
     source: &SourceRecord,
     last_refresh_attempt_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -1959,6 +2023,50 @@ mod tests {
         assert_eq!(configs.len(), 1);
         assert_eq!(configs[0].policy_mode, "global");
         assert_eq!(configs[0].blocklist_profile_override, None);
+    }
+
+    #[test]
+    fn build_runtime_policy_catalog_includes_shared_rules_in_profiles() {
+        let shared = parse_source(
+            SourceDefinition {
+                id: Uuid::new_v4(),
+                name: "Shared".to_string(),
+                url: Url::parse("data:text/plain,shared.example").expect("shared url"),
+                kind: SourceKind::Domains,
+                enabled: true,
+                profile: "shared".to_string(),
+                verification_strictness: "balanced".to_string(),
+            },
+            "shared.example",
+        );
+        let balanced = parse_source(
+            SourceDefinition {
+                id: Uuid::new_v4(),
+                name: "Balanced".to_string(),
+                url: Url::parse("data:text/plain,balanced.example").expect("balanced url"),
+                kind: SourceKind::Domains,
+                enabled: true,
+                profile: "balanced".to_string(),
+                verification_strictness: "balanced".to_string(),
+            },
+            "balanced.example",
+        );
+
+        let catalog =
+            build_runtime_policy_catalog(&[shared, balanced], HashSet::new(), BlockMode::NullIp);
+        let balanced_policy = catalog
+            .profile_policies
+            .get("balanced")
+            .expect("balanced profile policy");
+
+        assert!(matches!(
+            balanced_policy.evaluate("shared.example").kind,
+            DecisionKind::Blocked(_)
+        ));
+        assert!(matches!(
+            balanced_policy.evaluate("balanced.example").kind,
+            DecisionKind::Blocked(_)
+        ));
     }
 
     #[test]
