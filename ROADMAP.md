@@ -184,6 +184,7 @@ Current implementation notes:
 - Manual test sends now flow through the same delivery pipeline as production alerts, so retry behavior and recent delivery history stay representative.
 - Notification analytics now call out recent success rate and the domains most often associated with failed deliveries, helping operators spot flaky destinations or payload patterns.
 - Operators can now change the notification analytics window in the control plane, making it easier to compare short-term alert delivery issues with longer recent history.
+- Operators can now tune notification analytics and recent delivery history windows independently, so a broad reliability trend view does not crowd out the most recent delivery trail.
 - Notification test sends now support custom domain/severity/device labels plus dry-run validation so operators can verify payload shape and destination setup before sending a live test.
 - Notification test presets can now be saved and reloaded from the control plane, reducing repeated manual setup for common validation scenarios.
 - Saved notification test presets can now also be deleted from the control plane, keeping the validation workflow tidy as presets evolve.

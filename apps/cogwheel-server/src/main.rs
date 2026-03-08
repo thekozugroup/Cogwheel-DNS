@@ -145,6 +145,7 @@ struct NotificationTestPreset {
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 struct DashboardQuery {
     notification_window: Option<usize>,
+    notification_history_window: Option<usize>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -648,6 +649,8 @@ async fn dashboard_summary(
     Query(query): Query<DashboardQuery>,
 ) -> Result<Json<ApiEnvelope<DashboardSummary>>, axum::http::StatusCode> {
     let notification_window = normalize_notification_window(query.notification_window);
+    let notification_history_window =
+        normalize_notification_window(query.notification_history_window);
     let sources = state
         .storage
         .list_sources()
@@ -673,9 +676,14 @@ async fn dashboard_summary(
         .recent_audit_events(5)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let notification_audit_events = state
+    let notification_analytics_audit_events = state
         .storage
         .recent_audit_events(notification_window as i64)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let notification_history_audit_events = state
+        .storage
+        .recent_audit_events(notification_history_window as i64)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     let devices = state
@@ -691,10 +699,11 @@ async fn dashboard_summary(
     let security_summary = build_security_summary(&security_events);
     let recent_security_events = security_events.into_iter().take(5).collect();
     let recent_notification_deliveries =
-        build_notification_delivery_events(&notification_audit_events);
-    let notification_health = build_notification_health_summary(&notification_audit_events);
+        build_notification_delivery_events(&notification_history_audit_events);
+    let notification_health =
+        build_notification_health_summary(&notification_analytics_audit_events);
     let notification_failure_analytics =
-        build_notification_failure_analytics(&notification_audit_events);
+        build_notification_failure_analytics(&notification_analytics_audit_events);
     let snapshot = load_service_toggle_snapshot(&state.storage)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;

@@ -86,6 +86,7 @@ export default function App() {
   const [notificationPresetName, setNotificationPresetName] = useState("");
   const [selectedNotificationPreset, setSelectedNotificationPreset] = useState("");
   const [notificationAnalyticsWindow, setNotificationAnalyticsWindow] = useState<10 | 30 | 50 | 100>(30);
+  const [notificationHistoryWindow, setNotificationHistoryWindow] = useState<10 | 30 | 50 | 100>(10);
   const [serviceSearch, setServiceSearch] = useState("");
 
   const [deviceId, setDeviceId] = useState<string | null>(null);
@@ -104,7 +105,7 @@ export default function App() {
     setError(null);
     try {
       const [dashboardData, settingsData] = await Promise.all([
-        api.dashboard(notificationAnalyticsWindow),
+        api.dashboard(notificationAnalyticsWindow, notificationHistoryWindow),
         api.settings(),
       ]);
       setDashboard(dashboardData);
@@ -114,7 +115,7 @@ export default function App() {
       setError(loadError instanceof Error ? loadError.message : "Unknown error");
       setState("error");
     }
-  }, [notificationAnalyticsWindow]);
+  }, [notificationAnalyticsWindow, notificationHistoryWindow]);
 
   useEffect(() => {
     void load();
@@ -677,14 +678,25 @@ export default function App() {
                   </Button>
                 </div>
               </div>
-              <div className="grid gap-3 sm:grid-cols-[1fr_180px]">
-                <div className="text-sm text-muted-foreground">Notification analytics window</div>
-                <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={notificationAnalyticsWindow} onChange={(event) => setNotificationAnalyticsWindow(Number.parseInt(event.target.value, 10) as 10 | 30 | 50 | 100)}>
-                  <option value="10">Last 10 events</option>
-                  <option value="30">Last 30 events</option>
-                  <option value="50">Last 50 events</option>
-                  <option value="100">Last 100 events</option>
-                </select>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="grid gap-2 text-sm text-muted-foreground">
+                  <span>Notification analytics window</span>
+                  <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm text-foreground" value={notificationAnalyticsWindow} onChange={(event) => setNotificationAnalyticsWindow(Number.parseInt(event.target.value, 10) as 10 | 30 | 50 | 100)}>
+                    <option value="10">Last 10 events</option>
+                    <option value="30">Last 30 events</option>
+                    <option value="50">Last 50 events</option>
+                    <option value="100">Last 100 events</option>
+                  </select>
+                </label>
+                <label className="grid gap-2 text-sm text-muted-foreground">
+                  <span>Delivery history window</span>
+                  <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm text-foreground" value={notificationHistoryWindow} onChange={(event) => setNotificationHistoryWindow(Number.parseInt(event.target.value, 10) as 10 | 30 | 50 | 100)}>
+                    <option value="10">Last 10 events</option>
+                    <option value="30">Last 30 events</option>
+                    <option value="50">Last 50 events</option>
+                    <option value="100">Last 100 events</option>
+                  </select>
+                </label>
               </div>
               <div className="grid gap-3 sm:grid-cols-[1fr_170px]">
                 <Input value={notificationTestDomain} onChange={(event) => setNotificationTestDomain(event.target.value)} placeholder="notification-test.cogwheel.local" />
@@ -736,7 +748,7 @@ export default function App() {
                 <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
                   <div className="text-muted-foreground">Success rate</div>
                   <div className="mt-1 font-medium">{dashboard.notification_failure_analytics.success_rate_percent.toFixed(1)}%</div>
-                  <div className="mt-1 text-xs text-muted-foreground">Based on recent delivery audit events.</div>
+                  <div className="mt-1 text-xs text-muted-foreground">Based on the last {notificationAnalyticsWindow} delivery audit events.</div>
                 </div>
                 <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
                   <div className="text-muted-foreground">Top failed domains</div>
@@ -751,10 +763,13 @@ export default function App() {
                   </div>
                 </div>
               </div>
+              <div className="space-y-2">
+                <div className="text-sm text-muted-foreground">Recent delivery history from the last {notificationHistoryWindow} delivery audit events.</div>
+              </div>
               <div className="grid gap-3">
                 {dashboard.recent_notification_deliveries.length === 0 ? (
                   <div className="rounded-2xl border border-dashed border-border/80 bg-muted/30 p-4 text-sm text-muted-foreground">
-                    No recent notification deliveries recorded yet.
+                    No recent notification deliveries recorded in the selected history window.
                   </div>
                 ) : (
                   dashboard.recent_notification_deliveries.map((delivery) => (
@@ -1093,30 +1108,6 @@ export default function App() {
       {state === "ready" ? (
         <div className="text-sm text-muted-foreground">
           {enabledBlocklists.length} enabled blocklists, {settings.devices.length} named devices, classifier threshold {settings.classifier.threshold.toFixed(2)}.
-        </div>
-      ) : null}
-    </main>
-  );
-}
-
-function Metric({ label, value, icon }: { label: string; value: string; icon: ReactNode }) {
-  return (
-    <div className="rounded-[24px] border border-border/70 bg-muted/60 p-4">
-      <div className="flex items-center gap-2 text-sm text-muted-foreground">{icon}{label}</div>
-      <div className="mt-2 font-display text-2xl font-semibold">{value}</div>
-    </div>
-  );
-}
-
-function Row({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-center justify-between gap-4 text-sm">
-      <span className="text-muted-foreground">{label}</span>
-      <span className="font-medium">{value}</span>
-    </div>
-  );
-}
-enabledBlocklists.length} enabled blocklists, {settings.devices.length} named devices, classifier threshold {settings.classifier.threshold.toFixed(2)}.
         </div>
       ) : null}
     </main>

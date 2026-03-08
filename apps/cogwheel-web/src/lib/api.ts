@@ -197,12 +197,17 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  dashboard: (notificationWindow?: number) =>
-    fetchJson<DashboardSummary>(
-      notificationWindow
-        ? `/api/v1/dashboard?notification_window=${notificationWindow}`
-        : "/api/v1/dashboard",
-    ),
+  dashboard: (notificationWindow?: number, notificationHistoryWindow?: number) => {
+    const params = new URLSearchParams();
+    if (notificationWindow) {
+      params.set("notification_window", String(notificationWindow));
+    }
+    if (notificationHistoryWindow) {
+      params.set("notification_history_window", String(notificationHistoryWindow));
+    }
+    const query = params.toString();
+    return fetchJson<DashboardSummary>(query ? `/api/v1/dashboard?${query}` : "/api/v1/dashboard");
+  },
   settings: () => fetchJson<SettingsSummary>("/api/v1/settings"),
   refreshSources: () =>
     fetchJson<{ outcome: string; notes: string[] }>("/api/v1/sources/refresh", {
