@@ -10,6 +10,7 @@ axum.workspace = true
 chrono.workspace = true
 hickory-resolver.workspace = true
 prometheus-client.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

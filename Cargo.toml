@@ -25,6 +25,7 @@ repository = "https://github.com/tachyonlabshq/Cogwheel-DNS"
 anyhow = "1.0"
 async-trait = "0.1"
 axum = { version = "0.8", features = ["macros"] }
+base64 = "0.22"
 bytes = "1.10"
 chrono = { version = "0.4", features = ["serde"] }
 config = { version = "0.15", default-features = false, features = ["toml"] }

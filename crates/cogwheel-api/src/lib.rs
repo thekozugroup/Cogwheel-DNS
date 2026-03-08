@@ -67,11 +67,25 @@ impl Default for UpstreamConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdaterConfig {
+    pub refresh_interval_secs: u64,
+}
+
+impl Default for UpdaterConfig {
+    fn default() -> Self {
+        Self {
+            refresh_interval_secs: 300,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppConfig {
     pub server: ServerConfig,
     pub storage: StorageConfig,
     pub upstream: UpstreamConfig,
+    pub updater: UpdaterConfig,
 }
 
 impl AppConfig {
@@ -100,6 +114,11 @@ impl AppConfig {
                 .filter(|item| !item.is_empty())
                 .map(ToString::to_string)
                 .collect();
+        }
+        if let Ok(value) = std::env::var("COGWHEEL_UPDATER__REFRESH_INTERVAL_SECS") {
+            config.updater.refresh_interval_secs = value
+                .parse::<u64>()
+                .map_err(|_| ApiError::InvalidEnv(value.clone()))?;
         }
 
         Ok(config)

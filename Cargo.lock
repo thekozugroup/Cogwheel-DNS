@@ -260,6 +260,7 @@ dependencies = [
 name = "cogwheel-lists"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "chrono",
  "cogwheel-policy",
  "cogwheel-services",
@@ -300,6 +301,7 @@ dependencies = [
  "cogwheel-sync",
  "hickory-resolver",
  "prometheus-client",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",

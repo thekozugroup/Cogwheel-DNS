@@ -1,7 +1,10 @@
+use base64::Engine;
 use chrono::{DateTime, Utc};
 use cogwheel_policy::{
-    BlockMode, PolicyEngine, Rule, RuleAction, RulePattern, RulesetArtifact, normalize_domain,
+    BlockMode, DecisionKind, PolicyEngine, Rule, RuleAction, RulePattern, RulesetArtifact,
+    normalize_domain,
 };
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -40,6 +43,14 @@ pub struct VerificationResult {
     pub invalid_ratio: f32,
     pub blocked_protected_domains: Vec<String>,
     pub notes: Vec<String>,
+}
+
+pub async fn fetch_and_parse_source(
+    client: &Client,
+    source: SourceDefinition,
+) -> Result<ParsedSource, reqwest::Error> {
+    let body = fetch_source_body(client, &source.url).await?;
+    Ok(parse_source(source, &body))
 }
 
 pub fn parse_source(source: SourceDefinition, body: &str) -> ParsedSource {
@@ -92,17 +103,19 @@ pub fn verify_candidate(
         invalid_lines as f32 / total_rules as f32
     };
 
-    let blocked_protected_domains = parsed
+    let probe_engine = PolicyEngine::new(RulesetArtifact::new(
+        parsed
+            .iter()
+            .flat_map(|entry| entry.rules.iter().cloned())
+            .collect(),
+        HashSet::new(),
+        BlockMode::NullIp,
+    ));
+    let blocked_protected_domains = protected_domains
         .iter()
-        .flat_map(|entry| entry.rules.iter())
-        .filter(|rule| matches!(rule.action, RuleAction::Block))
-        .filter_map(|rule| match &rule.pattern {
-            RulePattern::Exact(domain) | RulePattern::Suffix(domain)
-                if protected_domains.contains(domain) =>
-            {
-                Some(domain.clone())
-            }
-            _ => None,
+        .filter_map(|domain| match probe_engine.evaluate(domain).kind {
+            DecisionKind::Blocked(_) => Some(domain.clone()),
+            DecisionKind::Allowed => None,
         })
         .collect::<Vec<_>>();
 
@@ -140,6 +153,37 @@ pub fn build_policy_engine(
     block_mode: BlockMode,
 ) -> PolicyEngine {
     PolicyEngine::new(compile_ruleset(parsed, protected_domains, block_mode))
+}
+
+async fn fetch_source_body(client: &Client, url: &Url) -> Result<String, reqwest::Error> {
+    match url.scheme() {
+        "data" => Ok(parse_data_url(url)),
+        _ => {
+            client
+                .get(url.clone())
+                .send()
+                .await?
+                .error_for_status()?
+                .text()
+                .await
+        }
+    }
+}
+
+fn parse_data_url(url: &Url) -> String {
+    let path = url.path();
+    let Some((metadata, encoded)) = path.split_once(',') else {
+        return String::new();
+    };
+    if metadata.ends_with(";base64") {
+        return String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .unwrap_or_default(),
+        )
+        .unwrap_or_default();
+    }
+    encoded.replace("%0A", "\n").replace("%0D", "\r")
 }
 
 fn parse_domain_line(line: &str, source: &str) -> Option<Rule> {
@@ -213,5 +257,33 @@ mod tests {
         assert_eq!(parsed.rules.len(), 2);
         assert!(matches!(parsed.rules[0].pattern, RulePattern::Suffix(_)));
         assert!(matches!(parsed.rules[1].action, RuleAction::Allow));
+    }
+
+    #[test]
+    fn data_url_body_parses() {
+        let body = parse_data_url(
+            &Url::parse("data:text/plain,ads.example.com%0Atracker.example.com").unwrap(),
+        );
+        assert!(body.contains("ads.example.com"));
+        assert!(body.contains("tracker.example.com"));
+    }
+
+    #[test]
+    fn suffix_rule_can_fail_protected_domain_verification() {
+        let source = SourceDefinition {
+            id: Uuid::new_v4(),
+            name: "test".to_string(),
+            url: Url::parse("https://example.com/list.txt").unwrap(),
+            kind: SourceKind::Adblock,
+            enabled: true,
+        };
+        let parsed = parse_source(source, "||gstatic.com^");
+        let protected = HashSet::from(["connectivitycheck.gstatic.com".to_string()]);
+        let verification = verify_candidate(&[parsed], &protected);
+        assert!(!verification.passed);
+        assert_eq!(
+            verification.blocked_protected_domains,
+            vec!["connectivitycheck.gstatic.com"]
+        );
     }
 }

@@ -6,9 +6,10 @@ use cogwheel_api::{ApiEnvelope, ApiState, AppConfig, router};
 use cogwheel_classifier::ClassifierSettings;
 use cogwheel_dns_core::{DnsRuntime, DnsRuntimeConfig};
 use cogwheel_lists::{
-    SourceDefinition, SourceKind, build_policy_engine, parse_source, verify_candidate,
+    SourceDefinition, SourceKind, build_policy_engine, fetch_and_parse_source, parse_source,
+    verify_candidate,
 };
-use cogwheel_policy::{BlockMode, PolicyEngine};
+use cogwheel_policy::{BlockMode, DecisionKind, PolicyEngine};
 use cogwheel_storage::{AuditEvent, RulesetRecord, SourceRecord, Storage};
 use hickory_resolver::TokioResolver;
 use hickory_resolver::config::{
@@ -20,6 +21,8 @@ use prometheus_client::metrics::counter::Counter;
 use prometheus_client::registry::Registry;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::interval;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 use url::Url;
@@ -30,6 +33,7 @@ struct ServerState {
     api_state: ApiState,
     storage: Arc<Storage>,
     dns_runtime: Arc<DnsRuntime>,
+    protected_domains: Arc<HashSet<String>>,
 }
 
 #[derive(serde::Serialize)]
@@ -38,6 +42,13 @@ struct RulesetSummary {
     hash: String,
     status: String,
     created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(serde::Serialize)]
+struct RefreshResponse {
+    outcome: String,
+    ruleset: Option<RulesetSummary>,
+    notes: Vec<String>,
 }
 
 #[tokio::main]
@@ -52,9 +63,9 @@ async fn main() -> Result<()> {
     let storage = Arc::new(Storage::connect(&config.storage.database_url).await?);
 
     let default_source = SourceRecord {
-        id: Uuid::new_v4(),
+        id: Uuid::from_u128(1),
         name: "baseline".to_string(),
-        url: "https://example.com/baseline.txt".to_string(),
+        url: "data:text/plain,ads.example.com%0Atracker.example.com".to_string(),
         kind: "domains".to_string(),
         enabled: true,
     };
@@ -71,7 +82,7 @@ async fn main() -> Result<()> {
         "ads.example.com\ntracker.example.com",
     );
 
-    let protected_domains = HashSet::from(["connectivitycheck.gstatic.com".to_string()]);
+    let protected_domains = Arc::new(HashSet::from(["connectivitycheck.gstatic.com".to_string()]));
     let verification = verify_candidate(std::slice::from_ref(&parsed), &protected_domains);
     anyhow::ensure!(
         verification.passed,
@@ -81,7 +92,7 @@ async fn main() -> Result<()> {
 
     let policy = Arc::new(build_policy_engine(
         vec![parsed],
-        protected_domains,
+        protected_domains.as_ref().clone(),
         BlockMode::NullIp,
     ));
     storage
@@ -138,7 +149,22 @@ async fn main() -> Result<()> {
         api_state: ApiState { registry },
         storage,
         dns_runtime,
+        protected_domains,
     };
+    let refresh_handle = tokio::spawn({
+        let state = app_state.clone();
+        let refresh_every = config.updater.refresh_interval_secs.max(30);
+        async move {
+            let mut ticker = interval(Duration::from_secs(refresh_every));
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                if let Err(error) = refresh_sources_once(&state, "scheduled").await {
+                    tracing::warn!(%error, "scheduled source refresh failed");
+                }
+            }
+        }
+    });
     let app = router(app_state.clone())
         .merge(admin_router())
         .with_state(app_state)
@@ -150,6 +176,9 @@ async fn main() -> Result<()> {
     tokio::select! {
         result = dns_handle => {
             result.context("dns task join failure")??;
+        }
+        result = refresh_handle => {
+            result.context("refresh task join failure")?;
         }
         result = axum::serve(listener, app) => {
             result.context("http server failure")?;
@@ -189,6 +218,7 @@ fn build_resolver(servers: &[String]) -> Result<TokioResolver> {
 fn admin_router() -> Router<ServerState> {
     Router::new()
         .route("/api/v1/sources", get(list_sources))
+        .route("/api/v1/sources/refresh", post(refresh_sources))
         .route("/api/v1/rulesets", get(list_rulesets))
         .route("/api/v1/rulesets/rollback", post(rollback_ruleset))
         .route("/api/v1/audit-events", get(list_audit_events))
@@ -277,4 +307,193 @@ async fn list_audit_events(
         .await
         .map(|data| Json(ApiEnvelope { data }))
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn refresh_sources(
+    State(state): State<ServerState>,
+) -> Result<Json<ApiEnvelope<RefreshResponse>>, axum::http::StatusCode> {
+    refresh_sources_once(&state, "manual")
+        .await
+        .map(|data| Json(ApiEnvelope { data }))
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn refresh_sources_once(state: &ServerState, reason: &str) -> Result<RefreshResponse> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .context("build refresh http client")?;
+
+    let enabled_sources = state
+        .storage
+        .list_sources()
+        .await?
+        .into_iter()
+        .filter(|source| source.enabled)
+        .map(source_definition_from_record)
+        .collect::<Result<Vec<_>>>()?;
+
+    anyhow::ensure!(!enabled_sources.is_empty(), "no enabled sources configured");
+
+    let mut parsed_sources = Vec::with_capacity(enabled_sources.len());
+    for source in enabled_sources {
+        parsed_sources.push(fetch_and_parse_source(&client, source).await?);
+    }
+
+    let verification = verify_candidate(&parsed_sources, &state.protected_domains);
+    if !verification.passed {
+        state
+            .storage
+            .record_audit_event(&AuditEvent {
+                id: Uuid::new_v4(),
+                event_type: "ruleset.refresh_rejected".to_string(),
+                payload: serde_json::json!({
+                    "reason": reason,
+                    "notes": verification.notes,
+                    "blocked_protected_domains": verification.blocked_protected_domains,
+                    "invalid_ratio": verification.invalid_ratio,
+                })
+                .to_string(),
+                created_at: chrono::Utc::now(),
+            })
+            .await?;
+
+        return Ok(RefreshResponse {
+            outcome: "rejected".to_string(),
+            ruleset: None,
+            notes: verification.notes,
+        });
+    }
+
+    let policy = Arc::new(build_policy_engine(
+        parsed_sources,
+        state.protected_domains.as_ref().clone(),
+        BlockMode::NullIp,
+    ));
+
+    state
+        .storage
+        .record_ruleset(&RulesetRecord {
+            id: policy.artifact().id,
+            hash: policy.artifact().hash.clone(),
+            status: "candidate".to_string(),
+            created_at: policy.artifact().created_at,
+            artifact_json: serde_json::to_string(policy.artifact())?,
+        })
+        .await?;
+    state.storage.activate_ruleset(policy.artifact().id).await?;
+    state.dns_runtime.replace_policy(policy.clone());
+
+    if let Some(notes) = post_activation_regressions(policy.as_ref(), &state.protected_domains) {
+        let Some(artifact) = state.storage.rollback_to_previous_ruleset().await? else {
+            anyhow::bail!("regression detected but no previous ruleset available for rollback");
+        };
+        state
+            .dns_runtime
+            .replace_policy(Arc::new(PolicyEngine::new(artifact.clone())));
+        state
+            .storage
+            .record_audit_event(&AuditEvent {
+                id: Uuid::new_v4(),
+                event_type: "ruleset.auto_rollback".to_string(),
+                payload: serde_json::json!({
+                    "reason": reason,
+                    "rolled_back_to": artifact.id,
+                    "notes": notes,
+                })
+                .to_string(),
+                created_at: chrono::Utc::now(),
+            })
+            .await?;
+
+        return Ok(RefreshResponse {
+            outcome: "rolled_back".to_string(),
+            ruleset: Some(to_ruleset_summary(
+                &artifact.id,
+                &artifact.hash,
+                "active",
+                artifact.created_at,
+            )),
+            notes,
+        });
+    }
+
+    state
+        .storage
+        .record_audit_event(&AuditEvent {
+            id: Uuid::new_v4(),
+            event_type: "ruleset.activated".to_string(),
+            payload: serde_json::json!({
+                "ruleset_id": policy.artifact().id,
+                "hash": policy.artifact().hash,
+                "reason": reason,
+            })
+            .to_string(),
+            created_at: chrono::Utc::now(),
+        })
+        .await?;
+
+    Ok(RefreshResponse {
+        outcome: "activated".to_string(),
+        ruleset: Some(to_ruleset_summary(
+            &policy.artifact().id,
+            &policy.artifact().hash,
+            "active",
+            policy.artifact().created_at,
+        )),
+        notes: vec![format!(
+            "refreshed {} source(s)",
+            state.storage.list_sources().await?.len()
+        )],
+    })
+}
+
+fn source_definition_from_record(record: SourceRecord) -> Result<SourceDefinition> {
+    let kind = match record.kind.as_str() {
+        "domains" => SourceKind::Domains,
+        "hosts" => SourceKind::Hosts,
+        "adblock" => SourceKind::Adblock,
+        other => anyhow::bail!("unsupported source kind: {other}"),
+    };
+
+    Ok(SourceDefinition {
+        id: record.id,
+        name: record.name,
+        url: Url::parse(&record.url)?,
+        kind,
+        enabled: record.enabled,
+    })
+}
+
+fn post_activation_regressions(
+    policy: &PolicyEngine,
+    protected_domains: &HashSet<String>,
+) -> Option<Vec<String>> {
+    let blocked = protected_domains
+        .iter()
+        .filter_map(|domain| match policy.evaluate(domain).kind {
+            DecisionKind::Blocked(_) => Some(format!("protected domain blocked: {domain}")),
+            DecisionKind::Allowed => None,
+        })
+        .collect::<Vec<_>>();
+
+    if blocked.is_empty() {
+        None
+    } else {
+        Some(blocked)
+    }
+}
+
+fn to_ruleset_summary(
+    id: &Uuid,
+    hash: &str,
+    status: &str,
+    created_at: chrono::DateTime<chrono::Utc>,
+) -> RulesetSummary {
+    RulesetSummary {
+        id: *id,
+        hash: hash.to_string(),
+        status: status.to_string(),
+        created_at,
+    }
 }

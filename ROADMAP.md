@@ -118,19 +118,19 @@ Exit criteria:
 
 Goal: Make list updates safe, auditable, and user-invisible.
 
-- [ ] Implement source registry and scheduler.
+- [x] Implement source registry and scheduler.
 - [x] Parse domains-only, hosts-style, and Adblock-style inputs into canonical rules.
 - [x] Design service-bundle manifest format for optional common-service toggles (`service_id`, display name, category, allow rules, block rules, exceptions, risk notes).
 - [ ] Support layered compilation so service toggles merge cleanly with core blocklists, allowlists, and user overrides.
 - [x] Add verification gates (syntax, invalid ratio, volume anomaly, protected domain collisions).
 - [x] Build immutable ruleset artifacts with atomic active-pointer swap.
-- [ ] Add automatic rollback on post-update breakage or SLO regression.
+- [x] Add automatic rollback on post-update breakage or SLO regression.
 - [x] Add update status UI/API surfaces with plain-language explanations.
 
 Current implementation notes:
 
-- Bootstrap source registry, ruleset recording, audit events, list/ruleset/audit APIs, and manual rollback endpoint are in place.
-- Remaining Phase 3 gaps are scheduler automation, service-toggle layered compilation, and automatic rollback triggered by detected regressions.
+- Bootstrap source registry, scheduled/manual source refresh, ruleset recording, audit events, list/ruleset/audit APIs, and rollback flows are in place.
+- Remaining Phase 3 gaps are service-toggle layered compilation and richer regression/SLO signals beyond protected-domain rollback guards.
 
 Exit criteria:
 
