@@ -130,7 +130,7 @@ Goal: Make list updates safe, auditable, and user-invisible.
 Current implementation notes:
 
 - Bootstrap source registry, scheduled/manual source refresh, ruleset recording, audit events, list/ruleset/audit APIs, and rollback flows are in place.
-- Remaining Phase 3 gaps are richer regression/SLO signals beyond protected-domain rollback guards, though runtime fallback and CNAME-uncloaking counters are now exposed for observability.
+- Remaining Phase 3 gaps are richer long-window regression/SLO signals beyond the current runtime guard probes and protected-domain rollback guards, though fallback/CNAME counters and runtime health APIs are now exposed for observability.
 
 Exit criteria:
 

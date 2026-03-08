@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use axum::extract::{FromRef, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use cogwheel_api::{ApiEnvelope, ApiState, AppConfig, router};
+use cogwheel_api::{ApiEnvelope, ApiState, AppConfig, RuntimeGuardConfig, router};
 use cogwheel_classifier::ClassifierSettings;
 use cogwheel_dns_core::{DnsRuntime, DnsRuntimeConfig, DnsRuntimeSnapshot};
 use cogwheel_lists::{
@@ -20,6 +20,7 @@ use hickory_resolver::config::{
     NameServerConfig, NameServerConfigGroup, ResolverConfig, ResolverOpts,
 };
 use hickory_resolver::name_server::TokioConnectionProvider;
+use hickory_resolver::proto::rr::RecordType;
 use hickory_resolver::proto::xfer::Protocol;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::registry::Registry;
@@ -38,6 +39,7 @@ struct ServerState {
     storage: Arc<Storage>,
     dns_runtime: Arc<DnsRuntime>,
     protected_domains: Arc<HashSet<String>>,
+    runtime_guard: RuntimeGuardConfig,
 }
 
 #[derive(serde::Serialize)]
@@ -52,6 +54,19 @@ struct RulesetSummary {
 struct RefreshResponse {
     outcome: String,
     ruleset: Option<RulesetSummary>,
+    notes: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+struct RuntimeHealthResponse {
+    snapshot: DnsRuntimeSnapshot,
+    degraded: bool,
+    notes: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeRegressionReport {
+    degraded: bool,
     notes: Vec<String>,
 }
 
@@ -166,6 +181,7 @@ async fn main() -> Result<()> {
         storage,
         dns_runtime,
         protected_domains,
+        runtime_guard: config.runtime_guard,
     };
     let refresh_handle = tokio::spawn({
         let state = app_state.clone();
@@ -238,6 +254,7 @@ fn admin_router() -> Router<ServerState> {
         .route("/api/v1/services", get(list_services))
         .route("/api/v1/services/toggles", post(update_service_toggle))
         .route("/api/v1/runtime", get(runtime_snapshot))
+        .route("/api/v1/runtime/health", get(runtime_health))
         .route("/api/v1/rulesets", get(list_rulesets))
         .route("/api/v1/rulesets/rollback", post(rollback_ruleset))
         .route("/api/v1/audit-events", get(list_audit_events))
@@ -333,6 +350,31 @@ async fn runtime_snapshot(
 ) -> Result<Json<ApiEnvelope<DnsRuntimeSnapshot>>, axum::http::StatusCode> {
     Ok(Json(ApiEnvelope {
         data: state.dns_runtime.snapshot(),
+    }))
+}
+
+async fn runtime_health(
+    State(state): State<ServerState>,
+) -> Result<Json<ApiEnvelope<RuntimeHealthResponse>>, axum::http::StatusCode> {
+    let snapshot = state.dns_runtime.snapshot();
+    let report = evaluate_runtime_regressions(
+        &DnsRuntimeSnapshot {
+            upstream_failures_total: 0,
+            fallback_served_total: 0,
+            cache_hits_total: 0,
+            cname_uncloaks_total: 0,
+            cname_blocks_total: 0,
+        },
+        &snapshot,
+        &state.runtime_guard,
+    );
+
+    Ok(Json(ApiEnvelope {
+        data: RuntimeHealthResponse {
+            snapshot,
+            degraded: report.degraded,
+            notes: report.notes,
+        },
     }))
 }
 
@@ -479,10 +521,18 @@ async fn refresh_sources_once(state: &ServerState, reason: &str) -> Result<Refre
             artifact_json: serde_json::to_string(policy.artifact())?,
         })
         .await?;
+    let runtime_before = state.dns_runtime.snapshot();
     state.storage.activate_ruleset(policy.artifact().id).await?;
     state.dns_runtime.replace_policy(policy.clone());
 
-    if let Some(notes) = post_activation_regressions(policy.as_ref(), &state.protected_domains) {
+    let mut regression_notes =
+        post_activation_regressions(policy.as_ref(), &state.protected_domains).unwrap_or_default();
+    let runtime_report = run_runtime_guard_probes(state, &runtime_before).await;
+    if runtime_report.degraded {
+        regression_notes.extend(runtime_report.notes);
+    }
+
+    if !regression_notes.is_empty() {
         let Some(artifact) = state.storage.rollback_to_previous_ruleset().await? else {
             anyhow::bail!("regression detected but no previous ruleset available for rollback");
         };
@@ -497,7 +547,7 @@ async fn refresh_sources_once(state: &ServerState, reason: &str) -> Result<Refre
                 payload: serde_json::json!({
                     "reason": reason,
                     "rolled_back_to": artifact.id,
-                    "notes": notes,
+                    "notes": regression_notes,
                 })
                 .to_string(),
                 created_at: chrono::Utc::now(),
@@ -512,7 +562,7 @@ async fn refresh_sources_once(state: &ServerState, reason: &str) -> Result<Refre
                 "active",
                 artifact.created_at,
             )),
-            notes,
+            notes: regression_notes,
         });
     }
 
@@ -566,6 +616,62 @@ async fn persist_service_toggle_snapshot(
     Ok(())
 }
 
+async fn run_runtime_guard_probes(
+    state: &ServerState,
+    before: &DnsRuntimeSnapshot,
+) -> RuntimeRegressionReport {
+    let mut notes = Vec::new();
+    for domain in &state.runtime_guard.probe_domains {
+        if let Err(error) = state.dns_runtime.probe_domain(domain, RecordType::A).await {
+            notes.push(format!("runtime probe failed for {domain}: {error}"));
+        }
+    }
+
+    let after = state.dns_runtime.snapshot();
+    let mut report = evaluate_runtime_regressions(before, &after, &state.runtime_guard);
+    report.notes.extend(notes);
+    if report
+        .notes
+        .iter()
+        .any(|note| note.starts_with("runtime probe failed"))
+    {
+        report.degraded = true;
+    }
+    report
+}
+
+fn evaluate_runtime_regressions(
+    before: &DnsRuntimeSnapshot,
+    after: &DnsRuntimeSnapshot,
+    guard: &RuntimeGuardConfig,
+) -> RuntimeRegressionReport {
+    let upstream_failures_delta = after
+        .upstream_failures_total
+        .saturating_sub(before.upstream_failures_total);
+    let fallback_served_delta = after
+        .fallback_served_total
+        .saturating_sub(before.fallback_served_total);
+
+    let mut notes = Vec::new();
+    if upstream_failures_delta > guard.max_upstream_failures_delta {
+        notes.push(format!(
+            "upstream failures delta {upstream_failures_delta} exceeds threshold {}",
+            guard.max_upstream_failures_delta
+        ));
+    }
+    if fallback_served_delta > guard.max_fallback_served_delta {
+        notes.push(format!(
+            "fallback served delta {fallback_served_delta} exceeds threshold {}",
+            guard.max_fallback_served_delta
+        ));
+    }
+
+    RuntimeRegressionReport {
+        degraded: !notes.is_empty(),
+        notes,
+    }
+}
+
 fn source_definition_from_record(record: SourceRecord) -> Result<SourceDefinition> {
     let kind = match record.kind.as_str() {
         "domains" => SourceKind::Domains,
@@ -613,5 +719,60 @@ fn to_ruleset_summary(
         hash: hash.to_string(),
         status: status.to_string(),
         created_at,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_regression_thresholds_trigger_degraded_state() {
+        let before = DnsRuntimeSnapshot {
+            upstream_failures_total: 1,
+            fallback_served_total: 0,
+            cache_hits_total: 0,
+            cname_uncloaks_total: 0,
+            cname_blocks_total: 0,
+        };
+        let after = DnsRuntimeSnapshot {
+            upstream_failures_total: 3,
+            fallback_served_total: 1,
+            cache_hits_total: 0,
+            cname_uncloaks_total: 0,
+            cname_blocks_total: 0,
+        };
+        let guard = RuntimeGuardConfig {
+            probe_domains: vec!["example.com".to_string()],
+            max_upstream_failures_delta: 0,
+            max_fallback_served_delta: 0,
+        };
+
+        let report = evaluate_runtime_regressions(&before, &after, &guard);
+        assert!(report.degraded);
+        assert_eq!(report.notes.len(), 2);
+    }
+
+    #[test]
+    fn runtime_regression_thresholds_allow_healthy_state() {
+        let before = DnsRuntimeSnapshot {
+            upstream_failures_total: 1,
+            fallback_served_total: 1,
+            cache_hits_total: 0,
+            cname_uncloaks_total: 0,
+            cname_blocks_total: 0,
+        };
+        let after = DnsRuntimeSnapshot {
+            upstream_failures_total: 1,
+            fallback_served_total: 1,
+            cache_hits_total: 2,
+            cname_uncloaks_total: 1,
+            cname_blocks_total: 0,
+        };
+        let guard = RuntimeGuardConfig::default();
+
+        let report = evaluate_runtime_regressions(&before, &after, &guard);
+        assert!(!report.degraded);
+        assert!(report.notes.is_empty());
     }
 }

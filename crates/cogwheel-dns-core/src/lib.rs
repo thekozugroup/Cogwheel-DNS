@@ -2,9 +2,9 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use cogwheel_classifier::{Classification, ClassifierSettings, classify_domain};
 use cogwheel_policy::{BlockMode, DecisionKind, PolicyEngine, RuleAction, normalize_domain};
-use hickory_proto::op::{Message, MessageType, ResponseCode};
+use hickory_proto::op::{Message, MessageType, Query, ResponseCode};
 use hickory_proto::rr::rdata::{A, AAAA};
-use hickory_proto::rr::{RData, Record, RecordType};
+use hickory_proto::rr::{Name, RData, Record, RecordType};
 use hickory_resolver::TokioResolver;
 use moka::future::Cache;
 use serde::Serialize;
@@ -93,6 +93,16 @@ impl DnsRuntime {
             cname_uncloaks_total: self.stats.cname_uncloaks_total.load(Ordering::Relaxed),
             cname_blocks_total: self.stats.cname_blocks_total.load(Ordering::Relaxed),
         }
+    }
+
+    pub async fn probe_domain(
+        &self,
+        domain: &str,
+        record_type: RecordType,
+    ) -> Result<ResponseCode> {
+        let request = build_probe_request(domain, record_type)?;
+        let response = self.handle_wire_query(&request.to_vec()?).await?;
+        Ok(response.response_code())
     }
 
     pub async fn serve(self: Arc<Self>, config: DnsRuntimeConfig) -> Result<()> {
@@ -298,6 +308,15 @@ fn extract_cname_target(record: &Record) -> Option<String> {
     }
 }
 
+fn build_probe_request(domain: &str, record_type: RecordType) -> Result<Message> {
+    let mut message = Message::new();
+    message.set_id(0);
+    message.set_message_type(MessageType::Query);
+    message.set_recursion_desired(true);
+    message.add_query(Query::query(Name::from_ascii(domain)?, record_type));
+    Ok(message)
+}
+
 fn build_base_response(request: &Message, code: ResponseCode) -> Message {
     let mut response = Message::new();
     response.set_id(request.id());
@@ -390,5 +409,13 @@ mod tests {
             extract_cname_target(&record),
             Some("tracker.example.com".to_string())
         );
+    }
+
+    #[test]
+    fn build_probe_request_sets_expected_question() {
+        let request = build_probe_request("example.com", RecordType::A).expect("probe request");
+        assert_eq!(request.message_type(), MessageType::Query);
+        assert_eq!(request.queries().len(), 1);
+        assert_eq!(request.queries()[0].query_type(), RecordType::A);
     }
 }

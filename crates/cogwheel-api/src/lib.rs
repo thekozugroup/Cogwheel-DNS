@@ -80,12 +80,33 @@ impl Default for UpdaterConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeGuardConfig {
+    pub probe_domains: Vec<String>,
+    pub max_upstream_failures_delta: u64,
+    pub max_fallback_served_delta: u64,
+}
+
+impl Default for RuntimeGuardConfig {
+    fn default() -> Self {
+        Self {
+            probe_domains: vec![
+                "example.com".to_string(),
+                "connectivitycheck.gstatic.com".to_string(),
+            ],
+            max_upstream_failures_delta: 0,
+            max_fallback_served_delta: 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppConfig {
     pub server: ServerConfig,
     pub storage: StorageConfig,
     pub upstream: UpstreamConfig,
     pub updater: UpdaterConfig,
+    pub runtime_guard: RuntimeGuardConfig,
 }
 
 impl AppConfig {
@@ -117,6 +138,24 @@ impl AppConfig {
         }
         if let Ok(value) = std::env::var("COGWHEEL_UPDATER__REFRESH_INTERVAL_SECS") {
             config.updater.refresh_interval_secs = value
+                .parse::<u64>()
+                .map_err(|_| ApiError::InvalidEnv(value.clone()))?;
+        }
+        if let Ok(value) = std::env::var("COGWHEEL_RUNTIME_GUARD__PROBE_DOMAINS") {
+            config.runtime_guard.probe_domains = value
+                .split(',')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(ToString::to_string)
+                .collect();
+        }
+        if let Ok(value) = std::env::var("COGWHEEL_RUNTIME_GUARD__MAX_UPSTREAM_FAILURES_DELTA") {
+            config.runtime_guard.max_upstream_failures_delta = value
+                .parse::<u64>()
+                .map_err(|_| ApiError::InvalidEnv(value.clone()))?;
+        }
+        if let Ok(value) = std::env::var("COGWHEEL_RUNTIME_GUARD__MAX_FALLBACK_SERVED_DELTA") {
+            config.runtime_guard.max_fallback_served_delta = value
                 .parse::<u64>()
                 .map_err(|_| ApiError::InvalidEnv(value.clone()))?;
         }
