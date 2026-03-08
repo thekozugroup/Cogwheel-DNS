@@ -118,6 +118,16 @@ export type NotificationHealthSummary = {
   last_failure_at: string | null;
 };
 
+export type NotificationFailureDomain = {
+  domain: string;
+  failure_count: number;
+};
+
+export type NotificationFailureAnalytics = {
+  success_rate_percent: number;
+  top_failed_domains: NotificationFailureDomain[];
+};
+
 export type NotificationTestResult = {
   outcome: string;
   target: string;
@@ -135,6 +145,7 @@ export type DashboardSummary = {
   recent_security_events: SecurityEventRecord[];
   recent_notification_deliveries: NotificationDeliveryEvent[];
   notification_health: NotificationHealthSummary;
+  notification_failure_analytics: NotificationFailureAnalytics;
   security_summary: SecuritySummary;
 };
 

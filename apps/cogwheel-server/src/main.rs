@@ -92,6 +92,7 @@ struct DashboardSummary {
     recent_security_events: Vec<SecurityEventRecord>,
     recent_notification_deliveries: Vec<NotificationDeliveryEvent>,
     notification_health: NotificationHealthSummary,
+    notification_failure_analytics: NotificationFailureAnalytics,
     security_summary: SecuritySummary,
 }
 
@@ -112,6 +113,18 @@ struct NotificationHealthSummary {
     failed_count: usize,
     last_delivery_at: Option<chrono::DateTime<chrono::Utc>>,
     last_failure_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct NotificationFailureAnalytics {
+    success_rate_percent: f32,
+    top_failed_domains: Vec<NotificationFailureDomain>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct NotificationFailureDomain {
+    domain: String,
+    failure_count: usize,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -646,6 +659,8 @@ async fn dashboard_summary(
     let recent_notification_deliveries =
         build_notification_delivery_events(&notification_audit_events);
     let notification_health = build_notification_health_summary(&notification_audit_events);
+    let notification_failure_analytics =
+        build_notification_failure_analytics(&notification_audit_events);
     let snapshot = load_service_toggle_snapshot(&state.storage)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -671,6 +686,7 @@ async fn dashboard_summary(
             recent_security_events,
             recent_notification_deliveries,
             notification_health,
+            notification_failure_analytics,
             security_summary,
         },
     }))
@@ -2000,6 +2016,57 @@ fn build_notification_health_summary(audit_events: &[AuditEvent]) -> Notificatio
     }
 }
 
+fn build_notification_failure_analytics(
+    audit_events: &[AuditEvent],
+) -> NotificationFailureAnalytics {
+    let mut delivered_count = 0usize;
+    let mut failed_count = 0usize;
+    let mut failed_domains = HashMap::<String, usize>::new();
+
+    for event in audit_events {
+        match event.event_type.as_str() {
+            "security.alert_delivery_succeeded" => delivered_count += 1,
+            "security.alert_delivery_failed" => {
+                failed_count += 1;
+                if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload) {
+                    if let Some(domain) = payload.get("domain").and_then(serde_json::Value::as_str)
+                    {
+                        *failed_domains.entry(domain.to_string()).or_insert(0) += 1;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let total = delivered_count + failed_count;
+    let success_rate_percent = if total == 0 {
+        100.0
+    } else {
+        ((delivered_count as f32 / total as f32) * 1000.0).round() / 10.0
+    };
+
+    let mut top_failed_domains = failed_domains
+        .into_iter()
+        .map(|(domain, failure_count)| NotificationFailureDomain {
+            domain,
+            failure_count,
+        })
+        .collect::<Vec<_>>();
+    top_failed_domains.sort_by(|left, right| {
+        right
+            .failure_count
+            .cmp(&left.failure_count)
+            .then_with(|| left.domain.cmp(&right.domain))
+    });
+    top_failed_domains.truncate(3);
+
+    NotificationFailureAnalytics {
+        success_rate_percent,
+        top_failed_domains,
+    }
+}
+
 fn normalize_notification_severity(severity: &str) -> Option<String> {
     match severity.trim().to_ascii_lowercase().as_str() {
         "medium" => Some("medium".to_string()),
@@ -2581,6 +2648,35 @@ mod tests {
             summary.last_failure_at,
             Some(now + chrono::Duration::seconds(5))
         );
+    }
+
+    #[test]
+    fn build_notification_failure_analytics_tracks_failed_domains() {
+        let analytics = build_notification_failure_analytics(&[
+            AuditEvent {
+                id: Uuid::new_v4(),
+                event_type: "security.alert_delivery_succeeded".to_string(),
+                payload: serde_json::json!({ "domain": "ok.example" }).to_string(),
+                created_at: Utc::now(),
+            },
+            AuditEvent {
+                id: Uuid::new_v4(),
+                event_type: "security.alert_delivery_failed".to_string(),
+                payload: serde_json::json!({ "domain": "fail.example" }).to_string(),
+                created_at: Utc::now(),
+            },
+            AuditEvent {
+                id: Uuid::new_v4(),
+                event_type: "security.alert_delivery_failed".to_string(),
+                payload: serde_json::json!({ "domain": "fail.example" }).to_string(),
+                created_at: Utc::now(),
+            },
+        ]);
+
+        assert_eq!(analytics.success_rate_percent, 33.3);
+        assert_eq!(analytics.top_failed_domains.len(), 1);
+        assert_eq!(analytics.top_failed_domains[0].domain, "fail.example");
+        assert_eq!(analytics.top_failed_domains[0].failure_count, 2);
     }
 
     #[test]

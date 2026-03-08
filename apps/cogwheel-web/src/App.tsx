@@ -37,6 +37,10 @@ const emptyDashboard: DashboardSummary = {
     last_delivery_at: null,
     last_failure_at: null,
   },
+  notification_failure_analytics: {
+    success_rate_percent: 100,
+    top_failed_domains: [],
+  },
   security_summary: {
     medium_count: 0,
     high_count: 0,
@@ -585,6 +589,25 @@ export default function App() {
                   <div className="mt-1 font-medium">{dashboard.notification_health.failed_count}</div>
                   <div className="mt-1 text-xs text-muted-foreground">
                     Last failure: {dashboard.notification_health.last_failure_at ? new Date(dashboard.notification_health.last_failure_at).toLocaleString() : "none yet"}
+                  </div>
+                </div>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
+                  <div className="text-muted-foreground">Success rate</div>
+                  <div className="mt-1 font-medium">{dashboard.notification_failure_analytics.success_rate_percent.toFixed(1)}%</div>
+                  <div className="mt-1 text-xs text-muted-foreground">Based on recent delivery audit events.</div>
+                </div>
+                <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
+                  <div className="text-muted-foreground">Top failed domains</div>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {dashboard.notification_failure_analytics.top_failed_domains.length === 0 ? (
+                      <span className="text-xs text-muted-foreground">No failed domains in the recent window.</span>
+                    ) : (
+                      dashboard.notification_failure_analytics.top_failed_domains.map((domain) => (
+                        <Badge key={domain.domain}>{domain.domain} x{domain.failure_count}</Badge>
+                      ))
+                    )}
                   </div>
                 </div>
               </div>
