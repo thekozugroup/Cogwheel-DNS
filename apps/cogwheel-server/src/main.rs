@@ -28,8 +28,10 @@ use hickory_resolver::proto::rr::RecordType;
 use hickory_resolver::proto::xfer::Protocol;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::registry::Registry;
+use reqwest::Client;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::time::Duration;
 use tokio::time::interval;
 use tower_http::trace::TraceLayer;
@@ -42,6 +44,8 @@ struct ServerState {
     api_state: ApiState,
     storage: Arc<Storage>,
     dns_runtime: Arc<DnsRuntime>,
+    http_client: Client,
+    notification_settings: Arc<RwLock<NotificationSettings>>,
     protected_domains: Arc<HashSet<String>>,
     runtime_guard: RuntimeGuardConfig,
 }
@@ -110,7 +114,22 @@ struct SettingsSummary {
     devices: Vec<DeviceRecord>,
     services: Vec<ServiceToggleView>,
     classifier: ClassifierSettings,
+    notifications: NotificationSettings,
     runtime_guard: RuntimeGuardConfig,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct NotificationSettings {
+    enabled: bool,
+    webhook_url: Option<String>,
+    min_severity: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct UpdateNotificationSettingsRequest {
+    enabled: bool,
+    webhook_url: Option<String>,
+    min_severity: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -301,13 +320,28 @@ async fn main() -> Result<()> {
 
     let resolver = build_resolver(&config.upstream.servers)?;
     let classifier_settings = load_classifier_settings(&storage).await?;
+    let notification_settings = Arc::new(RwLock::new(load_notification_settings(&storage).await?));
+    let http_client = Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .context("build notification client")?;
     let dns_runtime = Arc::new(DnsRuntime::new(resolver, policy, classifier_settings));
     dns_runtime.set_classification_observer(Arc::new({
         let storage = storage.clone();
+        let http_client = http_client.clone();
+        let notification_settings = notification_settings.clone();
         move |event| {
             let storage = storage.clone();
+            let http_client = http_client.clone();
+            let notification_settings = notification_settings.clone();
             tokio::spawn(async move {
-                if let Err(error) = record_security_event_from_classification(storage, event).await
+                if let Err(error) = record_security_event_from_classification(
+                    storage,
+                    http_client,
+                    notification_settings,
+                    event,
+                )
+                .await
                 {
                     tracing::warn!(%error, "failed to record security event");
                 }
@@ -328,6 +362,8 @@ async fn main() -> Result<()> {
         api_state: ApiState { registry },
         storage,
         dns_runtime,
+        http_client,
+        notification_settings,
         protected_domains,
         runtime_guard: config.runtime_guard,
     };
@@ -427,6 +463,10 @@ fn admin_router() -> Router<ServerState> {
         .route(
             "/api/v1/settings/classifier",
             post(update_classifier_settings),
+        )
+        .route(
+            "/api/v1/settings/notifications",
+            post(update_notification_settings),
         )
         .route("/api/v1/runtime", get(runtime_snapshot))
         .route("/api/v1/runtime/health", get(runtime_health))
@@ -605,6 +645,11 @@ async fn settings_summary(
             devices,
             services,
             classifier: state.dns_runtime.classifier_settings(),
+            notifications: state
+                .notification_settings
+                .read()
+                .expect("notification settings lock poisoned")
+                .clone(),
             runtime_guard: state.runtime_guard.clone(),
         },
     }))
@@ -779,6 +824,40 @@ async fn update_classifier_settings(
         .record_audit_event(&AuditEvent {
             id: Uuid::new_v4(),
             event_type: "classifier-settings.updated".to_string(),
+            payload: serde_json::to_string(&settings)
+                .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?,
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(ApiEnvelope { data: settings }))
+}
+
+async fn update_notification_settings(
+    State(state): State<ServerState>,
+    Json(request): Json<UpdateNotificationSettingsRequest>,
+) -> Result<Json<ApiEnvelope<NotificationSettings>>, axum::http::StatusCode> {
+    let settings = NotificationSettings {
+        enabled: request.enabled,
+        webhook_url: normalize_webhook_url(request.webhook_url.as_deref())
+            .ok_or(axum::http::StatusCode::BAD_REQUEST)?,
+        min_severity: normalize_notification_severity(&request.min_severity)
+            .ok_or(axum::http::StatusCode::BAD_REQUEST)?,
+    };
+
+    persist_notification_settings(&state.storage, &settings)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    *state
+        .notification_settings
+        .write()
+        .expect("notification settings lock poisoned") = settings.clone();
+    state
+        .storage
+        .record_audit_event(&AuditEvent {
+            id: Uuid::new_v4(),
+            event_type: "notification-settings.updated".to_string(),
             payload: serde_json::to_string(&settings)
                 .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?,
             created_at: chrono::Utc::now(),
@@ -1156,6 +1235,23 @@ async fn load_classifier_settings(storage: &Storage) -> Result<ClassifierSetting
     Ok(serde_json::from_str(&value).unwrap_or_default())
 }
 
+async fn load_notification_settings(storage: &Storage) -> Result<NotificationSettings> {
+    let Some(value) = storage.get_setting("notification_settings").await? else {
+        return Ok(NotificationSettings {
+            enabled: false,
+            webhook_url: None,
+            min_severity: "high".to_string(),
+        });
+    };
+    Ok(
+        serde_json::from_str(&value).unwrap_or(NotificationSettings {
+            enabled: false,
+            webhook_url: None,
+            min_severity: "high".to_string(),
+        }),
+    )
+}
+
 async fn load_source_refresh_state(storage: &Storage) -> Result<SourceRefreshState> {
     let Some(value) = storage.get_setting("source_refresh_state").await? else {
         return Ok(SourceRefreshState::default());
@@ -1242,6 +1338,16 @@ async fn persist_classifier_settings(
 ) -> Result<()> {
     storage
         .upsert_setting("classifier_settings", &serde_json::to_string(settings)?)
+        .await?;
+    Ok(())
+}
+
+async fn persist_notification_settings(
+    storage: &Storage,
+    settings: &NotificationSettings,
+) -> Result<()> {
+    storage
+        .upsert_setting("notification_settings", &serde_json::to_string(settings)?)
         .await?;
     Ok(())
 }
@@ -1549,8 +1655,65 @@ fn build_security_summary(events: &[SecurityEventRecord]) -> SecuritySummary {
     }
 }
 
+fn normalize_notification_severity(severity: &str) -> Option<String> {
+    match severity.trim().to_ascii_lowercase().as_str() {
+        "medium" => Some("medium".to_string()),
+        "high" => Some("high".to_string()),
+        "critical" => Some("critical".to_string()),
+        _ => None,
+    }
+}
+
+fn normalize_webhook_url(url: Option<&str>) -> Option<Option<String>> {
+    let Some(url) = url else {
+        return Some(None);
+    };
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Some(None);
+    }
+    let parsed = Url::parse(trimmed).ok()?;
+    match parsed.scheme() {
+        "https" | "http" => Some(Some(parsed.to_string())),
+        _ => None,
+    }
+}
+
+fn should_deliver_notification(settings: &NotificationSettings, severity: &str) -> bool {
+    settings.enabled
+        && settings.webhook_url.is_some()
+        && severity_rank(severity) >= severity_rank(&settings.min_severity)
+}
+
+async fn send_security_notification(
+    client: &Client,
+    settings: &NotificationSettings,
+    security_event: &SecurityEventRecord,
+) -> Result<()> {
+    let Some(webhook_url) = settings.webhook_url.as_deref() else {
+        return Ok(());
+    };
+    client
+        .post(webhook_url)
+        .json(&serde_json::json!({
+            "event_type": "security.alert_raised",
+            "severity": security_event.severity,
+            "domain": security_event.domain,
+            "client_ip": security_event.client_ip,
+            "device_name": security_event.device_name,
+            "classifier_score": security_event.classifier_score,
+            "created_at": security_event.created_at,
+        }))
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
+}
+
 async fn record_security_event_from_classification(
     storage: Arc<Storage>,
+    http_client: Client,
+    notification_settings: Arc<RwLock<NotificationSettings>>,
     event: ClassificationEvent,
 ) -> Result<()> {
     let Some(client_ip) = event.client_ip.clone() else {
@@ -1569,6 +1732,10 @@ async fn record_security_event_from_classification(
         created_at: event.observed_at,
     };
     storage.record_security_event(&security_event).await?;
+    let current_notification_settings = notification_settings
+        .read()
+        .expect("notification settings lock poisoned")
+        .clone();
     if matches!(security_event.severity.as_str(), "high" | "critical") {
         storage
             .record_audit_event(&AuditEvent {
@@ -1584,6 +1751,14 @@ async fn record_security_event_from_classification(
                 created_at: event.observed_at,
             })
             .await?;
+    }
+    if should_deliver_notification(&current_notification_settings, &security_event.severity) {
+        send_security_notification(
+            &http_client,
+            &current_notification_settings,
+            &security_event,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -1743,6 +1918,32 @@ mod tests {
             Some("balanced".to_string())
         );
         assert_eq!(normalize_profile_name("   "), None);
+    }
+
+    #[test]
+    fn normalize_notification_inputs_accept_expected_values() {
+        assert_eq!(
+            normalize_notification_severity(" HIGH "),
+            Some("high".to_string())
+        );
+        assert_eq!(normalize_notification_severity("low"), None);
+        assert_eq!(normalize_webhook_url(None), Some(None));
+        assert_eq!(normalize_webhook_url(Some("   ")), Some(None));
+        assert!(normalize_webhook_url(Some("https://hooks.example.test/path")).is_some());
+        assert_eq!(normalize_webhook_url(Some("ftp://example.test")), None);
+    }
+
+    #[test]
+    fn notification_delivery_respects_thresholds() {
+        let settings = NotificationSettings {
+            enabled: true,
+            webhook_url: Some("https://hooks.example.test/path".to_string()),
+            min_severity: "high".to_string(),
+        };
+
+        assert!(!should_deliver_notification(&settings, "medium"));
+        assert!(should_deliver_notification(&settings, "high"));
+        assert!(should_deliver_notification(&settings, "critical"));
     }
 
     #[test]

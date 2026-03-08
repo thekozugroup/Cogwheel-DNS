@@ -87,6 +87,12 @@ export type SecuritySummary = {
   top_devices: DeviceSecuritySummary[];
 };
 
+export type NotificationSettings = {
+  enabled: boolean;
+  webhook_url: string | null;
+  min_severity: "medium" | "high" | "critical";
+};
+
 export type DashboardSummary = {
   protection_status: string;
   active_ruleset: RulesetSummary | null;
@@ -109,6 +115,7 @@ export type SettingsSummary = {
     mode: "Off" | "Monitor" | "Protect";
     threshold: number;
   };
+  notifications: NotificationSettings;
   runtime_guard: {
     probe_domains: string[];
     max_upstream_failures_delta: number;
@@ -148,6 +155,11 @@ export const api = {
     fetchJson<SettingsSummary["classifier"]>("/api/v1/settings/classifier", {
       method: "POST",
       body: JSON.stringify({ mode, threshold }),
+    }),
+  updateNotifications: (input: NotificationSettings) =>
+    fetchJson<NotificationSettings>("/api/v1/settings/notifications", {
+      method: "POST",
+      body: JSON.stringify(input),
     }),
   upsertBlocklist: (input: Partial<SourceRecord> & { name: string; url: string; kind: string }) =>
     fetchJson<{ outcome: string; notes: string[] }>("/api/v1/settings/blocklists", {

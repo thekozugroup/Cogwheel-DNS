@@ -44,6 +44,7 @@ const emptySettings: SettingsSummary = {
   devices: [],
   services: [],
   classifier: { mode: "Monitor", threshold: 0.92 },
+  notifications: { enabled: false, webhook_url: null, min_severity: "high" },
   runtime_guard: { probe_domains: [], max_upstream_failures_delta: 0, max_fallback_served_delta: 0 },
 };
 
@@ -63,6 +64,9 @@ export default function App() {
   const [editingBlocklistId, setEditingBlocklistId] = useState<string | null>(null);
 
   const [classifierThreshold, setClassifierThreshold] = useState("0.92");
+  const [notificationEnabled, setNotificationEnabled] = useState(false);
+  const [notificationWebhookUrl, setNotificationWebhookUrl] = useState("");
+  const [notificationMinSeverity, setNotificationMinSeverity] = useState<"medium" | "high" | "critical">("high");
   const [serviceSearch, setServiceSearch] = useState("");
 
   const [deviceId, setDeviceId] = useState<string | null>(null);
@@ -92,6 +96,12 @@ export default function App() {
   useEffect(() => {
     setClassifierThreshold(settings.classifier.threshold.toFixed(2));
   }, [settings.classifier.threshold]);
+
+  useEffect(() => {
+    setNotificationEnabled(settings.notifications.enabled);
+    setNotificationWebhookUrl(settings.notifications.webhook_url ?? "");
+    setNotificationMinSeverity(settings.notifications.min_severity);
+  }, [settings.notifications]);
 
   function pushToast(title: string, detail: string | undefined, tone: Toast["tone"]) {
     const id = Date.now() + Math.floor(Math.random() * 1000);
@@ -147,6 +157,23 @@ export default function App() {
       await load();
     } catch (mutationError) {
       pushToast("Threshold update failed", mutationError instanceof Error ? mutationError.message : "Unknown error", "error");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleNotificationSave() {
+    setBusyAction("notifications-save");
+    try {
+      await api.updateNotifications({
+        enabled: notificationEnabled,
+        webhook_url: notificationWebhookUrl || null,
+        min_severity: notificationMinSeverity,
+      });
+      pushToast("Notifications updated", notificationEnabled ? "Webhook delivery is configured." : "Webhook delivery is disabled.", "success");
+      await load();
+    } catch (mutationError) {
+      pushToast("Notification update failed", mutationError instanceof Error ? mutationError.message : "Unknown error", "error");
     } finally {
       setBusyAction(null);
     }
@@ -438,6 +465,33 @@ export default function App() {
                 <Input value={classifierThreshold} onChange={(event) => setClassifierThreshold(event.target.value)} placeholder="0.92" />
                 <Button variant="secondary" onClick={() => void handleClassifierThresholdSave()} disabled={busyAction === "classifier-threshold"}>
                   Save threshold
+                </Button>
+              </div>
+            </section>
+
+            <Separator />
+
+            <section className="space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="font-medium">Alert delivery</div>
+                  <div className="text-sm text-muted-foreground">Send high-severity security alerts to an external webhook.</div>
+                </div>
+                <Badge>{notificationEnabled ? `Webhook ${notificationMinSeverity}+` : "Disabled"}</Badge>
+              </div>
+              <label className="flex items-center gap-3 rounded-2xl border border-border/70 bg-muted/40 px-4 py-3 text-sm">
+                <input type="checkbox" checked={notificationEnabled} onChange={(event) => setNotificationEnabled(event.target.checked)} />
+                Enable outbound alert notifications
+              </label>
+              <div className="grid gap-3 sm:grid-cols-[1fr_170px_auto]">
+                <Input value={notificationWebhookUrl} onChange={(event) => setNotificationWebhookUrl(event.target.value)} placeholder="https://hooks.example.com/cogwheel" />
+                <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={notificationMinSeverity} onChange={(event) => setNotificationMinSeverity(event.target.value as "medium" | "high" | "critical")}>
+                  <option value="medium">Medium+</option>
+                  <option value="high">High+</option>
+                  <option value="critical">Critical only</option>
+                </select>
+                <Button variant="secondary" onClick={() => void handleNotificationSave()} disabled={busyAction === "notifications-save"}>
+                  Save alerts
                 </Button>
               </div>
             </section>

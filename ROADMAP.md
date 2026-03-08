@@ -169,7 +169,7 @@ Goal: Let operators name devices, understand device-level risk, and optionally o
 - [x] Support per-device policy mode (`global` by default, `custom` when overridden).
 - [x] Support per-device blocklist/profile override while keeping the default model global-first.
 - [x] Record and expose risky DNS events with device attribution and severity.
-- [ ] Add notification hooks for risky events and degraded device-level activity.
+- [x] Add notification hooks for risky events and degraded device-level activity.
 
 Current implementation notes:
 
@@ -177,7 +177,8 @@ Current implementation notes:
 - The web control plane now includes device naming/editing, device policy override inputs, and operator-facing security event visibility.
 - The DNS data plane now selects per-device policy catalogs in memory, scopes cache entries by effective policy, and records risky events from live query traffic with device attribution when a named device is known.
 - The dashboard now surfaces alert severity rollups and top affected devices, and high-severity detections emit internal audit alerts as a first notification hook.
-- Remaining work is external notification delivery, richer per-device override models beyond profile selection, and polishing rollback/startup behavior for profile-specific catalogs.
+- External webhook delivery can now be configured from the control plane with a minimum severity threshold, using persisted notification settings and outbound alert delivery from the server.
+- Remaining work is richer per-device override models beyond profile selection and polishing rollback/startup behavior for profile-specific catalogs.
 
 ## Phase 4 - Real-Time Classifier (Background First)
 
