@@ -88,6 +88,7 @@ export default function App() {
   const [notificationAnalyticsWindow, setNotificationAnalyticsWindow] = useState<10 | 30 | 50 | 100>(30);
   const [notificationHistoryWindow, setNotificationHistoryWindow] = useState<10 | 30 | 50 | 100>(10);
   const [serviceSearch, setServiceSearch] = useState("");
+  const [auditEventFilter, setAuditEventFilter] = useState<"all" | "runtime" | "notifications" | "devices" | "rulesets">("all");
 
   const [deviceId, setDeviceId] = useState<string | null>(null);
   const [deviceName, setDeviceName] = useState("");
@@ -178,6 +179,18 @@ export default function App() {
         .includes(query);
     }),
     [serviceSearch, settings.services],
+  );
+
+  const filteredAuditEvents = useMemo(
+    () => dashboard.latest_audit_events.filter((event) => {
+      if (auditEventFilter === "all") return true;
+      if (auditEventFilter === "notifications") return event.event_type.startsWith("notification.") || event.event_type.startsWith("security.alert");
+      if (auditEventFilter === "runtime") return event.event_type.startsWith("runtime.");
+      if (auditEventFilter === "devices") return event.event_type.startsWith("device.");
+      if (auditEventFilter === "rulesets") return event.event_type.startsWith("ruleset.");
+      return true;
+    }),
+    [auditEventFilter, dashboard.latest_audit_events],
   );
 
   const serviceLabelMap = useMemo(
@@ -1202,14 +1215,38 @@ export default function App() {
           <CardDescription>Audit and event visibility for the current backend scaffolding.</CardDescription>
           <div className="mt-5 space-y-5">
             <section className="space-y-3">
-              <div className="font-medium">Recent audit events</div>
+              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <div className="font-medium">Recent audit events</div>
+                  <div className="text-sm text-muted-foreground">Filter the operator feed to focus on the control-plane changes you are investigating.</div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {[
+                    ["all", "All events"],
+                    ["runtime", "Runtime"],
+                    ["notifications", "Notifications"],
+                    ["devices", "Devices"],
+                    ["rulesets", "Rulesets"],
+                  ].map(([value, label]) => (
+                    <Button key={value} variant={auditEventFilter === value ? "primary" : "ghost"} size="sm" onClick={() => setAuditEventFilter(value as "all" | "runtime" | "notifications" | "devices" | "rulesets")}>
+                      {label}
+                    </Button>
+                  ))}
+                </div>
+              </div>
               <div className="grid gap-3">
-                {dashboard.latest_audit_events.map((event) => (
-                  <div key={event.id} className="rounded-2xl border border-border/70 bg-muted/60 p-3 text-sm">
-                    <div className="font-medium">{event.event_type}</div>
-                    <div className="text-muted-foreground">{new Date(event.created_at).toLocaleString()}</div>
+                {filteredAuditEvents.length === 0 ? (
+                  <div className="rounded-2xl border border-dashed border-border/80 bg-muted/30 p-4 text-sm text-muted-foreground">
+                    No audit events match the selected filter.
                   </div>
-                ))}
+                ) : (
+                  filteredAuditEvents.map((event) => (
+                    <div key={event.id} className="rounded-2xl border border-border/70 bg-muted/60 p-3 text-sm">
+                      <div className="font-medium">{event.event_type}</div>
+                      <div className="mt-1 text-xs text-muted-foreground">{new Date(event.created_at).toLocaleString()}</div>
+                    </div>
+                  ))
+                )}
               </div>
             </section>
 

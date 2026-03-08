@@ -244,6 +244,7 @@ Current implementation notes:
 - Blocklist source management is also API-editable, including schedule/profile/verification metadata and refresh status, so the future UI can manage blocklists without low-level database access.
 - A Vite + React + shadcn-style frontend scaffold now exists in `apps/cogwheel-web` with live dashboard/settings/service/blocklist flows wired to the current backend APIs.
 - The current UI already supports classifier editing, blocklist lifecycle and metadata editing, and searchable service toggles; remaining work is polish, onboarding, recovery UX, and local-first behavior.
+- The operator feed now supports quick runtime/notification/device/ruleset filtering, making the current dashboard easier to triage while broader Phase 5 simplification work remains open.
 - Remaining work is the actual `shadcn/ui` application, richer operator workflows, and client-side state management.
 
 Exit criteria:
