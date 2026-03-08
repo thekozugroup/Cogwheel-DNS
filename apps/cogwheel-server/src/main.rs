@@ -17,7 +17,8 @@ use cogwheel_services::{
     compile_service_rule_layer,
 };
 use cogwheel_storage::{
-    AuditEvent, DeviceRecord, RulesetRecord, SecurityEventRecord, SourceRecord, Storage,
+    AuditEvent, DeviceRecord, DeviceServiceOverrideRecord, RulesetRecord, SecurityEventRecord,
+    SourceRecord, Storage,
 };
 use hickory_resolver::TokioResolver;
 use hickory_resolver::config::{
@@ -262,6 +263,7 @@ struct UpsertDeviceRequest {
     blocklist_profile_override: Option<String>,
     protection_override: Option<String>,
     allowed_domains: Option<Vec<String>>,
+    service_overrides: Option<Vec<DeviceServiceOverrideRecord>>,
 }
 
 #[tokio::main]
@@ -555,6 +557,9 @@ async fn upsert_device(
         .ok_or(axum::http::StatusCode::BAD_REQUEST)?,
         allowed_domains: normalize_device_allowed_domains(
             request.allowed_domains.unwrap_or_default(),
+        ),
+        service_overrides: normalize_device_service_overrides(
+            request.service_overrides.unwrap_or_default(),
         ),
     };
 
@@ -1688,6 +1693,12 @@ fn build_runtime_policy_catalog(
 }
 
 fn runtime_device_policies_from_records(devices: Vec<DeviceRecord>) -> Vec<DevicePolicyConfig> {
+    let manifests = built_in_service_manifests();
+    let manifest_map = manifests
+        .into_iter()
+        .map(|manifest| (manifest.service_id.clone(), manifest))
+        .collect::<HashMap<_, _>>();
+
     devices
         .into_iter()
         .map(|device| {
@@ -1712,13 +1723,36 @@ fn runtime_device_policies_from_records(devices: Vec<DeviceRecord>) -> Vec<Devic
             } else {
                 Vec::new()
             };
+            let service_overrides = if policy_mode == "custom" {
+                normalize_device_service_overrides(device.service_overrides)
+            } else {
+                Vec::new()
+            };
+            let mut expanded_allowed_domains = allowed_domains.clone();
+            let mut blocked_domains = Vec::new();
+            for override_record in &service_overrides {
+                if let Some(manifest) = manifest_map.get(&override_record.service_id) {
+                    match override_record.mode.as_str() {
+                        "allow" => {
+                            expanded_allowed_domains.extend(manifest.allow_domains.clone());
+                            expanded_allowed_domains.extend(manifest.exceptions.clone());
+                        }
+                        "block" => blocked_domains.extend(manifest.block_domains.clone()),
+                        _ => {}
+                    }
+                }
+            }
+            let expanded_allowed_domains =
+                normalize_device_allowed_domains(expanded_allowed_domains);
+            let blocked_domains = normalize_device_allowed_domains(blocked_domains);
 
             DevicePolicyConfig {
                 ip_address: device.ip_address,
                 policy_mode,
                 blocklist_profile_override,
                 protection_override,
-                allowed_domains,
+                allowed_domains: expanded_allowed_domains,
+                blocked_domains,
             }
         })
         .collect()
@@ -1785,6 +1819,35 @@ fn normalize_device_allowed_domains(domains: Vec<String>) -> Vec<String> {
         .collect::<Vec<_>>();
     normalized.sort();
     normalized.dedup();
+    normalized
+}
+
+fn normalize_device_service_overrides(
+    overrides: Vec<DeviceServiceOverrideRecord>,
+) -> Vec<DeviceServiceOverrideRecord> {
+    let manifests = built_in_service_manifests();
+    let known_ids = manifests
+        .iter()
+        .map(|manifest| manifest.service_id.as_str())
+        .collect::<HashSet<_>>();
+    let mut normalized = Vec::new();
+
+    for override_record in overrides {
+        let service_id = override_record.service_id.trim().to_ascii_lowercase();
+        let mode = override_record.mode.trim().to_ascii_lowercase();
+        if !known_ids.contains(service_id.as_str()) {
+            continue;
+        }
+        if !matches!(mode.as_str(), "allow" | "block") {
+            continue;
+        }
+
+        normalized
+            .retain(|existing: &DeviceServiceOverrideRecord| existing.service_id != service_id);
+        normalized.push(DeviceServiceOverrideRecord { service_id, mode });
+    }
+
+    normalized.sort_by(|left, right| left.service_id.cmp(&right.service_id));
     normalized
 }
 
@@ -2281,6 +2344,30 @@ mod tests {
     }
 
     #[test]
+    fn normalize_device_service_overrides_filters_unknown_values() {
+        assert_eq!(
+            normalize_device_service_overrides(vec![
+                DeviceServiceOverrideRecord {
+                    service_id: "tiktok".to_string(),
+                    mode: "allow".to_string(),
+                },
+                DeviceServiceOverrideRecord {
+                    service_id: "unknown".to_string(),
+                    mode: "block".to_string(),
+                },
+                DeviceServiceOverrideRecord {
+                    service_id: "tiktok".to_string(),
+                    mode: "block".to_string(),
+                },
+            ]),
+            vec![DeviceServiceOverrideRecord {
+                service_id: "tiktok".to_string(),
+                mode: "block".to_string(),
+            }]
+        );
+    }
+
+    #[test]
     fn normalize_profile_name_accepts_non_empty_values() {
         assert_eq!(
             normalize_profile_name(" Balanced "),
@@ -2332,6 +2419,10 @@ mod tests {
             blocklist_profile_override: Some("Aggressive".to_string()),
             protection_override: "bypass".to_string(),
             allowed_domains: vec!["example.com".to_string()],
+            service_overrides: vec![DeviceServiceOverrideRecord {
+                service_id: "tiktok".to_string(),
+                mode: "allow".to_string(),
+            }],
         }]);
 
         assert_eq!(configs.len(), 1);
@@ -2339,6 +2430,7 @@ mod tests {
         assert_eq!(configs[0].blocklist_profile_override, None);
         assert_eq!(configs[0].protection_override, "inherit");
         assert!(configs[0].allowed_domains.is_empty());
+        assert!(configs[0].blocked_domains.is_empty());
     }
 
     #[test]

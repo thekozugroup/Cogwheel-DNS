@@ -56,6 +56,7 @@ pub struct DevicePolicyConfig {
     pub blocklist_profile_override: Option<String>,
     pub protection_override: String,
     pub allowed_domains: Vec<String>,
+    pub blocked_domains: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -259,12 +260,25 @@ impl DnsRuntime {
             }
         }
 
-        let (engine, cache_scope) = self.policy_for_client(client_addr, &domain);
+        let (engine, cache_scope, forced_block_mode) = self.policy_for_client(client_addr, &domain);
         let cache_key = policy_cache_key(&cache_scope, &domain);
 
         if let Some(cached) = self.cache.get(&cache_key).await {
             self.stats.cache_hits_total.fetch_add(1, Ordering::Relaxed);
             return Ok(response_for_request(&request, &cached.response));
+        }
+
+        if let Some(block_mode) = forced_block_mode {
+            let response = build_blocked_response(&request, block_mode);
+            self.cache
+                .insert(
+                    cache_key,
+                    CachedLookup {
+                        response: response.clone(),
+                    },
+                )
+                .await;
+            return Ok(response);
         }
         let decision = engine.evaluate(&domain);
         let allow_matched = decision
@@ -352,10 +366,10 @@ impl DnsRuntime {
         &self,
         client_addr: Option<SocketAddr>,
         domain: &str,
-    ) -> (Arc<PolicyEngine>, String) {
+    ) -> (Arc<PolicyEngine>, String, Option<BlockMode>) {
         let global = self.policy.read().expect("policy lock poisoned").clone();
         let Some(client_ip) = client_addr.map(|addr| addr.ip()) else {
-            return (global.clone(), global.artifact().hash.clone());
+            return (global.clone(), global.artifact().hash.clone(), None);
         };
 
         let devices = self
@@ -363,10 +377,21 @@ impl DnsRuntime {
             .read()
             .expect("device policy lock poisoned");
         let Some(device) = devices.get(&client_ip) else {
-            return (global.clone(), global.artifact().hash.clone());
+            return (global.clone(), global.artifact().hash.clone(), None);
         };
         if device.policy_mode != "custom" {
-            return (global.clone(), global.artifact().hash.clone());
+            return (global.clone(), global.artifact().hash.clone(), None);
+        }
+        if device
+            .blocked_domains
+            .iter()
+            .any(|candidate| domain_matches_override(domain, candidate))
+        {
+            return (
+                global.clone(),
+                format!("device-block:{}", client_ip),
+                Some(global.artifact().block_mode.clone()),
+            );
         }
         if device
             .allowed_domains
@@ -378,7 +403,11 @@ impl DnsRuntime {
                 .read()
                 .expect("allow-all policy lock poisoned")
                 .clone();
-            return (allow_all_policy, format!("device-allow:{}", client_ip));
+            return (
+                allow_all_policy,
+                format!("device-allow:{}", client_ip),
+                None,
+            );
         }
         if device.protection_override == "bypass" {
             let allow_all_policy = self
@@ -386,11 +415,11 @@ impl DnsRuntime {
                 .read()
                 .expect("allow-all policy lock poisoned")
                 .clone();
-            return (allow_all_policy, "bypass".to_string());
+            return (allow_all_policy, "bypass".to_string(), None);
         }
 
         let Some(profile) = device.blocklist_profile_override.as_deref() else {
-            return (global.clone(), global.artifact().hash.clone());
+            return (global.clone(), global.artifact().hash.clone(), None);
         };
 
         let profile_policies = self
@@ -398,10 +427,10 @@ impl DnsRuntime {
             .read()
             .expect("profile policies lock poisoned");
         let Some(policy) = profile_policies.get(profile) else {
-            return (global.clone(), global.artifact().hash.clone());
+            return (global.clone(), global.artifact().hash.clone(), None);
         };
 
-        (policy.clone(), format!("profile:{}", profile))
+        (policy.clone(), format!("profile:{}", profile), None)
     }
 
     async fn resolve_upstream(&self, request: &Message, domain: &str) -> Result<Message> {

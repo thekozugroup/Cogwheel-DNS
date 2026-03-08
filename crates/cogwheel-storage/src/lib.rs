@@ -14,6 +14,7 @@ const MIGRATION_0004: &str = include_str!("../migrations/0004_source_verificatio
 const MIGRATION_0005: &str = include_str!("../migrations/0005_devices_security_events.sql");
 const MIGRATION_0006: &str = include_str!("../migrations/0006_device_protection_override.sql");
 const MIGRATION_0007: &str = include_str!("../migrations/0007_device_allowed_domains.sql");
+const MIGRATION_0008: &str = include_str!("../migrations/0008_device_service_overrides.sql");
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -61,6 +62,12 @@ pub struct AuditEvent {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeviceServiceOverrideRecord {
+    pub service_id: String,
+    pub mode: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceRecord {
     pub id: Uuid,
@@ -70,6 +77,7 @@ pub struct DeviceRecord {
     pub blocklist_profile_override: Option<String>,
     pub protection_override: String,
     pub allowed_domains: Vec<String>,
+    pub service_overrides: Vec<DeviceServiceOverrideRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,8 +186,8 @@ impl Storage {
     pub async fn upsert_device(&self, device: &DeviceRecord) -> Result<(), StorageError> {
         let connection = self.connection.lock().expect("storage mutex poisoned");
         connection.execute(
-            "INSERT OR REPLACE INTO devices (id, name, ip_address, policy_mode, blocklist_profile_override, protection_override, allowed_domains_json, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            "INSERT OR REPLACE INTO devices (id, name, ip_address, policy_mode, blocklist_profile_override, protection_override, allowed_domains_json, service_overrides_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
             params![
                 device.id.to_string(),
                 device.name,
@@ -188,6 +196,7 @@ impl Storage {
                 device.blocklist_profile_override,
                 device.protection_override,
                 serde_json::to_string(&device.allowed_domains)?,
+                serde_json::to_string(&device.service_overrides)?,
             ],
         )?;
         Ok(())
@@ -196,7 +205,7 @@ impl Storage {
     pub async fn list_devices(&self) -> Result<Vec<DeviceRecord>, StorageError> {
         let connection = self.connection.lock().expect("storage mutex poisoned");
         let mut statement = connection.prepare(
-            "SELECT id, name, ip_address, policy_mode, blocklist_profile_override, protection_override, allowed_domains_json FROM devices ORDER BY name ASC",
+            "SELECT id, name, ip_address, policy_mode, blocklist_profile_override, protection_override, allowed_domains_json, service_overrides_json FROM devices ORDER BY name ASC",
         )?;
         let rows = statement.query_map([], |row| {
             Ok(DeviceRecord {
@@ -207,6 +216,8 @@ impl Storage {
                 blocklist_profile_override: row.get(4)?,
                 protection_override: row.get(5)?,
                 allowed_domains: serde_json::from_str(&row.get::<_, String>(6)?)
+                    .unwrap_or_default(),
+                service_overrides: serde_json::from_str(&row.get::<_, String>(7)?)
                     .unwrap_or_default(),
             })
         })?;
@@ -221,7 +232,7 @@ impl Storage {
     ) -> Result<Option<DeviceRecord>, StorageError> {
         let connection = self.connection.lock().expect("storage mutex poisoned");
         let mut statement = connection.prepare(
-            "SELECT id, name, ip_address, policy_mode, blocklist_profile_override, protection_override, allowed_domains_json FROM devices WHERE ip_address = ?1",
+            "SELECT id, name, ip_address, policy_mode, blocklist_profile_override, protection_override, allowed_domains_json, service_overrides_json FROM devices WHERE ip_address = ?1",
         )?;
 
         statement
@@ -234,6 +245,8 @@ impl Storage {
                     blocklist_profile_override: row.get(4)?,
                     protection_override: row.get(5)?,
                     allowed_domains: serde_json::from_str(&row.get::<_, String>(6)?)
+                        .unwrap_or_default(),
+                    service_overrides: serde_json::from_str(&row.get::<_, String>(7)?)
                         .unwrap_or_default(),
                 })
             })
@@ -414,6 +427,7 @@ fn apply_migrations(connection: &Connection) -> Result<(), StorageError> {
     let _ = connection.execute_batch(MIGRATION_0005);
     let _ = connection.execute_batch(MIGRATION_0006);
     let _ = connection.execute_batch(MIGRATION_0007);
+    let _ = connection.execute_batch(MIGRATION_0008);
     Ok(())
 }
 
