@@ -172,6 +172,14 @@ export default function App() {
     [settings.services],
   );
 
+  const serviceInfoMap = useMemo(
+    () =>
+      new Map(
+        settings.services.map((service) => [service.manifest.service_id, service.manifest]),
+      ),
+    [settings.services],
+  );
+
   async function handleClassifierUpdate(mode: SettingsSummary["classifier"]["mode"]) {
     setBusyAction(`classifier-mode-${mode}`);
     try {
@@ -412,6 +420,12 @@ export default function App() {
   function formatDeviceServiceOverride(serviceId: string, mode: "allow" | "block") {
     const label = serviceLabelMap.get(serviceId) ?? serviceId;
     return `${label} - ${mode}`;
+  }
+
+  function describeDeviceServiceOverride(serviceId: string) {
+    const info = serviceInfoMap.get(serviceId);
+    if (!info) return "Custom device service rule";
+    return `${info.category} - ${info.risk_notes}`;
   }
 
   return (
@@ -884,7 +898,7 @@ export default function App() {
             {deviceServiceOverrides.length > 0 ? (
               <div className="flex flex-wrap gap-2">
                 {deviceServiceOverrides.map((override) => (
-                  <button key={`${override.service_id}-${override.mode}`} type="button" className="rounded-full border border-border/70 bg-muted/40 px-3 py-1 text-xs text-muted-foreground" onClick={() => removeDeviceServiceOverride(override.service_id)}>
+                  <button key={`${override.service_id}-${override.mode}`} type="button" title={describeDeviceServiceOverride(override.service_id)} className="rounded-full border border-border/70 bg-muted/40 px-3 py-1 text-xs text-muted-foreground" onClick={() => removeDeviceServiceOverride(override.service_id)}>
                     {formatDeviceServiceOverride(override.service_id, override.mode)} x
                   </button>
                 ))}
@@ -921,11 +935,12 @@ export default function App() {
                       </Badge>
                     </div>
                     {device.service_overrides.length > 0 ? (
-                      <div className="mt-3 flex flex-wrap gap-2 text-xs text-muted-foreground">
+                      <div className="mt-3 grid gap-2 text-xs text-muted-foreground">
                         {device.service_overrides.map((override) => (
-                          <Badge key={`${device.id}-${override.service_id}-${override.mode}`}>
-                            {formatDeviceServiceOverride(override.service_id, override.mode)}
-                          </Badge>
+                          <div key={`${device.id}-${override.service_id}-${override.mode}`} className="rounded-2xl border border-border/70 bg-muted/40 px-3 py-2">
+                            <div className="font-medium text-foreground">{formatDeviceServiceOverride(override.service_id, override.mode)}</div>
+                            <div className="mt-1">{describeDeviceServiceOverride(override.service_id)}</div>
+                          </div>
                         ))}
                       </div>
                     ) : null}
