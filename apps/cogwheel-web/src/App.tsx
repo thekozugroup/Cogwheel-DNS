@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Activity, ListFilter, RefreshCw, ShieldCheck, Sparkles, Undo2 } from "lucide-react";
-import { api, type DashboardSummary, type SettingsSummary } from "@/lib/api";
+import { api, type AuditEvent, type DashboardSummary, type SettingsSummary } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
@@ -1328,12 +1328,22 @@ export default function App() {
                     No audit events match the selected filter.
                   </div>
                 ) : (
-                  filteredAuditEvents.map((event) => (
-                    <div key={event.id} className="rounded-2xl border border-border/70 bg-muted/60 p-3 text-sm">
-                      <div className="font-medium">{event.event_type}</div>
-                      <div className="mt-1 text-xs text-muted-foreground">{new Date(event.created_at).toLocaleString()}</div>
-                    </div>
-                  ))
+                  filteredAuditEvents.map((event) => {
+                    const summary = summarizeAuditEvent(event);
+                    return (
+                      <div key={event.id} className="rounded-2xl border border-border/70 bg-muted/60 p-3 text-sm">
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <div className="font-medium">{summary.title}</div>
+                            <div className="mt-1 text-xs text-muted-foreground">{event.event_type}</div>
+                          </div>
+                          <Badge>{summary.category}</Badge>
+                        </div>
+                        <div className="mt-2 text-muted-foreground">{summary.detail}</div>
+                        <div className="mt-2 text-xs text-muted-foreground">{new Date(event.created_at).toLocaleString()}</div>
+                      </div>
+                    );
+                  })
                 )}
               </div>
             </section>
@@ -1391,4 +1401,88 @@ function Row({ label, value }: { label: string; value: string }) {
       <span className="font-medium">{value}</span>
     </div>
   );
+}
+
+function summarizeAuditEvent(event: AuditEvent) {
+  const payload = parseAuditPayload(event.payload);
+  const category = event.event_type.split(".")[0] ?? "system";
+
+  if (event.event_type === "ruleset.rollback") {
+    return {
+      category,
+      title: "Ruleset rollback completed",
+      detail: `Recovered ruleset ${String(payload.hash ?? "unknown").slice(0, 12)} after an operator-triggered rollback.`,
+    };
+  }
+
+  if (event.event_type === "ruleset.auto_rollback") {
+    return {
+      category,
+      title: "Automatic rollback triggered",
+      detail: String(firstPayloadItem(payload.notes) ?? "Runtime guard restored the previous verified ruleset."),
+    };
+  }
+
+  if (event.event_type === "ruleset.refresh_rejected") {
+    return {
+      category,
+      title: "Ruleset refresh rejected",
+      detail: String(firstPayloadItem(payload.notes) ?? "Verification blocked the candidate ruleset before activation."),
+    };
+  }
+
+  if (event.event_type.startsWith("notification.delivery_") || event.event_type.startsWith("security.alert_delivery_")) {
+    return {
+      category,
+      title: String(payload.title ?? payload.domain ?? "Notification delivery"),
+      detail: String(payload.summary ?? `${payload.severity ?? "unknown"} delivery to ${payload.client_ip ?? payload.device_name ?? "control-plane"}.`),
+    };
+  }
+
+  if (event.event_type.startsWith("runtime.health_check_")) {
+    return {
+      category,
+      title: event.event_type.endsWith("degraded") ? "Runtime health degraded" : "Runtime health check passed",
+      detail: String(firstPayloadItem(payload.notes) ?? "Manual runtime health check completed."),
+    };
+  }
+
+  if (event.event_type === "device.upserted") {
+    return {
+      category,
+      title: `Updated device ${String(payload.name ?? "unnamed device")}`,
+      detail: `Policy mode ${String(payload.policy_mode ?? "unknown")} for ${String(payload.ip_address ?? "unknown IP")}.`,
+    };
+  }
+
+  const [firstKey, firstValue] = Object.entries(payload)[0] ?? [];
+  return {
+    category,
+    title: event.event_type,
+    detail: firstKey ? `${firstKey}: ${stringifyAuditValue(firstValue)}` : "No structured payload details recorded.",
+  };
+}
+
+function parseAuditPayload(payload: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(payload) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function firstPayloadItem(value: unknown) {
+  return Array.isArray(value) && value.length > 0 ? value[0] : undefined;
+}
+
+function stringifyAuditValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value) && value.length > 0) return stringifyAuditValue(value[0]);
+  if (value && typeof value === "object") {
+    const [firstKey, firstValue] = Object.entries(value)[0] ?? [];
+    return firstKey ? `${firstKey}: ${stringifyAuditValue(firstValue)}` : "details available";
+  }
+  return "details available";
 }
