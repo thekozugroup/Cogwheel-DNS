@@ -185,6 +185,7 @@ Current implementation notes:
 - Notification analytics now call out recent success rate and the domains most often associated with failed deliveries, helping operators spot flaky destinations or payload patterns.
 - Operators can now change the notification analytics window in the control plane, making it easier to compare short-term alert delivery issues with longer recent history.
 - Notification test sends now support custom domain/severity/device labels plus dry-run validation so operators can verify payload shape and destination setup before sending a live test.
+- Notification test presets can now be saved and reloaded from the control plane, reducing repeated manual setup for common validation scenarios.
 - Runtime startup now attempts to warm the profile policy catalog from persisted sources, and rollback rebuilds profile policies while restoring the selected global artifact.
 - Devices with custom policy mode can now bypass blocking entirely in addition to selecting a profile override, giving the control plane a richer per-device policy surface.
 - Devices with custom policy mode can now carry per-device allowed-domain lists, letting selected domains bypass blocking for a specific device without changing the global profile.

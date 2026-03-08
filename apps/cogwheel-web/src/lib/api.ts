@@ -140,6 +140,14 @@ export type NotificationTestRequest = {
   dry_run?: boolean;
 };
 
+export type NotificationTestPreset = {
+  name: string;
+  domain: string;
+  severity: NotificationSettings["min_severity"];
+  device_name: string;
+  dry_run: boolean;
+};
+
 export type DashboardSummary = {
   protection_status: string;
   active_ruleset: RulesetSummary | null;
@@ -166,6 +174,7 @@ export type SettingsSummary = {
     threshold: number;
   };
   notifications: NotificationSettings;
+  notification_test_presets: NotificationTestPreset[];
   runtime_guard: {
     probe_domains: string[];
     max_upstream_failures_delta: number;
@@ -220,6 +229,11 @@ export const api = {
     fetchJson<NotificationTestResult>("/api/v1/settings/notifications/test", {
       method: "POST",
       body: JSON.stringify(input ?? {}),
+    }),
+  updateNotificationTestPresets: (presets: NotificationTestPreset[]) =>
+    fetchJson<NotificationTestPreset[]>("/api/v1/settings/notifications/presets", {
+      method: "POST",
+      body: JSON.stringify({ presets }),
     }),
   upsertBlocklist: (input: Partial<SourceRecord> & { name: string; url: string; kind: string }) =>
     fetchJson<{ outcome: string; notes: string[] }>("/api/v1/settings/blocklists", {

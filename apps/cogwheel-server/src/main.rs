@@ -133,6 +133,15 @@ struct NotificationTestResult {
     target: String,
 }
 
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct NotificationTestPreset {
+    name: String,
+    domain: String,
+    severity: String,
+    device_name: String,
+    dry_run: bool,
+}
+
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 struct DashboardQuery {
     notification_window: Option<usize>,
@@ -161,6 +170,7 @@ struct SettingsSummary {
     services: Vec<ServiceToggleView>,
     classifier: ClassifierSettings,
     notifications: NotificationSettings,
+    notification_test_presets: Vec<NotificationTestPreset>,
     runtime_guard: RuntimeGuardConfig,
 }
 
@@ -184,6 +194,11 @@ struct TestNotificationRequest {
     severity: Option<String>,
     device_name: Option<String>,
     dry_run: Option<bool>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct UpdateNotificationPresetsRequest {
+    presets: Vec<NotificationTestPreset>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -532,6 +547,10 @@ fn admin_router() -> Router<ServerState> {
             "/api/v1/settings/notifications/test",
             post(test_notification_settings),
         )
+        .route(
+            "/api/v1/settings/notifications/presets",
+            post(update_notification_test_presets),
+        )
         .route("/api/v1/runtime", get(runtime_snapshot))
         .route("/api/v1/runtime/health", get(runtime_health))
         .route("/api/v1/rulesets", get(list_rulesets))
@@ -726,6 +745,14 @@ async fn settings_summary(
     let blocklist_statuses = build_blocklist_status_views(&state, &blocklists)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let notifications = state
+        .notification_settings
+        .read()
+        .expect("notification settings lock poisoned")
+        .clone();
+    let notification_test_presets = load_notification_test_presets(&state.storage)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(ApiEnvelope {
         data: SettingsSummary {
@@ -734,11 +761,8 @@ async fn settings_summary(
             devices,
             services,
             classifier: state.dns_runtime.classifier_settings(),
-            notifications: state
-                .notification_settings
-                .read()
-                .expect("notification settings lock poisoned")
-                .clone(),
+            notifications,
+            notification_test_presets,
             runtime_guard: state.runtime_guard.clone(),
         },
     }))
@@ -1063,6 +1087,29 @@ async fn test_notification_settings(
             target,
         },
     }))
+}
+
+async fn update_notification_test_presets(
+    State(state): State<ServerState>,
+    Json(request): Json<UpdateNotificationPresetsRequest>,
+) -> Result<Json<ApiEnvelope<Vec<NotificationTestPreset>>>, axum::http::StatusCode> {
+    let presets = normalize_notification_test_presets(request.presets);
+    persist_notification_test_presets(&state.storage, &presets)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    state
+        .storage
+        .record_audit_event(&AuditEvent {
+            id: Uuid::new_v4(),
+            event_type: "notification-test-presets.updated".to_string(),
+            payload: serde_json::to_string(&presets)
+                .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?,
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(ApiEnvelope { data: presets }))
 }
 
 async fn upsert_blocklist(
@@ -1449,6 +1496,15 @@ async fn load_notification_settings(storage: &Storage) -> Result<NotificationSet
     )
 }
 
+async fn load_notification_test_presets(storage: &Storage) -> Result<Vec<NotificationTestPreset>> {
+    let Some(value) = storage.get_setting("notification_test_presets").await? else {
+        return Ok(Vec::new());
+    };
+    Ok(normalize_notification_test_presets(
+        serde_json::from_str(&value).unwrap_or_default(),
+    ))
+}
+
 async fn load_source_refresh_state(storage: &Storage) -> Result<SourceRefreshState> {
     let Some(value) = storage.get_setting("source_refresh_state").await? else {
         return Ok(SourceRefreshState::default());
@@ -1545,6 +1601,19 @@ async fn persist_notification_settings(
 ) -> Result<()> {
     storage
         .upsert_setting("notification_settings", &serde_json::to_string(settings)?)
+        .await?;
+    Ok(())
+}
+
+async fn persist_notification_test_presets(
+    storage: &Storage,
+    presets: &[NotificationTestPreset],
+) -> Result<()> {
+    storage
+        .upsert_setting(
+            "notification_test_presets",
+            &serde_json::to_string(presets)?,
+        )
         .await?;
     Ok(())
 }
@@ -2132,6 +2201,37 @@ fn normalize_notification_window(window: Option<usize>) -> usize {
         100 => 100,
         _ => 30,
     }
+}
+
+fn normalize_notification_test_presets(
+    presets: Vec<NotificationTestPreset>,
+) -> Vec<NotificationTestPreset> {
+    let mut normalized = Vec::new();
+
+    for preset in presets {
+        let name = preset.name.trim().to_string();
+        let domain = preset.domain.trim().to_string();
+        let device_name = preset.device_name.trim().to_string();
+        let Some(severity) = normalize_notification_severity(&preset.severity) else {
+            continue;
+        };
+        if name.is_empty() || domain.is_empty() || device_name.is_empty() {
+            continue;
+        }
+
+        normalized.retain(|existing: &NotificationTestPreset| existing.name != name);
+        normalized.push(NotificationTestPreset {
+            name,
+            domain,
+            severity,
+            device_name,
+            dry_run: preset.dry_run,
+        });
+    }
+
+    normalized.sort_by(|left, right| left.name.cmp(&right.name));
+    normalized.truncate(8);
+    normalized
 }
 
 fn normalize_notification_severity(severity: &str) -> Option<String> {
@@ -2753,6 +2853,39 @@ mod tests {
         assert_eq!(normalize_notification_window(Some(100)), 100);
         assert_eq!(normalize_notification_window(Some(999)), 30);
         assert_eq!(normalize_notification_window(None), 30);
+    }
+
+    #[test]
+    fn normalize_notification_test_presets_filters_invalid_entries() {
+        let presets = normalize_notification_test_presets(vec![
+            NotificationTestPreset {
+                name: "weekday".to_string(),
+                domain: "notify.example".to_string(),
+                severity: "high".to_string(),
+                device_name: "Laptop".to_string(),
+                dry_run: false,
+            },
+            NotificationTestPreset {
+                name: "weekday".to_string(),
+                domain: "notify-two.example".to_string(),
+                severity: "critical".to_string(),
+                device_name: "Tablet".to_string(),
+                dry_run: true,
+            },
+            NotificationTestPreset {
+                name: "".to_string(),
+                domain: "ignored.example".to_string(),
+                severity: "high".to_string(),
+                device_name: "Ignored".to_string(),
+                dry_run: false,
+            },
+        ]);
+
+        assert_eq!(presets.len(), 1);
+        assert_eq!(presets[0].name, "weekday");
+        assert_eq!(presets[0].domain, "notify-two.example");
+        assert_eq!(presets[0].severity, "critical");
+        assert!(presets[0].dry_run);
     }
 
     #[test]

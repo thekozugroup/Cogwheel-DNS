@@ -56,6 +56,7 @@ const emptySettings: SettingsSummary = {
   services: [],
   classifier: { mode: "Monitor", threshold: 0.92 },
   notifications: { enabled: false, webhook_url: null, min_severity: "high" },
+  notification_test_presets: [],
   runtime_guard: { probe_domains: [], max_upstream_failures_delta: 0, max_fallback_served_delta: 0 },
 };
 
@@ -82,6 +83,8 @@ export default function App() {
   const [notificationTestSeverity, setNotificationTestSeverity] = useState<"medium" | "high" | "critical">("high");
   const [notificationTestDeviceName, setNotificationTestDeviceName] = useState("Control Plane Test");
   const [notificationDryRun, setNotificationDryRun] = useState(false);
+  const [notificationPresetName, setNotificationPresetName] = useState("");
+  const [selectedNotificationPreset, setSelectedNotificationPreset] = useState("");
   const [notificationAnalyticsWindow, setNotificationAnalyticsWindow] = useState<10 | 30 | 50 | 100>(30);
   const [serviceSearch, setServiceSearch] = useState("");
 
@@ -127,6 +130,16 @@ export default function App() {
     setNotificationMinSeverity(settings.notifications.min_severity);
     setNotificationTestSeverity(settings.notifications.min_severity);
   }, [settings.notifications]);
+
+  useEffect(() => {
+    if (!selectedNotificationPreset) return;
+    const preset = settings.notification_test_presets.find((item) => item.name === selectedNotificationPreset);
+    if (!preset) return;
+    setNotificationTestDomain(preset.domain);
+    setNotificationTestSeverity(preset.severity);
+    setNotificationTestDeviceName(preset.device_name);
+    setNotificationDryRun(preset.dry_run);
+  }, [selectedNotificationPreset, settings.notification_test_presets]);
 
   function pushToast(title: string, detail: string | undefined, tone: Toast["tone"]) {
     const id = Date.now() + Math.floor(Math.random() * 1000);
@@ -247,6 +260,36 @@ export default function App() {
       await load();
     } catch (mutationError) {
       pushToast("Test notification failed", mutationError instanceof Error ? mutationError.message : "Unknown error", "error");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleNotificationPresetSave() {
+    if (!notificationPresetName.trim()) {
+      pushToast("Preset name required", "Name the preset before saving it.", "error");
+      return;
+    }
+
+    setBusyAction("notifications-preset-save");
+    try {
+      const nextPresets = settings.notification_test_presets.filter(
+        (preset) => preset.name !== notificationPresetName.trim(),
+      );
+      nextPresets.push({
+        name: notificationPresetName.trim(),
+        domain: notificationTestDomain,
+        severity: notificationTestSeverity,
+        device_name: notificationTestDeviceName,
+        dry_run: notificationDryRun,
+      });
+      nextPresets.sort((left, right) => left.name.localeCompare(right.name));
+      await api.updateNotificationTestPresets(nextPresets);
+      setSelectedNotificationPreset(notificationPresetName.trim());
+      pushToast("Preset saved", `Stored ${notificationPresetName.trim()} for future tests.`, "success");
+      await load();
+    } catch (mutationError) {
+      pushToast("Preset save failed", mutationError instanceof Error ? mutationError.message : "Unknown error", "error");
     } finally {
       setBusyAction(null);
     }
@@ -626,6 +669,18 @@ export default function App() {
                   <option value="high">High test</option>
                   <option value="critical">Critical test</option>
                 </select>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-[1fr_180px_auto]">
+                <Input value={notificationPresetName} onChange={(event) => setNotificationPresetName(event.target.value)} placeholder="weekday-health-check" />
+                <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={selectedNotificationPreset} onChange={(event) => setSelectedNotificationPreset(event.target.value)}>
+                  <option value="">Load saved preset</option>
+                  {settings.notification_test_presets.map((preset) => (
+                    <option key={preset.name} value={preset.name}>{preset.name}</option>
+                  ))}
+                </select>
+                <Button variant="ghost" onClick={() => void handleNotificationPresetSave()} disabled={busyAction === "notifications-preset-save"}>
+                  Save preset
+                </Button>
               </div>
               <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
                 <Input value={notificationTestDeviceName} onChange={(event) => setNotificationTestDeviceName(event.target.value)} placeholder="Control Plane Test" />
