@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Activity, ListFilter, RefreshCw, ShieldCheck, Sparkles, Undo2 } from "lucide-react";
 import { api, type DashboardSummary, type SettingsSummary } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
@@ -82,6 +82,7 @@ export default function App() {
   const [notificationTestSeverity, setNotificationTestSeverity] = useState<"medium" | "high" | "critical">("high");
   const [notificationTestDeviceName, setNotificationTestDeviceName] = useState("Control Plane Test");
   const [notificationDryRun, setNotificationDryRun] = useState(false);
+  const [notificationAnalyticsWindow, setNotificationAnalyticsWindow] = useState<10 | 30 | 50 | 100>(30);
   const [serviceSearch, setServiceSearch] = useState("");
 
   const [deviceId, setDeviceId] = useState<string | null>(null);
@@ -95,11 +96,14 @@ export default function App() {
   const [deviceServiceOverrideId, setDeviceServiceOverrideId] = useState("");
   const [deviceServiceOverrideMode, setDeviceServiceOverrideMode] = useState<"allow" | "block">("allow");
 
-  async function load() {
+  const load = useCallback(async () => {
     setState("loading");
     setError(null);
     try {
-      const [dashboardData, settingsData] = await Promise.all([api.dashboard(), api.settings()]);
+      const [dashboardData, settingsData] = await Promise.all([
+        api.dashboard(notificationAnalyticsWindow),
+        api.settings(),
+      ]);
       setDashboard(dashboardData);
       setSettings(settingsData);
       setState("ready");
@@ -107,11 +111,11 @@ export default function App() {
       setError(loadError instanceof Error ? loadError.message : "Unknown error");
       setState("error");
     }
-  }
+  }, [notificationAnalyticsWindow]);
 
   useEffect(() => {
     void load();
-  }, []);
+  }, [load]);
 
   useEffect(() => {
     setClassifierThreshold(settings.classifier.threshold.toFixed(2));
@@ -605,6 +609,15 @@ export default function App() {
                     Send test
                   </Button>
                 </div>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-[1fr_180px]">
+                <div className="text-sm text-muted-foreground">Notification analytics window</div>
+                <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={notificationAnalyticsWindow} onChange={(event) => setNotificationAnalyticsWindow(Number.parseInt(event.target.value, 10) as 10 | 30 | 50 | 100)}>
+                  <option value="10">Last 10 events</option>
+                  <option value="30">Last 30 events</option>
+                  <option value="50">Last 50 events</option>
+                  <option value="100">Last 100 events</option>
+                </select>
               </div>
               <div className="grid gap-3 sm:grid-cols-[1fr_170px]">
                 <Input value={notificationTestDomain} onChange={(event) => setNotificationTestDomain(event.target.value)} placeholder="notification-test.cogwheel.local" />

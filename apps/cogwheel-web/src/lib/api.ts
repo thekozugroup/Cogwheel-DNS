@@ -188,7 +188,12 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  dashboard: () => fetchJson<DashboardSummary>("/api/v1/dashboard"),
+  dashboard: (notificationWindow?: number) =>
+    fetchJson<DashboardSummary>(
+      notificationWindow
+        ? `/api/v1/dashboard?notification_window=${notificationWindow}`
+        : "/api/v1/dashboard",
+    ),
   settings: () => fetchJson<SettingsSummary>("/api/v1/settings"),
   refreshSources: () =>
     fetchJson<{ outcome: string; notes: string[] }>("/api/v1/sources/refresh", {

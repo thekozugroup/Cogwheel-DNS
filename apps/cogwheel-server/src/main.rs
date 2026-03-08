@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use axum::extract::{FromRef, State};
+use axum::extract::{FromRef, Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use cogwheel_api::{ApiEnvelope, ApiState, AppConfig, RuntimeGuardConfig, router};
@@ -131,6 +131,11 @@ struct NotificationFailureDomain {
 struct NotificationTestResult {
     outcome: String,
     target: String,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct DashboardQuery {
+    notification_window: Option<usize>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -621,7 +626,9 @@ async fn list_security_events(
 
 async fn dashboard_summary(
     State(state): State<ServerState>,
+    Query(query): Query<DashboardQuery>,
 ) -> Result<Json<ApiEnvelope<DashboardSummary>>, axum::http::StatusCode> {
+    let notification_window = normalize_notification_window(query.notification_window);
     let sources = state
         .storage
         .list_sources()
@@ -649,7 +656,7 @@ async fn dashboard_summary(
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     let notification_audit_events = state
         .storage
-        .recent_audit_events(30)
+        .recent_audit_events(notification_window as i64)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     let devices = state
@@ -2118,6 +2125,15 @@ fn build_notification_failure_analytics(
     }
 }
 
+fn normalize_notification_window(window: Option<usize>) -> usize {
+    match window.unwrap_or(30) {
+        10 => 10,
+        50 => 50,
+        100 => 100,
+        _ => 30,
+    }
+}
+
 fn normalize_notification_severity(severity: &str) -> Option<String> {
     match severity.trim().to_ascii_lowercase().as_str() {
         "medium" => Some("medium".to_string()),
@@ -2728,6 +2744,15 @@ mod tests {
         assert_eq!(analytics.top_failed_domains.len(), 1);
         assert_eq!(analytics.top_failed_domains[0].domain, "fail.example");
         assert_eq!(analytics.top_failed_domains[0].failure_count, 2);
+    }
+
+    #[test]
+    fn normalize_notification_window_accepts_known_values() {
+        assert_eq!(normalize_notification_window(Some(10)), 10);
+        assert_eq!(normalize_notification_window(Some(50)), 50);
+        assert_eq!(normalize_notification_window(Some(100)), 100);
+        assert_eq!(normalize_notification_window(Some(999)), 30);
+        assert_eq!(normalize_notification_window(None), 30);
     }
 
     #[test]
