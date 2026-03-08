@@ -132,7 +132,7 @@ Current implementation notes:
 - Bootstrap source registry, scheduled/manual source refresh, ruleset recording, audit events, list/ruleset/audit APIs, and rollback flows are in place.
 - Remaining Phase 3 gaps are richer long-window regression/SLO signals beyond the current runtime guard probes and protected-domain rollback guards, though fallback/CNAME counters and runtime health APIs are now exposed for observability.
 - Dashboard/settings summary APIs now exist to support future `shadcn/ui` control-plane flows without direct database access.
-- Blocklist sources are now create/update-able through backend settings APIs, including optional immediate refresh into active rulesets.
+- Blocklist sources are now create/update/disable/delete-able through backend settings APIs, including optional immediate refresh into active rulesets.
 
 Exit criteria:
 
@@ -202,7 +202,7 @@ Current implementation notes:
 
 - Backend summaries already exist for future UI consumption: dashboard, settings, services, runtime health, rulesets, and audit events.
 - Classifier settings are already editable via backend API, so the future UI can wire directly into persisted control-plane state.
-- Blocklist source management is also API-editable, so the future UI can create and update blocklists without low-level database access.
+- Blocklist source management is also API-editable, so the future UI can create, disable, and delete blocklists without low-level database access.
 - Remaining work is the actual `shadcn/ui` application, richer operator workflows, and client-side state management.
 
 Exit criteria:

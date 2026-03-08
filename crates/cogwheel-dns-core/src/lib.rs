@@ -83,6 +83,8 @@ impl DnsRuntime {
         if let Ok(mut guard) = self.policy.write() {
             *guard = policy;
         }
+        self.cache.invalidate_all();
+        self.fallback_cache.invalidate_all();
     }
 
     pub fn classifier_settings(&self) -> ClassifierSettings {
@@ -138,7 +140,7 @@ impl DnsRuntime {
                 .await
                 .unwrap_or_else(|error| {
                     tracing::warn!(%error, "failed to handle udp dns query");
-                    Message::error_msg(0, hickory_proto::op::OpCode::Query, ResponseCode::ServFail)
+                    error_response_for_payload(&buffer[..size])
                 });
             let response_bytes = response.to_vec()?;
             socket.send_to(&response_bytes, peer).await?;
@@ -337,6 +339,13 @@ fn response_for_request(request: &Message, cached: &Message) -> Message {
     response
 }
 
+fn error_response_for_payload(payload: &[u8]) -> Message {
+    match Message::from_vec(payload) {
+        Ok(request) => Message::error_msg(request.id(), request.op_code(), ResponseCode::ServFail),
+        Err(_) => Message::error_msg(0, hickory_proto::op::OpCode::Query, ResponseCode::ServFail),
+    }
+}
+
 fn build_base_response(request: &Message, code: ResponseCode) -> Message {
     let mut response = Message::new();
     response.set_id(request.id());
@@ -448,5 +457,13 @@ mod tests {
 
         let response = response_for_request(&request, &cached);
         assert_eq!(response.id(), 42);
+    }
+
+    #[test]
+    fn error_response_uses_original_request_id() {
+        let request = build_probe_request("example.com", RecordType::A).expect("probe request");
+        let response = error_response_for_payload(&request.to_vec().expect("wire request"));
+        assert_eq!(response.id(), request.id());
+        assert_eq!(response.response_code(), ResponseCode::ServFail);
     }
 }

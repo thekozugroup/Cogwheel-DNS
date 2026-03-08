@@ -117,6 +117,19 @@ struct UpsertBlocklistRequest {
     refresh_now: Option<bool>,
 }
 
+#[derive(serde::Deserialize)]
+struct UpdateBlocklistStateRequest {
+    id: Uuid,
+    enabled: bool,
+    refresh_now: Option<bool>,
+}
+
+#[derive(serde::Deserialize)]
+struct DeleteBlocklistRequest {
+    id: Uuid,
+    refresh_now: Option<bool>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
@@ -284,6 +297,11 @@ fn admin_router() -> Router<ServerState> {
         .route("/api/v1/dashboard", get(dashboard_summary))
         .route("/api/v1/settings", get(settings_summary))
         .route("/api/v1/settings/blocklists", post(upsert_blocklist))
+        .route(
+            "/api/v1/settings/blocklists/state",
+            post(update_blocklist_state),
+        )
+        .route("/api/v1/settings/blocklists/delete", post(delete_blocklist))
         .route("/api/v1/sources", get(list_sources))
         .route("/api/v1/sources/refresh", post(refresh_sources))
         .route("/api/v1/services", get(list_services))
@@ -612,6 +630,119 @@ async fn upsert_blocklist(
     }))
 }
 
+async fn update_blocklist_state(
+    State(state): State<ServerState>,
+    Json(request): Json<UpdateBlocklistStateRequest>,
+) -> Result<Json<ApiEnvelope<RefreshResponse>>, axum::http::StatusCode> {
+    let mut source = state
+        .storage
+        .list_sources()
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+        .into_iter()
+        .find(|source| source.id == request.id)
+        .ok_or(axum::http::StatusCode::NOT_FOUND)?;
+
+    if is_reserved_source_id(source.id) && !request.enabled {
+        return Err(axum::http::StatusCode::CONFLICT);
+    }
+
+    source.enabled = request.enabled;
+    state
+        .storage
+        .insert_source(&source)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    state
+        .storage
+        .record_audit_event(&AuditEvent {
+            id: Uuid::new_v4(),
+            event_type: "blocklist.state_updated".to_string(),
+            payload: serde_json::to_string(&source)
+                .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?,
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if request.refresh_now.unwrap_or(true) {
+        return refresh_sources_once(&state, "blocklist-state-update")
+            .await
+            .map(|data| Json(ApiEnvelope { data }))
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    Ok(Json(ApiEnvelope {
+        data: RefreshResponse {
+            outcome: "saved".to_string(),
+            ruleset: None,
+            notes: vec![format!(
+                "{} blocklist {}",
+                if source.enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
+                source.name
+            )],
+        },
+    }))
+}
+
+async fn delete_blocklist(
+    State(state): State<ServerState>,
+    Json(request): Json<DeleteBlocklistRequest>,
+) -> Result<Json<ApiEnvelope<RefreshResponse>>, axum::http::StatusCode> {
+    if is_reserved_source_id(request.id) {
+        return Err(axum::http::StatusCode::CONFLICT);
+    }
+
+    let source = state
+        .storage
+        .list_sources()
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+        .into_iter()
+        .find(|source| source.id == request.id)
+        .ok_or(axum::http::StatusCode::NOT_FOUND)?;
+
+    let deleted = state
+        .storage
+        .delete_source(request.id)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    if !deleted {
+        return Err(axum::http::StatusCode::NOT_FOUND);
+    }
+
+    state
+        .storage
+        .record_audit_event(&AuditEvent {
+            id: Uuid::new_v4(),
+            event_type: "blocklist.deleted".to_string(),
+            payload: serde_json::to_string(&source)
+                .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?,
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if request.refresh_now.unwrap_or(true) {
+        return refresh_sources_once(&state, "blocklist-delete")
+            .await
+            .map(|data| Json(ApiEnvelope { data }))
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    Ok(Json(ApiEnvelope {
+        data: RefreshResponse {
+            outcome: "saved".to_string(),
+            ruleset: None,
+            notes: vec![format!("deleted blocklist {}", source.name)],
+        },
+    }))
+}
+
 async fn refresh_sources_once(state: &ServerState, reason: &str) -> Result<RefreshResponse> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
@@ -916,6 +1047,10 @@ fn source_kind_from_str(kind: &str) -> Option<SourceKind> {
     }
 }
 
+fn is_reserved_source_id(source_id: Uuid) -> bool {
+    source_id == Uuid::from_u128(1)
+}
+
 fn post_activation_regressions(
     policy: &PolicyEngine,
     protected_domains: &HashSet<String>,
@@ -1025,5 +1160,11 @@ mod tests {
             Some("domains".to_string())
         );
         assert_eq!(normalize_source_kind("weird"), None);
+    }
+
+    #[test]
+    fn baseline_source_id_is_reserved() {
+        assert!(is_reserved_source_id(Uuid::from_u128(1)));
+        assert!(!is_reserved_source_id(Uuid::new_v4()));
     }
 }

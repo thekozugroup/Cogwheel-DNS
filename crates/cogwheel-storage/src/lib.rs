@@ -128,6 +128,15 @@ impl Storage {
             .map_err(StorageError::from)
     }
 
+    pub async fn delete_source(&self, source_id: Uuid) -> Result<bool, StorageError> {
+        let connection = self.connection.lock().expect("storage mutex poisoned");
+        let changed = connection.execute(
+            "DELETE FROM sources WHERE id = ?1",
+            params![source_id.to_string()],
+        )?;
+        Ok(changed > 0)
+    }
+
     pub async fn record_ruleset(&self, ruleset: &RulesetRecord) -> Result<(), StorageError> {
         let connection = self.connection.lock().expect("storage mutex poisoned");
         connection.execute(
