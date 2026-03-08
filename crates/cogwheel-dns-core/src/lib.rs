@@ -1,18 +1,21 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use cogwheel_classifier::{Classification, ClassifierSettings, classify_domain};
-use cogwheel_policy::{BlockMode, DecisionKind, PolicyEngine};
+use cogwheel_policy::{BlockMode, DecisionKind, PolicyEngine, RuleAction, normalize_domain};
 use hickory_proto::op::{Message, MessageType, ResponseCode};
 use hickory_proto::rr::rdata::{A, AAAA};
-use hickory_proto::rr::{RData, Record};
+use hickory_proto::rr::{RData, Record, RecordType};
 use hickory_resolver::TokioResolver;
 use moka::future::Cache;
 use serde::Serialize;
+use std::collections::HashSet;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
+
+const MAX_CNAME_UNCLOAK_DEPTH: usize = 8;
 
 #[derive(Debug, Clone)]
 pub struct DnsRuntimeConfig {
@@ -47,6 +50,8 @@ pub struct DnsRuntimeStats {
     upstream_failures_total: AtomicU64,
     fallback_served_total: AtomicU64,
     cache_hits_total: AtomicU64,
+    cname_uncloaks_total: AtomicU64,
+    cname_blocks_total: AtomicU64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -54,6 +59,8 @@ pub struct DnsRuntimeSnapshot {
     pub upstream_failures_total: u64,
     pub fallback_served_total: u64,
     pub cache_hits_total: u64,
+    pub cname_uncloaks_total: u64,
+    pub cname_blocks_total: u64,
 }
 
 impl DnsRuntime {
@@ -83,6 +90,8 @@ impl DnsRuntime {
             upstream_failures_total: self.stats.upstream_failures_total.load(Ordering::Relaxed),
             fallback_served_total: self.stats.fallback_served_total.load(Ordering::Relaxed),
             cache_hits_total: self.stats.cache_hits_total.load(Ordering::Relaxed),
+            cname_uncloaks_total: self.stats.cname_uncloaks_total.load(Ordering::Relaxed),
+            cname_blocks_total: self.stats.cname_blocks_total.load(Ordering::Relaxed),
         }
     }
 
@@ -164,36 +173,57 @@ impl DnsRuntime {
 
         let engine = self.policy.read().expect("policy lock poisoned").clone();
         let decision = engine.evaluate(&domain);
+        let allow_matched = decision
+            .matched_rule
+            .as_ref()
+            .is_some_and(|rule| matches!(rule.action, RuleAction::Allow));
 
         let response = match decision.kind {
             DecisionKind::Blocked(mode) => build_blocked_response(&request, mode),
-            DecisionKind::Allowed => match self.resolve_upstream(&request, &domain).await {
-                Ok(response) => {
-                    self.fallback_cache
-                        .insert(
-                            domain.clone(),
-                            CachedLookup {
-                                response: response.clone(),
-                            },
-                        )
-                        .await;
-                    response
-                }
-                Err(error) => {
-                    self.stats
-                        .upstream_failures_total
-                        .fetch_add(1, Ordering::Relaxed);
-                    if let Some(fallback) = self.fallback_cache.get(&domain).await {
-                        self.stats
-                            .fallback_served_total
-                            .fetch_add(1, Ordering::Relaxed);
-                        tracing::warn!(%domain, %error, "serving fallback DNS response after upstream failure");
-                        fallback.response
-                    } else {
-                        return Err(error);
+            DecisionKind::Allowed => {
+                if !allow_matched {
+                    if let Some(mode) = self.uncloaked_block_mode(&domain, &engine).await? {
+                        let response = build_blocked_response(&request, mode);
+                        self.cache
+                            .insert(
+                                domain,
+                                CachedLookup {
+                                    response: response.clone(),
+                                },
+                            )
+                            .await;
+                        return Ok(response);
                     }
                 }
-            },
+
+                match self.resolve_upstream(&request, &domain).await {
+                    Ok(response) => {
+                        self.fallback_cache
+                            .insert(
+                                domain.clone(),
+                                CachedLookup {
+                                    response: response.clone(),
+                                },
+                            )
+                            .await;
+                        response
+                    }
+                    Err(error) => {
+                        self.stats
+                            .upstream_failures_total
+                            .fetch_add(1, Ordering::Relaxed);
+                        if let Some(fallback) = self.fallback_cache.get(&domain).await {
+                            self.stats
+                                .fallback_served_total
+                                .fetch_add(1, Ordering::Relaxed);
+                            tracing::warn!(%domain, %error, "serving fallback DNS response after upstream failure");
+                            fallback.response
+                        } else {
+                            return Err(error);
+                        }
+                    }
+                }
+            }
         };
 
         self.cache
@@ -218,6 +248,53 @@ impl DnsRuntime {
             response.add_answer(record.clone());
         }
         Ok(response)
+    }
+
+    async fn uncloaked_block_mode(
+        &self,
+        domain: &str,
+        engine: &PolicyEngine,
+    ) -> Result<Option<BlockMode>> {
+        let mut current = domain.to_string();
+        let mut seen = HashSet::new();
+
+        for _ in 0..MAX_CNAME_UNCLOAK_DEPTH {
+            if !seen.insert(current.clone()) {
+                return Ok(None);
+            }
+
+            let lookup = match self.resolver.lookup(&current, RecordType::CNAME).await {
+                Ok(lookup) => lookup,
+                Err(_) => return Ok(None),
+            };
+
+            let Some(target) = lookup.records().iter().find_map(extract_cname_target) else {
+                return Ok(None);
+            };
+
+            self.stats
+                .cname_uncloaks_total
+                .fetch_add(1, Ordering::Relaxed);
+            let normalized_target = normalize_domain(&target);
+            let decision = engine.evaluate(&normalized_target);
+            if let DecisionKind::Blocked(mode) = decision.kind {
+                self.stats
+                    .cname_blocks_total
+                    .fetch_add(1, Ordering::Relaxed);
+                return Ok(Some(mode));
+            }
+
+            current = normalized_target;
+        }
+
+        Ok(None)
+    }
+}
+
+fn extract_cname_target(record: &Record) -> Option<String> {
+    match record.data() {
+        RData::CNAME(target) => Some(target.0.to_utf8()),
+        _ => None,
     }
 }
 
@@ -282,6 +359,8 @@ mod tests {
             upstream_failures_total: stats.upstream_failures_total.load(Ordering::Relaxed),
             fallback_served_total: stats.fallback_served_total.load(Ordering::Relaxed),
             cache_hits_total: stats.cache_hits_total.load(Ordering::Relaxed),
+            cname_uncloaks_total: stats.cname_uncloaks_total.load(Ordering::Relaxed),
+            cname_blocks_total: stats.cname_blocks_total.load(Ordering::Relaxed),
         };
         assert_eq!(
             snapshot,
@@ -289,7 +368,27 @@ mod tests {
                 upstream_failures_total: 0,
                 fallback_served_total: 0,
                 cache_hits_total: 0,
+                cname_uncloaks_total: 0,
+                cname_blocks_total: 0,
             }
+        );
+    }
+
+    #[test]
+    fn extract_cname_target_reads_record_data() {
+        use hickory_proto::rr::Name;
+        use hickory_proto::rr::rdata::CNAME;
+
+        let alias = Name::from_ascii("tracker.example.com").expect("valid test name");
+        let record = Record::from_rdata(
+            Name::from_ascii("alias.example.com").expect("valid owner name"),
+            60,
+            RData::CNAME(CNAME(alias)),
+        );
+
+        assert_eq!(
+            extract_cname_target(&record),
+            Some("tracker.example.com".to_string())
         );
     }
 }
