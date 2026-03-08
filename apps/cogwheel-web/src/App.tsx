@@ -44,6 +44,12 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [blocklistName, setBlocklistName] = useState("");
   const [blocklistUrl, setBlocklistUrl] = useState("");
+  const [blocklistProfile, setBlocklistProfile] = useState("custom");
+  const [blocklistStrictness, setBlocklistStrictness] = useState<"strict" | "balanced" | "relaxed">("balanced");
+  const [blocklistInterval, setBlocklistInterval] = useState("60");
+  const [classifierThreshold, setClassifierThreshold] = useState("0.92");
+  const [editingBlocklistId, setEditingBlocklistId] = useState<string | null>(null);
+  const [serviceSearch, setServiceSearch] = useState("");
 
   async function load() {
     setState("loading");
@@ -63,13 +69,32 @@ export default function App() {
     void load();
   }, []);
 
+  useEffect(() => {
+    setClassifierThreshold(settings.classifier.threshold.toFixed(2));
+  }, [settings.classifier.threshold]);
+
   const enabledBlocklists = useMemo(
     () => settings.blocklists.filter((source) => source.enabled),
     [settings.blocklists],
   );
+  const filteredServices = useMemo(
+    () => settings.services.filter((service) => {
+      const query = serviceSearch.trim().toLowerCase();
+      if (!query) return true;
+      return `${service.manifest.display_name} ${service.manifest.category} ${service.manifest.risk_notes}`
+        .toLowerCase()
+        .includes(query);
+    }),
+    [serviceSearch, settings.services],
+  );
 
   async function handleClassifierUpdate(mode: SettingsSummary["classifier"]["mode"]) {
-    await api.updateClassifier(mode, settings.classifier.threshold);
+    await api.updateClassifier(mode, Number.parseFloat(classifierThreshold) || settings.classifier.threshold);
+    await load();
+  }
+
+  async function handleClassifierThresholdSave() {
+    await api.updateClassifier(settings.classifier.mode, Number.parseFloat(classifierThreshold) || settings.classifier.threshold);
     await load();
   }
 
@@ -84,12 +109,30 @@ export default function App() {
       url: blocklistUrl,
       kind: "domains",
       enabled: true,
-      refresh_interval_minutes: 60,
-      profile: "custom",
-      verification_strictness: "balanced",
+      refresh_interval_minutes: Number.parseInt(blocklistInterval, 10) || 60,
+      profile: blocklistProfile,
+      verification_strictness: blocklistStrictness,
     });
     setBlocklistName("");
     setBlocklistUrl("");
+    setBlocklistProfile("custom");
+    setBlocklistStrictness("balanced");
+    setBlocklistInterval("60");
+    await load();
+  }
+
+  async function handleBlocklistEdit(source: SettingsSummary["blocklists"][number]) {
+    await api.upsertBlocklist({
+      id: source.id,
+      name: source.name,
+      url: source.url,
+      kind: source.kind,
+      enabled: source.enabled,
+      refresh_interval_minutes: source.refresh_interval_minutes,
+      profile: source.profile,
+      verification_strictness: source.verification_strictness,
+    });
+    setEditingBlocklistId(null);
     await load();
   }
 
@@ -183,6 +226,10 @@ export default function App() {
                   </Button>
                 ))}
               </div>
+              <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
+                <Input value={classifierThreshold} onChange={(event) => setClassifierThreshold(event.target.value)} placeholder="0.92" />
+                <Button variant="secondary" onClick={() => void handleClassifierThresholdSave()}>Save threshold</Button>
+              </div>
             </section>
 
             <Separator />
@@ -192,6 +239,20 @@ export default function App() {
               <div className="grid gap-3">
                 <Input value={blocklistName} onChange={(event) => setBlocklistName(event.target.value)} placeholder="Human-readable name" />
                 <Input value={blocklistUrl} onChange={(event) => setBlocklistUrl(event.target.value)} placeholder="Source URL or data: URL" />
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={blocklistProfile} onChange={(event) => setBlocklistProfile(event.target.value)}>
+                    <option value="custom">Custom</option>
+                    <option value="essential">Essential</option>
+                    <option value="balanced">Balanced</option>
+                    <option value="aggressive">Aggressive</option>
+                  </select>
+                  <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={blocklistStrictness} onChange={(event) => setBlocklistStrictness(event.target.value as "strict" | "balanced" | "relaxed")}>
+                    <option value="strict">Strict</option>
+                    <option value="balanced">Balanced</option>
+                    <option value="relaxed">Relaxed</option>
+                  </select>
+                  <Input value={blocklistInterval} onChange={(event) => setBlocklistInterval(event.target.value)} placeholder="Refresh minutes" />
+                </div>
                 <Button onClick={() => void handleBlocklistCreate()} disabled={!blocklistName || !blocklistUrl}>Add blocklist</Button>
               </div>
             </section>
@@ -215,13 +276,16 @@ export default function App() {
                     </div>
                     <Badge className={source.enabled ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground"}>{source.enabled ? "Enabled" : "Disabled"}</Badge>
                   </div>
-                <div className="mt-3 flex flex-wrap gap-2 text-xs text-muted-foreground">
-                  <Badge>{source.profile}</Badge>
-                  <Badge>{source.verification_strictness}</Badge>
+                  <div className="mt-3 flex flex-wrap gap-2 text-xs text-muted-foreground">
+                    <Badge>{source.profile}</Badge>
+                    <Badge>{source.verification_strictness}</Badge>
                   <Badge>{source.refresh_interval_minutes}m</Badge>
                   <Badge>{status?.due_for_refresh ? "Due" : "Fresh"}</Badge>
                 </div>
                 <div className="mt-4 flex flex-wrap gap-2">
+                  <Button variant="ghost" size="sm" onClick={() => setEditingBlocklistId(editingBlocklistId === source.id ? null : source.id)}>
+                    {editingBlocklistId === source.id ? "Close" : "Edit"}
+                  </Button>
                   <Button variant="secondary" size="sm" onClick={() => void handleBlocklistToggle(source.id, !source.enabled)}>
                     {source.enabled ? "Disable" : "Enable"}
                   </Button>
@@ -231,6 +295,51 @@ export default function App() {
                     </Button>
                   ) : null}
                 </div>
+                {editingBlocklistId === source.id ? (
+                  <div className="mt-4 grid gap-3 rounded-[20px] border border-border/70 bg-muted/40 p-4">
+                    <Input value={source.name} readOnly />
+                    <Input value={source.url} readOnly />
+                    <div className="grid gap-3 sm:grid-cols-3 text-sm text-muted-foreground">
+                      <label className="grid gap-1">
+                        <span>Profile</span>
+                        <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={source.profile} onChange={(event) => {
+                          setSettings((current) => ({
+                            ...current,
+                            blocklists: current.blocklists.map((item) => item.id === source.id ? { ...item, profile: event.target.value } : item),
+                          }));
+                        }}>
+                          <option value="essential">Essential</option>
+                          <option value="balanced">Balanced</option>
+                          <option value="aggressive">Aggressive</option>
+                          <option value="custom">Custom</option>
+                        </select>
+                      </label>
+                      <label className="grid gap-1">
+                        <span>Strictness</span>
+                        <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={source.verification_strictness} onChange={(event) => {
+                          setSettings((current) => ({
+                            ...current,
+                            blocklists: current.blocklists.map((item) => item.id === source.id ? { ...item, verification_strictness: event.target.value } : item),
+                          }));
+                        }}>
+                          <option value="strict">Strict</option>
+                          <option value="balanced">Balanced</option>
+                          <option value="relaxed">Relaxed</option>
+                        </select>
+                      </label>
+                      <label className="grid gap-1">
+                        <span>Refresh (minutes)</span>
+                        <Input value={String(source.refresh_interval_minutes)} onChange={(event) => {
+                          setSettings((current) => ({
+                            ...current,
+                            blocklists: current.blocklists.map((item) => item.id === source.id ? { ...item, refresh_interval_minutes: Number.parseInt(event.target.value, 10) || item.refresh_interval_minutes } : item),
+                          }));
+                        }} />
+                      </label>
+                    </div>
+                    <Button size="sm" onClick={() => void handleBlocklistEdit(source)}>Save metadata</Button>
+                  </div>
+                ) : null}
               </div>
             );
           })}
@@ -240,8 +349,10 @@ export default function App() {
         <Card>
           <CardTitle>Services</CardTitle>
           <CardDescription>Optional common-service toggles powered by the layered service rules already built in Rust.</CardDescription>
-          <div className="mt-5 grid gap-3">
-            {settings.services.map((service) => (
+          <div className="mt-5 space-y-4">
+            <Input value={serviceSearch} onChange={(event) => setServiceSearch(event.target.value)} placeholder="Search services or categories" />
+            <div className="grid gap-3">
+            {filteredServices.map((service) => (
               <div key={service.manifest.service_id} className="rounded-[24px] border border-border/70 bg-white/80 p-4">
                 <div className="flex items-center justify-between gap-3">
                   <div>
@@ -259,6 +370,7 @@ export default function App() {
                 </div>
               </div>
             ))}
+            </div>
           </div>
         </Card>
       </section>

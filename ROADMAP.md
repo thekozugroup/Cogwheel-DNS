@@ -194,7 +194,7 @@ Goal: Deliver a highly polished, low-cognitive-load GUI with a Rust backend.
 - [ ] Add one-click safe actions: `Pause 10m`, `Rollback`, `Trust Domain`.
 - [ ] Add guided issue recovery flows (no jargon, plain language).
 - [ ] Implement local-first UX: app remains useful during temporary server disconnects.
-- [ ] Build the UI with `shadcn/ui` components and a tightly constrained design system for Apple-like clarity.
+- [x] Build the UI with `shadcn/ui` components and a tightly constrained design system for Apple-like clarity.
 - [ ] Evaluate optional Tauri packaging for native desktop distribution without moving backend logic out of Rust.
 - [ ] Add accessibility and high-clarity typography/spacing QA checklist.
 
@@ -204,6 +204,7 @@ Current implementation notes:
 - Classifier settings are already editable via backend API, so the future UI can wire directly into persisted control-plane state.
 - Blocklist source management is also API-editable, including schedule/profile/verification metadata and refresh status, so the future UI can manage blocklists without low-level database access.
 - A Vite + React + shadcn-style frontend scaffold now exists in `apps/cogwheel-web` with live dashboard/settings/service/blocklist flows wired to the current backend APIs.
+- The current UI already supports classifier editing, blocklist lifecycle and metadata editing, and searchable service toggles; remaining work is polish, onboarding, recovery UX, and local-first behavior.
 - Remaining work is the actual `shadcn/ui` application, richer operator workflows, and client-side state management.
 
 Exit criteria:
@@ -283,3 +284,33 @@ Exit criteria:
 - [ ] Require rollback path for every deployment-affecting feature.
 - [ ] Keep default user-facing settings minimal and understandable.
 - [ ] Preserve modular crate boundaries; avoid cross-crate coupling drift.
+
+## Phase 10 - Android Companion App
+
+Goal: Provide a mobile companion app for Android focused on monitoring, safe controls, and remote-friendly administration.
+
+- [ ] Define Android app scope: status visibility, blocklist/service toggles, classifier controls, audit/event viewing, and node health.
+- [ ] Choose app architecture and packaging strategy (native Android vs shared shell around web control plane).
+- [ ] Build secure pairing/auth flow with existing backend APIs.
+- [ ] Add mobile-first dashboard and essential controls only; avoid full desktop complexity.
+- [ ] Support remote notifications for degraded runtime health, failed refreshes, and rollback events.
+
+Exit criteria:
+
+- Android companion app can monitor and perform essential safe control-plane actions.
+- Pairing, auth, and mobile UX are production-ready.
+
+## Phase 11 - macOS Companion App
+
+Goal: Provide a polished macOS companion app for local monitoring and control of Cogwheel nodes.
+
+- [ ] Define macOS app scope: dashboard, blocklist management, service toggles, classifier controls, runtime health, and audit review.
+- [ ] Choose packaging strategy (Tauri desktop wrapper vs dedicated native app) based on UX and maintainability.
+- [ ] Add local discovery and secure pairing flow for home-network deployments.
+- [ ] Support menu bar or lightweight background presence for quick status and actions.
+- [ ] Add macOS-specific onboarding and system integration where it improves ease of use.
+
+Exit criteria:
+
+- macOS companion app offers a polished desktop control surface with reliable pairing and everyday usability.
+- Distribution and update strategy are defined for non-technical users.
