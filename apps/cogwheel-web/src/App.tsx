@@ -152,6 +152,17 @@ export default function App() {
     [serviceSearch, settings.services],
   );
 
+  const serviceLabelMap = useMemo(
+    () =>
+      new Map(
+        settings.services.map((service) => [
+          service.manifest.service_id,
+          service.manifest.display_name,
+        ]),
+      ),
+    [settings.services],
+  );
+
   async function handleClassifierUpdate(mode: SettingsSummary["classifier"]["mode"]) {
     setBusyAction(`classifier-mode-${mode}`);
     try {
@@ -376,6 +387,11 @@ export default function App() {
 
   function removeDeviceServiceOverride(serviceId: string) {
     setDeviceServiceOverrides((current) => current.filter((item) => item.service_id !== serviceId));
+  }
+
+  function formatDeviceServiceOverride(serviceId: string, mode: "allow" | "block") {
+    const label = serviceLabelMap.get(serviceId) ?? serviceId;
+    return `${label} - ${mode}`;
   }
 
   return (
@@ -815,7 +831,7 @@ export default function App() {
               <div className="flex flex-wrap gap-2">
                 {deviceServiceOverrides.map((override) => (
                   <button key={`${override.service_id}-${override.mode}`} type="button" className="rounded-full border border-border/70 bg-muted/40 px-3 py-1 text-xs text-muted-foreground" onClick={() => removeDeviceServiceOverride(override.service_id)}>
-                    {override.service_id} - {override.mode} x
+                    {formatDeviceServiceOverride(override.service_id, override.mode)} x
                   </button>
                 ))}
               </div>
@@ -850,6 +866,15 @@ export default function App() {
                           : "no service overrides"}
                       </Badge>
                     </div>
+                    {device.service_overrides.length > 0 ? (
+                      <div className="mt-3 flex flex-wrap gap-2 text-xs text-muted-foreground">
+                        {device.service_overrides.map((override) => (
+                          <Badge key={`${device.id}-${override.service_id}-${override.mode}`}>
+                            {formatDeviceServiceOverride(override.service_id, override.mode)}
+                          </Badge>
+                        ))}
+                      </div>
+                    ) : null}
                     <div className="mt-4">
                       <Button variant="ghost" size="sm" onClick={() => startDeviceEdit(device)}>
                         Edit device

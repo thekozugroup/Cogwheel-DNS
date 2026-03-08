@@ -186,6 +186,7 @@ Current implementation notes:
 - Devices with custom policy mode can now bypass blocking entirely in addition to selecting a profile override, giving the control plane a richer per-device policy surface.
 - Devices with custom policy mode can now carry per-device allowed-domain lists, letting selected domains bypass blocking for a specific device without changing the global profile.
 - Devices with custom policy mode can now carry per-device service overrides that expand into device-specific allow/block behavior using the built-in service manifest catalog.
+- The device editor now shows service overrides with friendly manifest labels in both edit chips and saved-device summaries, making per-device service policy easier to review.
 
 ## Phase 4 - Real-Time Classifier (Background First)
 
