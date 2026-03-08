@@ -135,6 +135,7 @@ export default function App() {
     if (!selectedNotificationPreset) return;
     const preset = settings.notification_test_presets.find((item) => item.name === selectedNotificationPreset);
     if (!preset) return;
+    setNotificationPresetName(preset.name);
     setNotificationTestDomain(preset.domain);
     setNotificationTestSeverity(preset.severity);
     setNotificationTestDeviceName(preset.device_name);
@@ -290,6 +291,29 @@ export default function App() {
       await load();
     } catch (mutationError) {
       pushToast("Preset save failed", mutationError instanceof Error ? mutationError.message : "Unknown error", "error");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleNotificationPresetDelete() {
+    if (!selectedNotificationPreset) {
+      pushToast("Preset required", "Select a saved preset before deleting it.", "error");
+      return;
+    }
+
+    setBusyAction("notifications-preset-delete");
+    try {
+      const nextPresets = settings.notification_test_presets.filter(
+        (preset) => preset.name !== selectedNotificationPreset,
+      );
+      await api.updateNotificationTestPresets(nextPresets);
+      pushToast("Preset deleted", `${selectedNotificationPreset} was removed.`, "success");
+      setSelectedNotificationPreset("");
+      setNotificationPresetName("");
+      await load();
+    } catch (mutationError) {
+      pushToast("Preset delete failed", mutationError instanceof Error ? mutationError.message : "Unknown error", "error");
     } finally {
       setBusyAction(null);
     }
@@ -670,7 +694,7 @@ export default function App() {
                   <option value="critical">Critical test</option>
                 </select>
               </div>
-              <div className="grid gap-3 sm:grid-cols-[1fr_180px_auto]">
+              <div className="grid gap-3 sm:grid-cols-[1fr_180px_auto_auto]">
                 <Input value={notificationPresetName} onChange={(event) => setNotificationPresetName(event.target.value)} placeholder="weekday-health-check" />
                 <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={selectedNotificationPreset} onChange={(event) => setSelectedNotificationPreset(event.target.value)}>
                   <option value="">Load saved preset</option>
@@ -680,6 +704,9 @@ export default function App() {
                 </select>
                 <Button variant="ghost" onClick={() => void handleNotificationPresetSave()} disabled={busyAction === "notifications-preset-save"}>
                   Save preset
+                </Button>
+                <Button variant="ghost" onClick={() => void handleNotificationPresetDelete()} disabled={busyAction === "notifications-preset-delete" || !selectedNotificationPreset}>
+                  Delete preset
                 </Button>
               </div>
               <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
@@ -1066,6 +1093,30 @@ export default function App() {
       {state === "ready" ? (
         <div className="text-sm text-muted-foreground">
           {enabledBlocklists.length} enabled blocklists, {settings.devices.length} named devices, classifier threshold {settings.classifier.threshold.toFixed(2)}.
+        </div>
+      ) : null}
+    </main>
+  );
+}
+
+function Metric({ label, value, icon }: { label: string; value: string; icon: ReactNode }) {
+  return (
+    <div className="rounded-[24px] border border-border/70 bg-muted/60 p-4">
+      <div className="flex items-center gap-2 text-sm text-muted-foreground">{icon}{label}</div>
+      <div className="mt-2 font-display text-2xl font-semibold">{value}</div>
+    </div>
+  );
+}
+
+function Row({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between gap-4 text-sm">
+      <span className="text-muted-foreground">{label}</span>
+      <span className="font-medium">{value}</span>
+    </div>
+  );
+}
+enabledBlocklists.length} enabled blocklists, {settings.devices.length} named devices, classifier threshold {settings.classifier.threshold.toFixed(2)}.
         </div>
       ) : null}
     </main>
