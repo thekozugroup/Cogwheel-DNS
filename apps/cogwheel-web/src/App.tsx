@@ -83,6 +83,9 @@ export default function App() {
   const [deviceProfileOverride, setDeviceProfileOverride] = useState("");
   const [deviceProtectionOverride, setDeviceProtectionOverride] = useState<"inherit" | "bypass">("inherit");
   const [deviceAllowedDomains, setDeviceAllowedDomains] = useState("");
+  const [deviceServiceOverrides, setDeviceServiceOverrides] = useState<Array<{ service_id: string; mode: "allow" | "block" }>>([]);
+  const [deviceServiceOverrideId, setDeviceServiceOverrideId] = useState("");
+  const [deviceServiceOverrideMode, setDeviceServiceOverrideMode] = useState<"allow" | "block">("allow");
 
   async function load() {
     setState("loading");
@@ -128,6 +131,9 @@ export default function App() {
     setDeviceProfileOverride("");
     setDeviceProtectionOverride("inherit");
     setDeviceAllowedDomains("");
+    setDeviceServiceOverrides([]);
+    setDeviceServiceOverrideId("");
+    setDeviceServiceOverrideMode("allow");
   }
 
   const enabledBlocklists = useMemo(
@@ -333,6 +339,7 @@ export default function App() {
               .map((domain) => domain.trim())
               .filter(Boolean)
           : [],
+        service_overrides: devicePolicyMode === "custom" ? deviceServiceOverrides : [],
       });
       pushToast(deviceId ? "Device updated" : "Device added", `${deviceName} is now tracked in the control plane.`, "success");
       resetDeviceForm();
@@ -352,6 +359,23 @@ export default function App() {
     setDeviceProfileOverride(device.blocklist_profile_override ?? "");
     setDeviceProtectionOverride(device.protection_override);
     setDeviceAllowedDomains(device.allowed_domains.join(", "));
+    setDeviceServiceOverrides(device.service_overrides);
+    setDeviceServiceOverrideId("");
+    setDeviceServiceOverrideMode("allow");
+  }
+
+  function addDeviceServiceOverride() {
+    if (!deviceServiceOverrideId) return;
+    setDeviceServiceOverrides((current) => {
+      const next = current.filter((item) => item.service_id !== deviceServiceOverrideId);
+      next.push({ service_id: deviceServiceOverrideId, mode: deviceServiceOverrideMode });
+      next.sort((left, right) => left.service_id.localeCompare(right.service_id));
+      return next;
+    });
+  }
+
+  function removeDeviceServiceOverride(serviceId: string) {
+    setDeviceServiceOverrides((current) => current.filter((item) => item.service_id !== serviceId));
   }
 
   return (
@@ -770,6 +794,32 @@ export default function App() {
                 {deviceId ? <Button variant="ghost" onClick={resetDeviceForm}>Cancel</Button> : null}
               </div>
             </div>
+            <div className="grid gap-3 md:grid-cols-[1fr_160px_auto]">
+              <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={deviceServiceOverrideId} onChange={(event) => setDeviceServiceOverrideId(event.target.value)} disabled={devicePolicyMode !== "custom"}>
+                <option value="">Select service override</option>
+                {settings.services.map((service) => (
+                  <option key={service.manifest.service_id} value={service.manifest.service_id}>
+                    {service.manifest.display_name}
+                  </option>
+                ))}
+              </select>
+              <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={deviceServiceOverrideMode} onChange={(event) => setDeviceServiceOverrideMode(event.target.value as "allow" | "block")} disabled={devicePolicyMode !== "custom"}>
+                <option value="allow">Allow service</option>
+                <option value="block">Block service</option>
+              </select>
+              <Button variant="ghost" onClick={addDeviceServiceOverride} disabled={devicePolicyMode !== "custom" || !deviceServiceOverrideId}>
+                Add service rule
+              </Button>
+            </div>
+            {deviceServiceOverrides.length > 0 ? (
+              <div className="flex flex-wrap gap-2">
+                {deviceServiceOverrides.map((override) => (
+                  <button key={`${override.service_id}-${override.mode}`} type="button" className="rounded-full border border-border/70 bg-muted/40 px-3 py-1 text-xs text-muted-foreground" onClick={() => removeDeviceServiceOverride(override.service_id)}>
+                    {override.service_id} - {override.mode} x
+                  </button>
+                ))}
+              </div>
+            ) : null}
             <Separator className="my-2" />
             <div className="grid gap-3">
               {settings.devices.length === 0 ? (
@@ -793,6 +843,11 @@ export default function App() {
                         {device.allowed_domains.length > 0
                           ? `${device.allowed_domains.length} allowed domain${device.allowed_domains.length === 1 ? "" : "s"}`
                           : "no device allowlist"}
+                      </Badge>
+                      <Badge>
+                        {device.service_overrides.length > 0
+                          ? `${device.service_overrides.length} service override${device.service_overrides.length === 1 ? "" : "s"}`
+                          : "no service overrides"}
                       </Badge>
                     </div>
                     <div className="mt-4">
