@@ -30,6 +30,7 @@ const emptyDashboard: DashboardSummary = {
   },
   latest_audit_events: [],
   recent_security_events: [],
+  recent_notification_deliveries: [],
   security_summary: {
     medium_count: 0,
     high_count: 0,
@@ -506,6 +507,25 @@ export default function App() {
                 <Button variant="secondary" onClick={() => void handleNotificationSave()} disabled={busyAction === "notifications-save"}>
                   Save alerts
                 </Button>
+              </div>
+              <div className="grid gap-3">
+                {dashboard.recent_notification_deliveries.length === 0 ? (
+                  <div className="rounded-2xl border border-dashed border-border/80 bg-muted/30 p-4 text-sm text-muted-foreground">
+                    No recent notification deliveries recorded yet.
+                  </div>
+                ) : (
+                  dashboard.recent_notification_deliveries.map((delivery) => (
+                    <div key={`${delivery.created_at}-${delivery.domain}-${delivery.status}`} className="rounded-2xl border border-border/70 bg-muted/60 p-3 text-sm">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="font-medium">{delivery.domain}</div>
+                        <Badge>{delivery.status}</Badge>
+                      </div>
+                      <div className="mt-1 text-muted-foreground">
+                        {delivery.severity} alert for {delivery.device_name ?? delivery.client_ip} after {delivery.attempts} attempt{delivery.attempts === 1 ? "" : "s"}.
+                      </div>
+                    </div>
+                  ))
+                )}
               </div>
             </section>
 

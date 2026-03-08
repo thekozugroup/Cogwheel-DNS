@@ -95,6 +95,16 @@ export type NotificationSettings = {
   min_severity: "medium" | "high" | "critical";
 };
 
+export type NotificationDeliveryEvent = {
+  status: string;
+  severity: string;
+  domain: string;
+  device_name: string | null;
+  client_ip: string;
+  attempts: number;
+  created_at: string;
+};
+
 export type DashboardSummary = {
   protection_status: string;
   active_ruleset: RulesetSummary | null;
@@ -105,6 +115,7 @@ export type DashboardSummary = {
   runtime_health: RuntimeHealth;
   latest_audit_events: AuditEvent[];
   recent_security_events: SecurityEventRecord[];
+  recent_notification_deliveries: NotificationDeliveryEvent[];
   security_summary: SecuritySummary;
 };
 
