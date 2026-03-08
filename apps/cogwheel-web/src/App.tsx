@@ -78,6 +78,10 @@ export default function App() {
   const [notificationEnabled, setNotificationEnabled] = useState(false);
   const [notificationWebhookUrl, setNotificationWebhookUrl] = useState("");
   const [notificationMinSeverity, setNotificationMinSeverity] = useState<"medium" | "high" | "critical">("high");
+  const [notificationTestDomain, setNotificationTestDomain] = useState("notification-test.cogwheel.local");
+  const [notificationTestSeverity, setNotificationTestSeverity] = useState<"medium" | "high" | "critical">("high");
+  const [notificationTestDeviceName, setNotificationTestDeviceName] = useState("Control Plane Test");
+  const [notificationDryRun, setNotificationDryRun] = useState(false);
   const [serviceSearch, setServiceSearch] = useState("");
 
   const [deviceId, setDeviceId] = useState<string | null>(null);
@@ -117,6 +121,7 @@ export default function App() {
     setNotificationEnabled(settings.notifications.enabled);
     setNotificationWebhookUrl(settings.notifications.webhook_url ?? "");
     setNotificationMinSeverity(settings.notifications.min_severity);
+    setNotificationTestSeverity(settings.notifications.min_severity);
   }, [settings.notifications]);
 
   function pushToast(title: string, detail: string | undefined, tone: Toast["tone"]) {
@@ -214,8 +219,19 @@ export default function App() {
   async function handleNotificationTest() {
     setBusyAction("notifications-test");
     try {
-      const result = await api.testNotifications();
-      pushToast("Test notification sent", `Delivered to ${result.target} and added to recent history.`, "success");
+      const result = await api.testNotifications({
+        domain: notificationTestDomain,
+        severity: notificationTestSeverity,
+        device_name: notificationTestDeviceName,
+        dry_run: notificationDryRun,
+      });
+      pushToast(
+        notificationDryRun ? "Webhook validated" : "Test notification sent",
+        notificationDryRun
+          ? `Validated ${result.target} without sending a live request.`
+          : `Delivered to ${result.target} and added to recent history.`,
+        "success",
+      );
       await load();
     } catch (mutationError) {
       pushToast("Test notification failed", mutationError instanceof Error ? mutationError.message : "Unknown error", "error");
@@ -575,6 +591,21 @@ export default function App() {
                     Send test
                   </Button>
                 </div>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-[1fr_170px]">
+                <Input value={notificationTestDomain} onChange={(event) => setNotificationTestDomain(event.target.value)} placeholder="notification-test.cogwheel.local" />
+                <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={notificationTestSeverity} onChange={(event) => setNotificationTestSeverity(event.target.value as "medium" | "high" | "critical") }>
+                  <option value="medium">Medium test</option>
+                  <option value="high">High test</option>
+                  <option value="critical">Critical test</option>
+                </select>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
+                <Input value={notificationTestDeviceName} onChange={(event) => setNotificationTestDeviceName(event.target.value)} placeholder="Control Plane Test" />
+                <label className="flex items-center gap-3 rounded-2xl border border-border/70 bg-muted/40 px-4 py-3 text-sm">
+                  <input type="checkbox" checked={notificationDryRun} onChange={(event) => setNotificationDryRun(event.target.checked)} />
+                  Validate only
+                </label>
               </div>
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">

@@ -133,6 +133,13 @@ export type NotificationTestResult = {
   target: string;
 };
 
+export type NotificationTestRequest = {
+  domain?: string;
+  severity?: NotificationSettings["min_severity"];
+  device_name?: string;
+  dry_run?: boolean;
+};
+
 export type DashboardSummary = {
   protection_status: string;
   active_ruleset: RulesetSummary | null;
@@ -204,9 +211,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify(input),
     }),
-  testNotifications: () =>
+  testNotifications: (input?: NotificationTestRequest) =>
     fetchJson<NotificationTestResult>("/api/v1/settings/notifications/test", {
       method: "POST",
+      body: JSON.stringify(input ?? {}),
     }),
   upsertBlocklist: (input: Partial<SourceRecord> & { name: string; url: string; kind: string }) =>
     fetchJson<{ outcome: string; notes: string[] }>("/api/v1/settings/blocklists", {

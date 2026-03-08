@@ -173,6 +173,14 @@ struct UpdateNotificationSettingsRequest {
     min_severity: String,
 }
 
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct TestNotificationRequest {
+    domain: Option<String>,
+    severity: Option<String>,
+    device_name: Option<String>,
+    dry_run: Option<bool>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct BlocklistStatusView {
     id: Uuid,
@@ -955,6 +963,7 @@ async fn update_notification_settings(
 
 async fn test_notification_settings(
     State(state): State<ServerState>,
+    Json(request): Json<TestNotificationRequest>,
 ) -> Result<Json<ApiEnvelope<NotificationTestResult>>, axum::http::StatusCode> {
     let settings = state
         .notification_settings
@@ -965,16 +974,58 @@ async fn test_notification_settings(
         return Err(axum::http::StatusCode::BAD_REQUEST);
     };
 
+    let severity = normalize_notification_severity(
+        request
+            .severity
+            .as_deref()
+            .unwrap_or(&settings.min_severity),
+    )
+    .ok_or(axum::http::StatusCode::BAD_REQUEST)?;
+    let dry_run = request.dry_run.unwrap_or(false);
+
     let test_event = SecurityEventRecord {
         id: Uuid::new_v4(),
         device_id: None,
-        device_name: Some("Control Plane Test".to_string()),
+        device_name: Some(
+            request
+                .device_name
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "Control Plane Test".to_string()),
+        ),
         client_ip: "127.0.0.1".to_string(),
-        domain: "notification-test.cogwheel.local".to_string(),
+        domain: request
+            .domain
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "notification-test.cogwheel.local".to_string()),
         classifier_score: 1.0,
-        severity: settings.min_severity.clone(),
+        severity: severity.clone(),
         created_at: chrono::Utc::now(),
     };
+
+    if dry_run {
+        state
+            .storage
+            .record_audit_event(&AuditEvent {
+                id: Uuid::new_v4(),
+                event_type: "notification-settings.tested.dry-run".to_string(),
+                payload: serde_json::to_string(&serde_json::json!({
+                    "target": target,
+                    "severity": test_event.severity,
+                    "domain": test_event.domain,
+                }))
+                .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?,
+                created_at: test_event.created_at,
+            })
+            .await
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        return Ok(Json(ApiEnvelope {
+            data: NotificationTestResult {
+                outcome: "validated".to_string(),
+                target,
+            },
+        }));
+    }
 
     deliver_security_notification(
         state.storage.as_ref(),
