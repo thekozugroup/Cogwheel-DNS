@@ -105,6 +105,18 @@ export type NotificationDeliveryEvent = {
   created_at: string;
 };
 
+export type NotificationHealthSummary = {
+  delivered_count: number;
+  failed_count: number;
+  last_delivery_at: string | null;
+  last_failure_at: string | null;
+};
+
+export type NotificationTestResult = {
+  outcome: string;
+  target: string;
+};
+
 export type DashboardSummary = {
   protection_status: string;
   active_ruleset: RulesetSummary | null;
@@ -116,6 +128,7 @@ export type DashboardSummary = {
   latest_audit_events: AuditEvent[];
   recent_security_events: SecurityEventRecord[];
   recent_notification_deliveries: NotificationDeliveryEvent[];
+  notification_health: NotificationHealthSummary;
   security_summary: SecuritySummary;
 };
 
@@ -173,6 +186,10 @@ export const api = {
     fetchJson<NotificationSettings>("/api/v1/settings/notifications", {
       method: "POST",
       body: JSON.stringify(input),
+    }),
+  testNotifications: () =>
+    fetchJson<NotificationTestResult>("/api/v1/settings/notifications/test", {
+      method: "POST",
     }),
   upsertBlocklist: (input: Partial<SourceRecord> & { name: string; url: string; kind: string }) =>
     fetchJson<{ outcome: string; notes: string[] }>("/api/v1/settings/blocklists", {

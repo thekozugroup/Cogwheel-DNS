@@ -31,6 +31,12 @@ const emptyDashboard: DashboardSummary = {
   latest_audit_events: [],
   recent_security_events: [],
   recent_notification_deliveries: [],
+  notification_health: {
+    delivered_count: 0,
+    failed_count: 0,
+    last_delivery_at: null,
+    last_failure_at: null,
+  },
   security_summary: {
     medium_count: 0,
     high_count: 0,
@@ -179,6 +185,19 @@ export default function App() {
       await load();
     } catch (mutationError) {
       pushToast("Notification update failed", mutationError instanceof Error ? mutationError.message : "Unknown error", "error");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleNotificationTest() {
+    setBusyAction("notifications-test");
+    try {
+      const result = await api.testNotifications();
+      pushToast("Test notification sent", `Delivered to ${result.target}.`, "success");
+      await load();
+    } catch (mutationError) {
+      pushToast("Test notification failed", mutationError instanceof Error ? mutationError.message : "Unknown error", "error");
     } finally {
       setBusyAction(null);
     }
@@ -504,9 +523,30 @@ export default function App() {
                   <option value="high">High+</option>
                   <option value="critical">Critical only</option>
                 </select>
-                <Button variant="secondary" onClick={() => void handleNotificationSave()} disabled={busyAction === "notifications-save"}>
-                  Save alerts
-                </Button>
+                <div className="flex gap-2">
+                  <Button variant="secondary" onClick={() => void handleNotificationSave()} disabled={busyAction === "notifications-save"}>
+                    Save alerts
+                  </Button>
+                  <Button variant="ghost" onClick={() => void handleNotificationTest()} disabled={busyAction === "notifications-test" || !notificationWebhookUrl}>
+                    Send test
+                  </Button>
+                </div>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
+                  <div className="text-muted-foreground">Delivered</div>
+                  <div className="mt-1 font-medium">{dashboard.notification_health.delivered_count}</div>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    Last success: {dashboard.notification_health.last_delivery_at ? new Date(dashboard.notification_health.last_delivery_at).toLocaleString() : "none yet"}
+                  </div>
+                </div>
+                <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
+                  <div className="text-muted-foreground">Failed</div>
+                  <div className="mt-1 font-medium">{dashboard.notification_health.failed_count}</div>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    Last failure: {dashboard.notification_health.last_failure_at ? new Date(dashboard.notification_health.last_failure_at).toLocaleString() : "none yet"}
+                  </div>
+                </div>
               </div>
               <div className="grid gap-3">
                 {dashboard.recent_notification_deliveries.length === 0 ? (

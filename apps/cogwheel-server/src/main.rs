@@ -90,6 +90,7 @@ struct DashboardSummary {
     latest_audit_events: Vec<AuditEvent>,
     recent_security_events: Vec<SecurityEventRecord>,
     recent_notification_deliveries: Vec<NotificationDeliveryEvent>,
+    notification_health: NotificationHealthSummary,
     security_summary: SecuritySummary,
 }
 
@@ -102,6 +103,20 @@ struct NotificationDeliveryEvent {
     client_ip: String,
     attempts: usize,
     created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct NotificationHealthSummary {
+    delivered_count: usize,
+    failed_count: usize,
+    last_delivery_at: Option<chrono::DateTime<chrono::Utc>>,
+    last_failure_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct NotificationTestResult {
+    outcome: String,
+    target: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -485,6 +500,10 @@ fn admin_router() -> Router<ServerState> {
             "/api/v1/settings/notifications",
             post(update_notification_settings),
         )
+        .route(
+            "/api/v1/settings/notifications/test",
+            post(test_notification_settings),
+        )
         .route("/api/v1/runtime", get(runtime_snapshot))
         .route("/api/v1/runtime/health", get(runtime_health))
         .route("/api/v1/rulesets", get(list_rulesets))
@@ -621,6 +640,7 @@ async fn dashboard_summary(
     let recent_security_events = security_events.into_iter().take(5).collect();
     let recent_notification_deliveries =
         build_notification_delivery_events(&notification_audit_events);
+    let notification_health = build_notification_health_summary(&notification_audit_events);
     let snapshot = load_service_toggle_snapshot(&state.storage)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -645,6 +665,7 @@ async fn dashboard_summary(
             latest_audit_events,
             recent_security_events,
             recent_notification_deliveries,
+            notification_health,
             security_summary,
         },
     }))
@@ -909,6 +930,55 @@ async fn update_notification_settings(
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(ApiEnvelope { data: settings }))
+}
+
+async fn test_notification_settings(
+    State(state): State<ServerState>,
+) -> Result<Json<ApiEnvelope<NotificationTestResult>>, axum::http::StatusCode> {
+    let settings = state
+        .notification_settings
+        .read()
+        .expect("notification settings lock poisoned")
+        .clone();
+    let Some(target) = settings.webhook_url.clone() else {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    };
+
+    let test_event = SecurityEventRecord {
+        id: Uuid::new_v4(),
+        device_id: None,
+        device_name: Some("Control Plane Test".to_string()),
+        client_ip: "127.0.0.1".to_string(),
+        domain: "notification-test.cogwheel.local".to_string(),
+        classifier_score: 1.0,
+        severity: settings.min_severity.clone(),
+        created_at: chrono::Utc::now(),
+    };
+
+    send_security_notification(&state.http_client, &settings, &test_event)
+        .await
+        .map_err(|_| axum::http::StatusCode::BAD_GATEWAY)?;
+    state
+        .storage
+        .record_audit_event(&AuditEvent {
+            id: Uuid::new_v4(),
+            event_type: "notification-settings.tested".to_string(),
+            payload: serde_json::to_string(&serde_json::json!({
+                "target": target,
+                "severity": test_event.severity,
+            }))
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?,
+            created_at: test_event.created_at,
+        })
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(ApiEnvelope {
+        data: NotificationTestResult {
+            outcome: "sent".to_string(),
+            target,
+        },
+    }))
 }
 
 async fn upsert_blocklist(
@@ -1830,6 +1900,38 @@ fn build_notification_delivery_events(
         .collect()
 }
 
+fn build_notification_health_summary(audit_events: &[AuditEvent]) -> NotificationHealthSummary {
+    let mut delivered_count = 0;
+    let mut failed_count = 0;
+    let mut last_delivery_at = None;
+    let mut last_failure_at = None;
+
+    for event in audit_events {
+        match event.event_type.as_str() {
+            "security.alert_delivery_succeeded" => {
+                delivered_count += 1;
+                if last_delivery_at.is_none_or(|current| event.created_at > current) {
+                    last_delivery_at = Some(event.created_at);
+                }
+            }
+            "security.alert_delivery_failed" => {
+                failed_count += 1;
+                if last_failure_at.is_none_or(|current| event.created_at > current) {
+                    last_failure_at = Some(event.created_at);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    NotificationHealthSummary {
+        delivered_count,
+        failed_count,
+        last_delivery_at,
+        last_failure_at,
+    }
+}
+
 fn normalize_notification_severity(severity: &str) -> Option<String> {
     match severity.trim().to_ascii_lowercase().as_str() {
         "medium" => Some("medium".to_string()),
@@ -2355,6 +2457,33 @@ mod tests {
         assert_eq!(deliveries[0].status, "delivered");
         assert_eq!(deliveries[0].domain, "notify.example");
         assert_eq!(deliveries[0].attempts, 2);
+    }
+
+    #[test]
+    fn build_notification_health_summary_tracks_outcomes() {
+        let now = Utc::now();
+        let summary = build_notification_health_summary(&[
+            AuditEvent {
+                id: Uuid::new_v4(),
+                event_type: "security.alert_delivery_succeeded".to_string(),
+                payload: "{}".to_string(),
+                created_at: now,
+            },
+            AuditEvent {
+                id: Uuid::new_v4(),
+                event_type: "security.alert_delivery_failed".to_string(),
+                payload: "{}".to_string(),
+                created_at: now + chrono::Duration::seconds(5),
+            },
+        ]);
+
+        assert_eq!(summary.delivered_count, 1);
+        assert_eq!(summary.failed_count, 1);
+        assert_eq!(summary.last_delivery_at, Some(now));
+        assert_eq!(
+            summary.last_failure_at,
+            Some(now + chrono::Duration::seconds(5))
+        );
     }
 
     #[test]
