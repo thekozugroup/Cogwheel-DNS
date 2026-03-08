@@ -100,6 +100,8 @@ struct DashboardSummary {
 struct NotificationDeliveryEvent {
     status: String,
     severity: String,
+    title: String,
+    summary: String,
     domain: String,
     device_name: Option<String>,
     client_ip: String,
@@ -125,6 +127,19 @@ struct NotificationFailureAnalytics {
 struct NotificationFailureDomain {
     domain: String,
     failure_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct NotificationWebhookEvent {
+    event_type: String,
+    severity: String,
+    title: String,
+    summary: String,
+    domain: Option<String>,
+    device_name: Option<String>,
+    client_ip: Option<String>,
+    details: Vec<String>,
+    created_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -584,51 +599,76 @@ async fn list_devices(
 async fn upsert_device(
     State(state): State<ServerState>,
     Json(request): Json<UpsertDeviceRequest>,
-) -> Result<Json<ApiEnvelope<DeviceRecord>>, axum::http::StatusCode> {
+) -> Result<Json<ApiEnvelope<DeviceRecord>>, (axum::http::StatusCode, String)> {
+    let policy_mode = normalize_device_policy_mode(
+        request.policy_mode.as_deref().unwrap_or("global"),
+    )
+    .ok_or((
+        axum::http::StatusCode::BAD_REQUEST,
+        "device policy mode must be either global or custom".to_string(),
+    ))?;
+    let protection_override = normalize_device_protection_override(
+        request.protection_override.as_deref().unwrap_or("inherit"),
+    )
+    .ok_or((
+        axum::http::StatusCode::BAD_REQUEST,
+        "device protection override must be either inherit or bypass".to_string(),
+    ))?;
+    let service_overrides = validate_device_service_overrides(
+        policy_mode.as_str(),
+        request.service_overrides.unwrap_or_default(),
+    )
+    .map_err(|message| (axum::http::StatusCode::BAD_REQUEST, message))?;
+
     let device = DeviceRecord {
         id: request.id.unwrap_or_else(Uuid::new_v4),
         name: request.name,
         ip_address: request.ip_address,
-        policy_mode: normalize_device_policy_mode(
-            request.policy_mode.as_deref().unwrap_or("global"),
-        )
-        .ok_or(axum::http::StatusCode::BAD_REQUEST)?,
+        policy_mode,
         blocklist_profile_override: request
             .blocklist_profile_override
             .as_deref()
             .and_then(normalize_profile_name),
-        protection_override: normalize_device_protection_override(
-            request.protection_override.as_deref().unwrap_or("inherit"),
-        )
-        .ok_or(axum::http::StatusCode::BAD_REQUEST)?,
+        protection_override,
         allowed_domains: normalize_device_allowed_domains(
             request.allowed_domains.unwrap_or_default(),
         ),
-        service_overrides: normalize_device_service_overrides(
-            request.service_overrides.unwrap_or_default(),
-        ),
+        service_overrides,
     };
 
-    state
-        .storage
-        .upsert_device(&device)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    state.storage.upsert_device(&device).await.map_err(|_| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to persist device".to_string(),
+        )
+    })?;
     state
         .storage
         .record_audit_event(&AuditEvent {
             id: Uuid::new_v4(),
             event_type: "device.upserted".to_string(),
-            payload: serde_json::to_string(&device)
-                .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?,
+            payload: serde_json::to_string(&device).map_err(|_| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "failed to serialize device audit payload".to_string(),
+                )
+            })?,
             created_at: chrono::Utc::now(),
         })
         .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to record device audit event".to_string(),
+            )
+        })?;
 
-    sync_runtime_device_policies(&state)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    sync_runtime_device_policies(&state).await.map_err(|_| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to sync runtime device policies".to_string(),
+        )
+    })?;
 
     Ok(Json(ApiEnvelope { data: device }))
 }
@@ -840,6 +880,35 @@ async fn rollback_ruleset(
         })
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let notification_settings = state
+        .notification_settings
+        .read()
+        .expect("notification settings lock poisoned")
+        .clone();
+    if should_deliver_notification(&notification_settings, "high") {
+        let event = NotificationWebhookEvent {
+            event_type: "ruleset.rollback".to_string(),
+            severity: "high".to_string(),
+            title: "Ruleset rolled back".to_string(),
+            summary: format!("Rolled back to ruleset {}.", artifact.hash),
+            domain: None,
+            device_name: None,
+            client_ip: Some("control-plane".to_string()),
+            details: vec![format!("ruleset id {}", artifact.id)],
+            created_at: chrono::Utc::now(),
+        };
+        if let Err(error) = deliver_operational_notification(
+            &state.storage,
+            &state.http_client,
+            &notification_settings,
+            event,
+        )
+        .await
+        {
+            tracing::warn!(%error, "failed to deliver rollback notification");
+        }
+    }
 
     Ok(Json(ApiEnvelope {
         data: RulesetSummary {
@@ -1346,6 +1415,12 @@ async fn refresh_sources_once(
 
     let verification = verify_candidate(&parsed_sources, &state.protected_domains);
     if !verification.passed {
+        let rejection_notes = verification
+            .notes
+            .iter()
+            .cloned()
+            .chain(service_layer.notes.iter().cloned())
+            .collect::<Vec<_>>();
         state
             .storage
             .record_audit_event(&AuditEvent {
@@ -1362,14 +1437,39 @@ async fn refresh_sources_once(
             })
             .await?;
 
+        let notification_settings = state
+            .notification_settings
+            .read()
+            .expect("notification settings lock poisoned")
+            .clone();
+        if should_deliver_notification(&notification_settings, "high") {
+            let event = NotificationWebhookEvent {
+                event_type: "ruleset.refresh_rejected".to_string(),
+                severity: "high".to_string(),
+                title: "Ruleset refresh rejected".to_string(),
+                summary: format!("Refresh {} was rejected before activation.", reason),
+                domain: None,
+                device_name: None,
+                client_ip: Some("control-plane".to_string()),
+                details: rejection_notes.clone(),
+                created_at: chrono::Utc::now(),
+            };
+            if let Err(error) = deliver_operational_notification(
+                &state.storage,
+                &client,
+                &notification_settings,
+                event,
+            )
+            .await
+            {
+                tracing::warn!(%error, "failed to deliver refresh rejection notification");
+            }
+        }
+
         return Ok(RefreshResponse {
             outcome: "rejected".to_string(),
             ruleset: None,
-            notes: verification
-                .notes
-                .into_iter()
-                .chain(service_layer.notes)
-                .collect(),
+            notes: rejection_notes,
         });
     }
 
@@ -1431,6 +1531,35 @@ async fn refresh_sources_once(
                 created_at: chrono::Utc::now(),
             })
             .await?;
+
+        let notification_settings = state
+            .notification_settings
+            .read()
+            .expect("notification settings lock poisoned")
+            .clone();
+        if should_deliver_notification(&notification_settings, "critical") {
+            let event = NotificationWebhookEvent {
+                event_type: "ruleset.auto_rollback".to_string(),
+                severity: "critical".to_string(),
+                title: "Ruleset auto-rollback triggered".to_string(),
+                summary: format!("Refresh {} triggered runtime guard rollback.", reason),
+                domain: None,
+                device_name: None,
+                client_ip: Some("control-plane".to_string()),
+                details: regression_notes.clone(),
+                created_at: chrono::Utc::now(),
+            };
+            if let Err(error) = deliver_operational_notification(
+                &state.storage,
+                &client,
+                &notification_settings,
+                event,
+            )
+            .await
+            {
+                tracing::warn!(%error, "failed to deliver auto rollback notification");
+            }
+        }
 
         return Ok(RefreshResponse {
             outcome: "rolled_back".to_string(),
@@ -2008,6 +2137,68 @@ fn normalize_device_service_overrides(
     normalized
 }
 
+fn validate_device_service_overrides(
+    policy_mode: &str,
+    overrides: Vec<DeviceServiceOverrideRecord>,
+) -> Result<Vec<DeviceServiceOverrideRecord>, String> {
+    if overrides.is_empty() {
+        return Ok(Vec::new());
+    }
+    if policy_mode != "custom" {
+        return Err("device service overrides require custom policy mode".to_string());
+    }
+
+    let manifests = built_in_service_manifests()
+        .into_iter()
+        .map(|manifest| (manifest.service_id.clone(), manifest))
+        .collect::<HashMap<_, _>>();
+    let normalized = normalize_device_service_overrides(overrides.clone());
+
+    for override_record in overrides {
+        let service_id = override_record.service_id.trim().to_ascii_lowercase();
+        let mode = override_record.mode.trim().to_ascii_lowercase();
+        let Some(manifest) = manifests.get(&service_id) else {
+            return Err(format!(
+                "unknown device service override `{}`; choose one of the built-in services",
+                override_record.service_id.trim()
+            ));
+        };
+        if !matches!(mode.as_str(), "allow" | "block") {
+            return Err(format!(
+                "device service override `{}` must use allow or block mode",
+                manifest.display_name
+            ));
+        }
+
+        let expanded_domains = if mode == "allow" {
+            manifest
+                .allow_domains
+                .iter()
+                .chain(manifest.block_domains.iter())
+                .chain(manifest.exceptions.iter())
+                .collect::<HashSet<_>>()
+                .len()
+        } else {
+            manifest.block_domains.len()
+        };
+        if expanded_domains == 0 {
+            return Err(format!(
+                "device service override `{}` has no device-specific domains for {} mode",
+                manifest.display_name, mode
+            ));
+        }
+    }
+
+    if normalized.is_empty() {
+        return Err(
+            "device service overrides must use known built-in services with allow or block mode"
+                .to_string(),
+        );
+    }
+
+    Ok(normalized)
+}
+
 fn severity_for_classifier_score(score: f32) -> &'static str {
     if score >= 0.99 {
         "critical"
@@ -2085,9 +2276,45 @@ fn build_notification_delivery_events(
             let status = match event.event_type.as_str() {
                 "security.alert_delivery_succeeded" => "delivered",
                 "security.alert_delivery_failed" => "failed",
+                "notification.delivery_succeeded" => "delivered",
+                "notification.delivery_failed" => "failed",
                 _ => return None,
             };
             let payload: serde_json::Value = serde_json::from_str(&event.payload).ok()?;
+            let title = payload
+                .get("title")
+                .and_then(serde_json::Value::as_str)
+                .map(ToString::to_string)
+                .unwrap_or_else(|| {
+                    payload
+                        .get("domain")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("Notification")
+                        .to_string()
+                });
+            let summary = payload
+                .get("summary")
+                .and_then(serde_json::Value::as_str)
+                .map(ToString::to_string)
+                .unwrap_or_else(|| {
+                    let severity = payload
+                        .get("severity")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("unknown");
+                    let target = payload
+                        .get("device_name")
+                        .and_then(serde_json::Value::as_str)
+                        .or_else(|| payload.get("client_ip").and_then(serde_json::Value::as_str))
+                        .unwrap_or("unknown target");
+                    let attempts = payload
+                        .get("attempts")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0);
+                    format!(
+                        "{} alert for {} after {} attempt(s).",
+                        severity, target, attempts
+                    )
+                });
             Some(NotificationDeliveryEvent {
                 status: status.to_string(),
                 severity: payload
@@ -2095,10 +2322,12 @@ fn build_notification_delivery_events(
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("unknown")
                     .to_string(),
+                title,
+                summary,
                 domain: payload
                     .get("domain")
                     .and_then(serde_json::Value::as_str)
-                    .unwrap_or("unknown")
+                    .unwrap_or("control-plane")
                     .to_string(),
                 device_name: payload
                     .get("device_name")
@@ -2107,7 +2336,7 @@ fn build_notification_delivery_events(
                 client_ip: payload
                     .get("client_ip")
                     .and_then(serde_json::Value::as_str)
-                    .unwrap_or("unknown")
+                    .unwrap_or("control-plane")
                     .to_string(),
                 attempts: payload
                     .get("attempts")
@@ -2128,13 +2357,13 @@ fn build_notification_health_summary(audit_events: &[AuditEvent]) -> Notificatio
 
     for event in audit_events {
         match event.event_type.as_str() {
-            "security.alert_delivery_succeeded" => {
+            "security.alert_delivery_succeeded" | "notification.delivery_succeeded" => {
                 delivered_count += 1;
                 if last_delivery_at.is_none_or(|current| event.created_at > current) {
                     last_delivery_at = Some(event.created_at);
                 }
             }
-            "security.alert_delivery_failed" => {
+            "security.alert_delivery_failed" | "notification.delivery_failed" => {
                 failed_count += 1;
                 if last_failure_at.is_none_or(|current| event.created_at > current) {
                     last_failure_at = Some(event.created_at);
@@ -2161,13 +2390,17 @@ fn build_notification_failure_analytics(
 
     for event in audit_events {
         match event.event_type.as_str() {
-            "security.alert_delivery_succeeded" => delivered_count += 1,
-            "security.alert_delivery_failed" => {
+            "security.alert_delivery_succeeded" | "notification.delivery_succeeded" => {
+                delivered_count += 1
+            }
+            "security.alert_delivery_failed" | "notification.delivery_failed" => {
                 failed_count += 1;
                 if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload) {
                     if let Some(domain) = payload.get("domain").and_then(serde_json::Value::as_str)
                     {
-                        *failed_domains.entry(domain.to_string()).or_insert(0) += 1;
+                        if domain != "control-plane" {
+                            *failed_domains.entry(domain.to_string()).or_insert(0) += 1;
+                        }
                     }
                 }
             }
@@ -2283,24 +2516,121 @@ async fn send_security_notification(
     settings: &NotificationSettings,
     security_event: &SecurityEventRecord,
 ) -> Result<()> {
+    let event = NotificationWebhookEvent {
+        event_type: "security.alert_raised".to_string(),
+        severity: security_event.severity.clone(),
+        title: security_event.domain.clone(),
+        summary: format!(
+            "{} alert for {}.",
+            security_event.severity,
+            security_event
+                .device_name
+                .as_deref()
+                .unwrap_or(&security_event.client_ip)
+        ),
+        domain: Some(security_event.domain.clone()),
+        device_name: security_event.device_name.clone(),
+        client_ip: Some(security_event.client_ip.clone()),
+        details: vec![format!(
+            "classifier score {:.2}",
+            security_event.classifier_score
+        )],
+        created_at: security_event.created_at,
+    };
+    send_notification(client, settings, &event).await
+}
+
+async fn send_notification(
+    client: &Client,
+    settings: &NotificationSettings,
+    event: &NotificationWebhookEvent,
+) -> Result<()> {
     let Some(webhook_url) = settings.webhook_url.as_deref() else {
         return Ok(());
     };
     client
         .post(webhook_url)
         .json(&serde_json::json!({
-            "event_type": "security.alert_raised",
-            "severity": security_event.severity,
-            "domain": security_event.domain,
-            "client_ip": security_event.client_ip,
-            "device_name": security_event.device_name,
-            "classifier_score": security_event.classifier_score,
-            "created_at": security_event.created_at,
+            "event_type": event.event_type,
+            "severity": event.severity,
+            "title": event.title,
+            "summary": event.summary,
+            "domain": event.domain,
+            "client_ip": event.client_ip,
+            "device_name": event.device_name,
+            "details": event.details,
+            "created_at": event.created_at,
         }))
         .send()
         .await?
         .error_for_status()?;
     Ok(())
+}
+
+async fn deliver_operational_notification(
+    storage: &Storage,
+    client: &Client,
+    settings: &NotificationSettings,
+    event: NotificationWebhookEvent,
+) -> Result<()> {
+    let mut last_error = None;
+
+    for attempt in 0..3 {
+        match send_notification(client, settings, &event).await {
+            Ok(()) => {
+                storage
+                    .record_audit_event(&AuditEvent {
+                        id: Uuid::new_v4(),
+                        event_type: "notification.delivery_succeeded".to_string(),
+                        payload: serde_json::to_string(&serde_json::json!({
+                            "event_type": event.event_type,
+                            "severity": event.severity,
+                            "title": event.title,
+                            "summary": event.summary,
+                            "domain": event.domain,
+                            "client_ip": event.client_ip,
+                            "device_name": event.device_name,
+                            "attempts": attempt + 1,
+                        }))?,
+                        created_at: event.created_at,
+                    })
+                    .await?;
+                return Ok(());
+            }
+            Err(error) => {
+                last_error = Some(error.to_string());
+                if attempt < 2 {
+                    tokio::time::sleep(notification_retry_delay(attempt)).await;
+                }
+            }
+        }
+    }
+
+    let error_message = last_error.unwrap_or_else(|| "unknown delivery error".to_string());
+
+    storage
+        .record_audit_event(&AuditEvent {
+            id: Uuid::new_v4(),
+            event_type: "notification.delivery_failed".to_string(),
+            payload: serde_json::to_string(&serde_json::json!({
+                "event_type": event.event_type,
+                "severity": event.severity,
+                "title": event.title,
+                "summary": event.summary,
+                "domain": event.domain,
+                "client_ip": event.client_ip,
+                "device_name": event.device_name,
+                "attempts": 3,
+                "error": error_message.clone(),
+            }))?,
+            created_at: event.created_at,
+        })
+        .await?;
+
+    anyhow::bail!(
+        "operational notification delivery failed after retries: {}",
+        error_message
+    )
 }
 
 async fn deliver_security_notification(
@@ -2616,6 +2946,71 @@ mod tests {
     }
 
     #[test]
+    fn validate_device_service_overrides_rejects_global_mode_payloads() {
+        assert_eq!(
+            validate_device_service_overrides(
+                "global",
+                vec![DeviceServiceOverrideRecord {
+                    service_id: "tiktok".to_string(),
+                    mode: "allow".to_string(),
+                }],
+            ),
+            Err("device service overrides require custom policy mode".to_string())
+        );
+    }
+
+    #[test]
+    fn validate_device_service_overrides_rejects_invalid_values() {
+        assert_eq!(
+            validate_device_service_overrides(
+                "custom",
+                vec![DeviceServiceOverrideRecord {
+                    service_id: "unknown".to_string(),
+                    mode: "allow".to_string(),
+                }],
+            ),
+            Err(
+                "unknown device service override `unknown`; choose one of the built-in services"
+                    .to_string()
+            )
+        );
+
+        assert_eq!(
+            validate_device_service_overrides(
+                "custom",
+                vec![DeviceServiceOverrideRecord {
+                    service_id: "tiktok".to_string(),
+                    mode: "monitor".to_string(),
+                }],
+            ),
+            Err("device service override `TikTok` must use allow or block mode".to_string())
+        );
+    }
+
+    #[test]
+    fn validate_device_service_overrides_normalizes_known_values() {
+        assert_eq!(
+            validate_device_service_overrides(
+                "custom",
+                vec![
+                    DeviceServiceOverrideRecord {
+                        service_id: " tiktok ".to_string(),
+                        mode: "allow".to_string(),
+                    },
+                    DeviceServiceOverrideRecord {
+                        service_id: "tiktok".to_string(),
+                        mode: "block".to_string(),
+                    },
+                ],
+            ),
+            Ok(vec![DeviceServiceOverrideRecord {
+                service_id: "tiktok".to_string(),
+                mode: "block".to_string(),
+            }])
+        );
+    }
+
+    #[test]
     fn normalize_profile_name_accepts_non_empty_values() {
         assert_eq!(
             normalize_profile_name(" Balanced "),
@@ -2795,8 +3190,37 @@ mod tests {
 
         assert_eq!(deliveries.len(), 1);
         assert_eq!(deliveries[0].status, "delivered");
+        assert_eq!(deliveries[0].title, "notify.example");
         assert_eq!(deliveries[0].domain, "notify.example");
         assert_eq!(deliveries[0].attempts, 2);
+    }
+
+    #[test]
+    fn build_notification_delivery_events_supports_operational_payloads() {
+        let deliveries = build_notification_delivery_events(&[AuditEvent {
+            id: Uuid::new_v4(),
+            event_type: "notification.delivery_succeeded".to_string(),
+            payload: serde_json::json!({
+                "event_type": "ruleset.rollback",
+                "severity": "high",
+                "title": "Ruleset rolled back",
+                "summary": "Rolled back to the previous verified ruleset.",
+                "client_ip": "control-plane",
+                "attempts": 1,
+            })
+            .to_string(),
+            created_at: Utc::now(),
+        }]);
+
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].status, "delivered");
+        assert_eq!(deliveries[0].title, "Ruleset rolled back");
+        assert_eq!(
+            deliveries[0].summary,
+            "Rolled back to the previous verified ruleset."
+        );
+        assert_eq!(deliveries[0].client_ip, "control-plane");
+        assert_eq!(deliveries[0].domain, "control-plane");
     }
 
     #[test]

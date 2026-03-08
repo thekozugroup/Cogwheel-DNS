@@ -834,14 +834,12 @@ export default function App() {
                   </div>
                 ) : (
                   dashboard.recent_notification_deliveries.map((delivery) => (
-                    <div key={`${delivery.created_at}-${delivery.domain}-${delivery.status}`} className="rounded-2xl border border-border/70 bg-muted/60 p-3 text-sm">
+                    <div key={`${delivery.created_at}-${delivery.title}-${delivery.status}`} className="rounded-2xl border border-border/70 bg-muted/60 p-3 text-sm">
                       <div className="flex items-center justify-between gap-3">
-                        <div className="font-medium">{delivery.domain}</div>
+                        <div className="font-medium">{delivery.title}</div>
                         <Badge>{delivery.status}</Badge>
                       </div>
-                      <div className="mt-1 text-muted-foreground">
-                        {delivery.severity} alert for {delivery.device_name ?? delivery.client_ip} after {delivery.attempts} attempt{delivery.attempts === 1 ? "" : "s"}.
-                      </div>
+                      <div className="mt-1 text-muted-foreground">{delivery.summary}</div>
                     </div>
                   ))
                 )}
