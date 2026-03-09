@@ -330,11 +330,30 @@ struct UpsertDeviceRequest {
 struct SyncStatePayloadV1 {
     version: u32,
     revision: u64,
+    profile: String,
     exported_at: chrono::DateTime<chrono::Utc>,
     blocklists: Vec<SourceRecord>,
     devices: Vec<DeviceRecord>,
     classifier: ClassifierSettings,
     notifications: NotificationSettings,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum SyncProfile {
+    Full,
+    SettingsOnly,
+    ReadOnlyFollower,
+}
+
+impl SyncProfile {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::SettingsOnly => "settings-only",
+            Self::ReadOnlyFollower => "read-only-follower",
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -594,6 +613,8 @@ fn admin_router() -> Router<ServerState> {
         )
         .route("/api/v1/runtime/pause", post(pause_runtime))
         .route("/api/v1/runtime/resume", post(resume_runtime))
+        .route("/api/v1/sync/profile", get(sync_profile))
+        .route("/api/v1/sync/profile", post(update_sync_profile))
         .route("/api/v1/sync/export", get(export_sync_state))
         .route("/api/v1/sync/import", post(import_sync_state))
         .route("/api/v1/rulesets", get(list_rulesets))
@@ -859,6 +880,30 @@ struct SyncImportResult {
     imported_sources: usize,
     imported_devices: usize,
     applied_revision: u64,
+    profile: String,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct SyncExportQuery {
+    profile: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct SyncProfileView {
+    profile: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct UpdateSyncProfileRequest {
+    profile: String,
+}
+
+fn normalize_sync_profile(raw: Option<&str>) -> SyncProfile {
+    match raw.unwrap_or("full").trim().to_ascii_lowercase().as_str() {
+        "settings-only" => SyncProfile::SettingsOnly,
+        "read-only-follower" => SyncProfile::ReadOnlyFollower,
+        _ => SyncProfile::Full,
+    }
 }
 
 async fn load_sync_revision(storage: &Storage) -> Result<u64> {
@@ -867,6 +912,46 @@ async fn load_sync_revision(storage: &Storage) -> Result<u64> {
         .as_deref()
         .and_then(|raw| raw.parse::<u64>().ok())
         .unwrap_or(0))
+}
+
+async fn load_sync_profile(storage: &Storage) -> Result<SyncProfile> {
+    let raw = storage.get_setting("sync_profile").await?;
+    Ok(normalize_sync_profile(raw.as_deref()))
+}
+
+async fn persist_sync_profile(storage: &Storage, profile: &SyncProfile) -> Result<()> {
+    storage
+        .upsert_setting("sync_profile", profile.as_str())
+        .await?;
+    Ok(())
+}
+
+async fn sync_profile(
+    State(state): State<ServerState>,
+) -> Result<Json<ApiEnvelope<SyncProfileView>>, axum::http::StatusCode> {
+    let profile = load_sync_profile(&state.storage)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(ApiEnvelope {
+        data: SyncProfileView {
+            profile: profile.as_str().to_string(),
+        },
+    }))
+}
+
+async fn update_sync_profile(
+    State(state): State<ServerState>,
+    Json(request): Json<UpdateSyncProfileRequest>,
+) -> Result<Json<ApiEnvelope<SyncProfileView>>, axum::http::StatusCode> {
+    let profile = normalize_sync_profile(Some(&request.profile));
+    persist_sync_profile(&state.storage, &profile)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(ApiEnvelope {
+        data: SyncProfileView {
+            profile: profile.as_str().to_string(),
+        },
+    }))
 }
 
 async fn persist_sync_revision(storage: &Storage, revision: u64) -> Result<()> {
@@ -888,26 +973,51 @@ fn is_sync_payload_newer(
 
 async fn export_sync_state(
     State(state): State<ServerState>,
+    Query(query): Query<SyncExportQuery>,
 ) -> Result<Json<ApiEnvelope<SyncEnvelope>>, axum::http::StatusCode> {
+    let profile = if query.profile.is_some() {
+        normalize_sync_profile(query.profile.as_deref())
+    } else {
+        load_sync_profile(&state.storage)
+            .await
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+    };
+
+    if matches!(profile, SyncProfile::ReadOnlyFollower) {
+        return Err(axum::http::StatusCode::FORBIDDEN);
+    }
+
     let revision = load_sync_revision(&state.storage)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
         .saturating_add(1);
 
-    let payload = SyncStatePayloadV1 {
-        version: 1,
-        revision,
-        exported_at: chrono::Utc::now(),
-        blocklists: state
+    let blocklists = if matches!(profile, SyncProfile::Full) {
+        state
             .storage
             .list_sources()
             .await
-            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?,
-        devices: state
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+    } else {
+        Vec::new()
+    };
+    let devices = if matches!(profile, SyncProfile::Full) {
+        state
             .storage
             .list_devices()
             .await
-            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?,
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+    } else {
+        Vec::new()
+    };
+
+    let payload = SyncStatePayloadV1 {
+        version: 1,
+        revision,
+        profile: profile.as_str().to_string(),
+        exported_at: chrono::Utc::now(),
+        blocklists,
+        devices,
         classifier: state.dns_runtime.classifier_settings(),
         notifications: state
             .notification_settings
@@ -936,6 +1046,8 @@ async fn import_sync_state(
         return Err(axum::http::StatusCode::BAD_REQUEST);
     }
 
+    let profile = normalize_sync_profile(Some(&payload.profile));
+
     let local_revision = load_sync_revision(&state.storage)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -949,44 +1061,46 @@ async fn import_sync_state(
         return Err(axum::http::StatusCode::CONFLICT);
     }
 
-    let existing_sources = state
-        .storage
-        .list_sources()
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    for source in existing_sources {
-        let _ = state
+    if matches!(profile, SyncProfile::Full) {
+        let existing_sources = state
             .storage
-            .delete_source(source.id)
+            .list_sources()
             .await
             .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    }
-    for source in &payload.blocklists {
-        state
-            .storage
-            .insert_source(source)
-            .await
-            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    }
+        for source in existing_sources {
+            let _ = state
+                .storage
+                .delete_source(source.id)
+                .await
+                .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+        }
+        for source in &payload.blocklists {
+            state
+                .storage
+                .insert_source(source)
+                .await
+                .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+        }
 
-    let existing_devices = state
-        .storage
-        .list_devices()
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    for device in existing_devices {
-        let _ = state
+        let existing_devices = state
             .storage
-            .delete_device(device.id)
+            .list_devices()
             .await
             .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    }
-    for device in &payload.devices {
-        state
-            .storage
-            .upsert_device(device)
-            .await
-            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+        for device in existing_devices {
+            let _ = state
+                .storage
+                .delete_device(device.id)
+                .await
+                .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+        }
+        for device in &payload.devices {
+            state
+                .storage
+                .upsert_device(device)
+                .await
+                .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+        }
     }
 
     persist_classifier_settings(&state.storage, &payload.classifier)
@@ -1019,6 +1133,7 @@ async fn import_sync_state(
             payload: serde_json::json!({
                 "from": request.envelope.node_public_key,
                 "revision": payload.revision,
+                "profile": profile.as_str(),
                 "sources": payload.blocklists.len(),
                 "devices": payload.devices.len(),
             })
@@ -1033,6 +1148,7 @@ async fn import_sync_state(
             imported_sources: payload.blocklists.len(),
             imported_devices: payload.devices.len(),
             applied_revision: payload.revision,
+            profile: profile.as_str().to_string(),
         },
     }))
 }
