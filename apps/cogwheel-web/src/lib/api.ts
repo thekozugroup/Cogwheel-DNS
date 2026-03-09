@@ -187,6 +187,15 @@ export type SyncNodeStatus = {
   peers: SyncPeerStatus[];
 };
 
+export type SyncProfileView = {
+  profile: string;
+};
+
+export type SyncTransportView = {
+  mode: string;
+  token_configured: boolean;
+};
+
 export type SettingsSummary = {
   blocklists: SourceRecord[];
   blocklist_statuses: BlocklistStatus[];
@@ -234,6 +243,18 @@ export const api = {
   },
   settings: () => fetchJson<SettingsSummary>("/api/v1/settings"),
   syncStatus: () => fetchJson<SyncNodeStatus>("/api/v1/sync/status"),
+  syncProfile: () => fetchJson<SyncProfileView>("/api/v1/sync/profile"),
+  updateSyncProfile: (profile: string) =>
+    fetchJson<SyncProfileView>("/api/v1/sync/profile", {
+      method: "POST",
+      body: JSON.stringify({ profile }),
+    }),
+  syncTransport: () => fetchJson<SyncTransportView>("/api/v1/sync/transport"),
+  updateSyncTransport: (mode: string, token?: string) =>
+    fetchJson<SyncTransportView>("/api/v1/sync/transport", {
+      method: "POST",
+      body: JSON.stringify({ mode, token }),
+    }),
   refreshSources: () =>
     fetchJson<{ outcome: string; notes: string[] }>("/api/v1/sources/refresh", {
       method: "POST",

@@ -267,6 +267,7 @@ Implementation notes:
 - Sync imports now enforce deterministic conflict resolution using `revision` ordering with node public-key tie-breakers, and reject stale envelopes with HTTP 409.
 - Sync replication now supports explicit profiles (`full`, `settings-only`, `read-only-follower`) and blocks stale/replayed envelopes using signed nonce + timestamp checks.
 - The dashboard now shows per-node sync health including local identity, active profile, revision, replay-cache size, transport mode, and recently imported peers.
+- Operators can now update sync replication profile and transport hardening mode directly from the dashboard without leaving the main control surface.
 
 - [x] Implement node identity (`ed25519`) and signed sync envelopes.
 - [x] Sync only required state: blocklists, classifier config, allowlist/denylist overrides, versioned settings.

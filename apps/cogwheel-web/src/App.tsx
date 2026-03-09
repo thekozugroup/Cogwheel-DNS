@@ -105,6 +105,9 @@ export default function App() {
 
   const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
   const [showServicesView, setShowServicesView] = useState(false);
+  const [syncProfileDraft, setSyncProfileDraft] = useState("full");
+  const [syncTransportModeDraft, setSyncTransportModeDraft] = useState("opportunistic");
+  const [syncTransportTokenDraft, setSyncTransportTokenDraft] = useState("");
 
   const [deviceId, setDeviceId] = useState<string | null>(null);
   const [deviceName, setDeviceName] = useState("");
@@ -170,6 +173,12 @@ export default function App() {
     setNotificationMinSeverity(settings.notifications.min_severity);
     setNotificationTestSeverity(settings.notifications.min_severity);
   }, [settings.notifications]);
+
+  useEffect(() => {
+    setSyncProfileDraft(syncStatus.profile);
+    setSyncTransportModeDraft(syncStatus.transport_mode);
+    setSyncTransportTokenDraft("");
+  }, [syncStatus.profile, syncStatus.transport_mode]);
 
   useEffect(() => {
     if (!selectedNotificationPreset) return;
@@ -503,6 +512,32 @@ export default function App() {
       await load();
     } catch (mutationError) {
       pushToast("Resume failed", mutationError instanceof Error ? mutationError.message : "Unknown error", "error");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleSyncProfileSave() {
+    setBusyAction("sync-profile-save");
+    try {
+      await api.updateSyncProfile(syncProfileDraft);
+      pushToast("Sync profile updated", `Node sync profile is now ${syncProfileDraft}.`, "success");
+      await load();
+    } catch (mutationError) {
+      pushToast("Sync profile update failed", mutationError instanceof Error ? mutationError.message : "Unknown error", "error");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleSyncTransportSave() {
+    setBusyAction("sync-transport-save");
+    try {
+      await api.updateSyncTransport(syncTransportModeDraft, syncTransportTokenDraft);
+      pushToast("Sync transport updated", `Transport mode is now ${syncTransportModeDraft}.`, "success");
+      await load();
+    } catch (mutationError) {
+      pushToast("Sync transport update failed", mutationError instanceof Error ? mutationError.message : "Unknown error", "error");
     } finally {
       setBusyAction(null);
     }
@@ -990,6 +1025,28 @@ export default function App() {
                 ))}
               </div>
             ) : null}
+            <div className="mt-4 grid gap-3 border-t border-border/70 pt-4">
+              <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
+                <select className="h-10 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={syncProfileDraft} onChange={(event) => setSyncProfileDraft(event.target.value)}>
+                  <option value="full">Full replication</option>
+                  <option value="settings-only">Settings only</option>
+                  <option value="read-only-follower">Read-only follower</option>
+                </select>
+                <Button variant="secondary" size="sm" onClick={() => void handleSyncProfileSave()} disabled={busyAction === "sync-profile-save"}>
+                  Save profile
+                </Button>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-[180px_1fr_auto]">
+                <select className="h-10 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={syncTransportModeDraft} onChange={(event) => setSyncTransportModeDraft(event.target.value)}>
+                  <option value="opportunistic">Opportunistic</option>
+                  <option value="https-required">HTTPS required</option>
+                </select>
+                <Input value={syncTransportTokenDraft} onChange={(event) => setSyncTransportTokenDraft(event.target.value)} placeholder={syncStatus.transport_token_configured ? "Set new token or leave blank to clear" : "Optional bearer token"} />
+                <Button variant="secondary" size="sm" onClick={() => void handleSyncTransportSave()} disabled={busyAction === "sync-transport-save"}>
+                  Save transport
+                </Button>
+              </div>
+            </div>
           </div>
         </Card>
       </section>
