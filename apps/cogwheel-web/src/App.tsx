@@ -318,16 +318,22 @@ export default function App() {
         title: "Add a blocklist",
         done: enabledBlocklistsCount > 0,
         detail: enabledBlocklistsCount > 0 ? `${enabledBlocklistsCount} blocklist source${enabledBlocklistsCount === 1 ? " is" : "s are"} enabled.` : "Turn on at least one source so Cogwheel can build an active ruleset.",
+        actionLabel: "Open blocklists",
+        actionKey: "blocklists" as const,
       },
       {
         title: "Enable the classifier",
         done: settings.classifier.mode !== "Off",
         detail: settings.classifier.mode !== "Off" ? `Classifier is in ${settings.classifier.mode} mode.` : "Switch the classifier out of Off mode for risky-domain detection.",
+        actionLabel: "Open settings",
+        actionKey: "settings" as const,
       },
       {
         title: "Name a device",
         done: settings.devices.length > 0,
         detail: settings.devices.length > 0 ? `${settings.devices.length} named device${settings.devices.length === 1 ? "" : "s"} tracked.` : "Name at least one device so per-device policy and alerts are easier to interpret.",
+        actionLabel: "Open devices",
+        actionKey: "devices" as const,
       },
       {
         title: "Configure alert delivery",
@@ -335,6 +341,8 @@ export default function App() {
         detail: settings.notifications.enabled && settings.notifications.webhook_url
           ? `Webhook notifications are enabled at ${settings.notifications.min_severity} severity and above.`
           : "Add a webhook destination so operators hear about degraded health and risky alerts quickly.",
+        actionLabel: "Open settings",
+        actionKey: "settings" as const,
       },
     ];
 
@@ -344,6 +352,10 @@ export default function App() {
       items,
     };
   }, [settings.blocklists, settings.classifier.mode, settings.devices.length, settings.notifications.enabled, settings.notifications.min_severity, settings.notifications.webhook_url]);
+
+  function scrollToSection(sectionId: string) {
+    document.getElementById(sectionId)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
 
   const serviceLabelMap = useMemo(
     () =>
@@ -825,7 +837,7 @@ export default function App() {
           </div>
         </Card>
 
-        <Card>
+        <Card id="quick-health">
           <CardTitle>Quick health</CardTitle>
           <CardDescription>Backend-facing summary for dashboard, recovery, and operator workflows.</CardDescription>
           <div className="mt-5 grid gap-3 sm:grid-cols-2">
@@ -875,7 +887,7 @@ export default function App() {
           </div>
         </Card>
 
-        <Card>
+        <Card id="setup-checklist">
           <CardTitle>Setup checklist</CardTitle>
           <CardDescription>Track the core steps that turn the current control plane into a ready-to-run deployment.</CardDescription>
           <div className="mt-5 rounded-[24px] border border-border/70 bg-muted/40 p-4">
@@ -890,6 +902,27 @@ export default function App() {
                   <Badge>{item.done ? "Done" : "Next"}</Badge>
                 </div>
                 <div className="mt-1 text-sm text-muted-foreground">{item.detail}</div>
+                {!item.done ? (
+                  <div className="mt-3">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => {
+                        if (item.actionKey === "blocklists") {
+                          scrollToSection("blocklists");
+                          return;
+                        }
+                        if (item.actionKey === "devices") {
+                          scrollToSection("devices");
+                          return;
+                        }
+                        scrollToSection("settings");
+                      }}
+                    >
+                      {item.actionLabel}
+                    </Button>
+                  </div>
+                ) : null}
               </div>
             ))}
           </div>
@@ -899,7 +932,7 @@ export default function App() {
       {error ? <Card className="border-accent/30 bg-accent/10 text-accent-foreground">{error}</Card> : null}
 
       <section className="grid gap-6 lg:grid-cols-[1.15fr_0.85fr]">
-        <Card>
+        <Card id="dashboard-summary">
           <CardTitle>Dashboard</CardTitle>
           <CardDescription>Current backend summary surfaced in a UI-first shape.</CardDescription>
           <div className="mt-6 space-y-4">
@@ -960,7 +993,7 @@ export default function App() {
           </div>
         </Card>
 
-        <Card>
+        <Card id="settings">
           <CardTitle>Settings</CardTitle>
           <CardDescription>Classifier and blocklist controls map directly to the backend endpoints.</CardDescription>
           <div className="mt-6 space-y-5">
@@ -1181,7 +1214,7 @@ export default function App() {
       </section>
 
       <section className="grid gap-6 lg:grid-cols-2">
-        <Card>
+        <Card id="blocklists">
           <CardTitle>Blocklists</CardTitle>
           <CardDescription>Schedule, profile, strictness, and refresh status are backend-driven.</CardDescription>
           <div className="mt-5 grid gap-3">
@@ -1279,7 +1312,7 @@ export default function App() {
           </div>
         </Card>
 
-        <Card>
+        <Card id="services">
           <CardTitle>Services</CardTitle>
           <CardDescription>Optional common-service toggles powered by the layered rules built in Rust.</CardDescription>
           <div className="mt-5 space-y-4">
@@ -1315,7 +1348,7 @@ export default function App() {
       </section>
 
       <section className="grid gap-6 lg:grid-cols-[1.05fr_0.95fr]">
-        <Card>
+        <Card id="devices">
           <CardTitle>Devices</CardTitle>
           <CardDescription>Name devices and choose whether they inherit the global policy or carry a custom profile override with validated service-rule previews.</CardDescription>
           <div className="mt-5 grid gap-3">
