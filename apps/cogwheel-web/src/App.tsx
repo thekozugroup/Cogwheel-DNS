@@ -92,6 +92,7 @@ export default function App() {
   const [notificationDeliveryFilter, setNotificationDeliveryFilter] = useState<"all" | "failed" | "security" | "control-plane">("all");
 
   const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
+  const [showServicesView, setShowServicesView] = useState(false);
 
   const [deviceId, setDeviceId] = useState<string | null>(null);
   const [deviceName, setDeviceName] = useState("");
@@ -1369,39 +1370,51 @@ export default function App() {
           </div>
         </Card>
 
-        <Card id="services">
-          <CardTitle>Services</CardTitle>
-          <CardDescription>Optional common-service toggles powered by the layered rules built in Rust.</CardDescription>
-          <div className="mt-5 space-y-4">
-            <Input value={serviceSearch} onChange={(event) => setServiceSearch(event.target.value)} placeholder="Search services or categories" />
-            <div className="grid gap-3">
-              {filteredServices.map((service) => (
-                <div key={service.manifest.service_id} className="rounded-[24px] border border-border/70 bg-white/80 p-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <div className="font-medium">{service.manifest.display_name}</div>
-                      <div className="text-sm text-muted-foreground">{service.manifest.risk_notes}</div>
+        {showServicesView ? (
+          <Card id="services" className="animate-in fade-in slide-in-from-top-2">
+            <CardTitle>Services</CardTitle>
+            <CardDescription>Optional common-service toggles powered by the layered rules built in Rust.</CardDescription>
+            <div className="mt-5 space-y-4">
+              <Input value={serviceSearch} onChange={(event) => setServiceSearch(event.target.value)} placeholder="Search services or categories" />
+              <div className="grid gap-3">
+                {filteredServices.map((service) => (
+                  <div key={service.manifest.service_id} className="rounded-[24px] border border-border/70 bg-white/80 p-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <div className="font-medium">{service.manifest.display_name}</div>
+                        <div className="text-sm text-muted-foreground">{service.manifest.risk_notes}</div>
+                      </div>
+                      <Badge>{service.mode}</Badge>
                     </div>
-                    <Badge>{service.mode}</Badge>
+                    <div className="mt-3 flex gap-2">
+                      {(["Inherit", "Allow", "Block"] as const).map((mode) => (
+                        <Button
+                          key={mode}
+                          variant={service.mode === mode ? "primary" : "secondary"}
+                          size="sm"
+                          onClick={() => void handleServiceUpdate(service.manifest.service_id, mode)}
+                          disabled={busyAction === `service-${service.manifest.service_id}`}
+                        >
+                          {mode}
+                        </Button>
+                      ))}
+                    </div>
                   </div>
-                  <div className="mt-3 flex gap-2">
-                    {(["Inherit", "Allow", "Block"] as const).map((mode) => (
-                      <Button
-                        key={mode}
-                        variant={service.mode === mode ? "primary" : "secondary"}
-                        size="sm"
-                        onClick={() => void handleServiceUpdate(service.manifest.service_id, mode)}
-                        disabled={busyAction === `service-${service.manifest.service_id}`}
-                      >
-                        {mode}
-                      </Button>
-                    ))}
-                  </div>
-                </div>
-              ))}
+                ))}
+              </div>
             </div>
-          </div>
-        </Card>
+          </Card>
+        ) : (
+          <Card id="services" className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between p-6">
+            <div>
+              <CardTitle>Services</CardTitle>
+              <CardDescription className="mt-1">Optional curated allow/block toggles for common apps.</CardDescription>
+            </div>
+            <Button variant="secondary" onClick={() => setShowServicesView(true)}>
+              Configure services
+            </Button>
+          </Card>
+        )}
       </section>
 
       <section className="grid gap-6 lg:grid-cols-[1.05fr_0.95fr]">
