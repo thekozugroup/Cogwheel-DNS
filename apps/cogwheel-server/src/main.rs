@@ -686,6 +686,7 @@ fn admin_router() -> Router<ServerState> {
             "/api/v1/resilience/sync-partition",
             post(simulate_sync_partition),
         )
+        .route("/api/v1/load-test", post(run_load_test))
 }
 
 async fn list_sources(
@@ -937,6 +938,140 @@ async fn settings_summary(
             notifications,
             notification_test_presets,
             runtime_guard: state.runtime_guard.clone(),
+        },
+    }))
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct LoadTestRequest {
+    duration_secs: u64,
+    qps: u32,
+    cache_hit_ratio: f64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct LoadTestResult {
+    success: bool,
+    queries_sent: u64,
+    queries_succeeded: u64,
+    queries_failed: u64,
+    avg_latency_ms: f64,
+    p95_latency_ms: f64,
+    p99_latency_ms: f64,
+    cache_hit_ratio: f64,
+    throughput_qps: f64,
+    errors: Vec<String>,
+}
+
+async fn run_load_test(
+    State(state): State<ServerState>,
+    Json(request): Json<LoadTestRequest>,
+) -> Result<Json<ApiEnvelope<LoadTestResult>>, (axum::http::StatusCode, String)> {
+    use std::time::{Duration, Instant};
+
+    let duration = Duration::from_secs(request.duration_secs);
+    let qps = request.qps.max(1);
+    let cache_hit_ratio = request.cache_hit_ratio.clamp(0.0, 1.0);
+
+    let mut latencies: Vec<f64> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    let mut succeeded = 0u64;
+    let mut failed = 0u64;
+    let start = Instant::now();
+
+    let test_domains = vec![
+        "google.com",
+        "facebook.com",
+        "youtube.com",
+        "amazon.com",
+        "twitter.com",
+        "wikipedia.org",
+        "reddit.com",
+        "netflix.com",
+        "github.com",
+        "stackoverflow.com",
+        "example.com",
+        "test.com",
+        "demo.local",
+        "internal.service",
+        "api.example.com",
+    ];
+
+    let interval = Duration::from_secs_f64(1.0 / qps as f64);
+    let mut query_count = 0u64;
+
+    while start.elapsed() < duration {
+        let loop_start = Instant::now();
+
+        for domain in &test_domains {
+            if start.elapsed() >= duration {
+                break;
+            }
+
+            let should_hit_cache =
+                (query_count as f64 % (1.0 / (1.0 - cache_hit_ratio).max(0.01))) < 1.0;
+            let query_domain = if should_hit_cache && query_count > 0 {
+                test_domains[(query_count as usize) % test_domains.len()]
+            } else {
+                domain
+            };
+
+            let query_start = Instant::now();
+            match state
+                .dns_runtime
+                .probe_domain(query_domain, RecordType::A)
+                .await
+            {
+                Ok(_) => {
+                    succeeded += 1;
+                    latencies.push(query_start.elapsed().as_secs_f64() * 1000.0);
+                }
+                Err(e) => {
+                    failed += 1;
+                    if errors.len() < 10 {
+                        errors.push(format!("{}: {}", query_domain, e));
+                    }
+                }
+            }
+            query_count += 1;
+        }
+
+        let elapsed = loop_start.elapsed();
+        if elapsed < interval {
+            tokio::time::sleep(interval - elapsed).await;
+        }
+    }
+
+    latencies.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let avg_latency = latencies.iter().sum::<f64>() / latencies.len().max(1) as f64;
+    let p95_idx = (latencies.len() as f64 * 0.95) as usize;
+    let p99_idx = (latencies.len() as f64 * 0.99) as usize;
+    let p95_latency = latencies.get(p95_idx).copied().unwrap_or(avg_latency);
+    let p99_latency = latencies.get(p99_idx).copied().unwrap_or(avg_latency);
+
+    let total_elapsed = start.elapsed().as_secs_f64();
+    let throughput = (succeeded + failed) as f64 / total_elapsed.max(0.001);
+
+    let mut result_errors = errors.clone();
+    if failed > 0 && errors.is_empty() {
+        result_errors.push(format!(
+            "{} queries failed without specific error messages",
+            failed
+        ));
+    }
+
+    Ok(Json(ApiEnvelope {
+        data: LoadTestResult {
+            success: failed == 0,
+            queries_sent: query_count,
+            queries_succeeded: succeeded,
+            queries_failed: failed,
+            avg_latency_ms: avg_latency,
+            p95_latency_ms: p95_latency,
+            p99_latency_ms: p99_latency,
+            cache_hit_ratio,
+            throughput_qps: throughput,
+            errors: result_errors,
         },
     }))
 }

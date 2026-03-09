@@ -301,7 +301,7 @@ Exit criteria:
 
 Goal: Reach stable beta quality for real-world always-on use.
 
-- [ ] Run load and soak tests (mixed cache hit/miss and update windows).
+- [x] Run load and soak tests (mixed cache hit/miss and update windows).
 - [x] Add strict false-positive budget gates for release candidates.
 - [x] Add resilience drills: upstream outage, DB corruption simulation, failed list source, sync partition.
 - [x] Implement backup/restore and automated recovery checks.
