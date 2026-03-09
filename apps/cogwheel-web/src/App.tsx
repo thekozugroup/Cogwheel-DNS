@@ -872,11 +872,24 @@ export default function App() {
             <Metric label="Services" value={String(dashboard.service_toggle_count)} icon={<Sparkles className="size-4" />} />
             <Metric label="Devices" value={String(dashboard.device_count)} icon={<Activity className="size-4" />} />
           </div>
+          <div className="mt-5 flex flex-wrap gap-2">
+            {[
+              ["dashboard-summary", "Overview"],
+              ["guided-recovery", "Recovery"],
+              ["settings", "Alerts & settings"],
+              ["blocklists", "Blocklists"],
+              ["devices", "Devices"],
+            ].map(([target, label]) => (
+              <Button key={target} variant="ghost" size="sm" onClick={() => scrollToSection(target)}>
+                {label}
+              </Button>
+            ))}
+          </div>
         </Card>
       </section>
 
       <section className="grid gap-6 lg:grid-cols-[1fr_1fr]">
-        <Card>
+        <Card id="guided-recovery">
           <CardTitle>Guided recovery</CardTitle>
           <CardDescription>Plain-language next steps for the issues most likely to block protection or visibility.</CardDescription>
           <div className="mt-5 grid gap-3">

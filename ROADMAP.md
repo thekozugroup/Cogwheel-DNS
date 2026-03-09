@@ -227,7 +227,7 @@ Exit criteria:
 Goal: Deliver a highly polished, low-cognitive-load GUI with a Rust backend.
 
 - [ ] Build onboarding wizard: discover server, verify health, finish in under 2 minutes.
-- [ ] Create single-home dashboard with clear states: `Protected`, `Updating`, `Needs Attention`.
+- [x] Create single-home dashboard with clear states: `Protected`, `Updating`, `Needs Attention`.
 - [ ] Expose only the two primary settings groups: blocklists and classifier.
 - [ ] Add optional `Services` view for curated allow/block toggles without exposing raw DNS complexity.
 - [ ] Add one-click safe actions: `Pause 10m`, `Rollback`, `Trust Domain`.
@@ -246,6 +246,7 @@ Current implementation notes:
 - The current UI already supports classifier editing, blocklist lifecycle and metadata editing, and searchable service toggles; remaining work is polish, onboarding, recovery UX, and local-first behavior.
 - The operator feed now supports quick runtime/notification/device/ruleset filtering, making the current dashboard easier to triage while broader Phase 5 simplification work remains open.
 - The home dashboard now calls out a single control-plane state (`Protected`, `Updating`, or `Needs attention`) and suggests the next recovery action inline so operators can react without scanning every panel.
+- The home view now includes direct jump links into overview, recovery, settings, blocklists, and device sections so the dashboard acts as a true single-home control surface.
 - Audit feed cards now summarize structured payload details instead of only showing raw event types, making rollback, runtime, notification, and device changes faster to interpret.
 - The dashboard now includes guided recovery actions plus a setup checklist, giving operators plain-language next steps while the broader onboarding flow remains under construction.
 - Guided recovery cards now break each runtime, notification, refresh, and rollback issue into step-by-step playbooks instead of a single action button.
