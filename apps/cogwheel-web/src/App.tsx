@@ -684,6 +684,28 @@ export default function App() {
     }
   }
 
+  async function handleTailscaleExitNodeToggle() {
+    const newState = !tailscaleStatus.exit_node_active;
+    setBusyAction("tailscale-exit-node");
+    try {
+      const result = await api.tailscaleExitNode(newState);
+      pushToast(
+        newState ? "Exit node enabled" : "Exit node disabled",
+        result.message,
+        "success",
+      );
+      await load();
+    } catch (mutationError) {
+      pushToast(
+        "Exit node toggle failed",
+        mutationError instanceof Error ? mutationError.message : "Unknown error",
+        "error",
+      );
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
   async function handleRefreshSources() {
     setBusyAction("refresh-sources");
     try {
@@ -1110,11 +1132,27 @@ export default function App() {
                 <div className="mt-3 text-xs text-muted-foreground">
                   Tailscale daemon is not running. Start it to enable exit-node filtering.
                 </div>
-              ) : !tailscaleStatus.exit_node_active ? (
-                <div className="mt-3 text-xs text-muted-foreground">
-                  Exit-node mode is not active. Enable it to route tailnet traffic through Cogwheel DNS filtering.
+              ) : (
+                <div className="mt-4 grid gap-3 border-t border-border/70 pt-4">
+                  <Button
+                    variant={tailscaleStatus.exit_node_active ? "ghost" : "secondary"}
+                    size="sm"
+                    onClick={() => void handleTailscaleExitNodeToggle()}
+                    disabled={busyAction === "tailscale-exit-node"}
+                  >
+                    {busyAction === "tailscale-exit-node"
+                      ? "Updating..."
+                      : tailscaleStatus.exit_node_active
+                        ? "Disable exit node"
+                        : "Enable exit node"}
+                  </Button>
+                  {!tailscaleStatus.exit_node_active && (
+                    <div className="text-xs text-muted-foreground">
+                      Exit-node mode routes all tailnet traffic through this node, enabling DNS filtering for connected clients.
+                    </div>
+                  )}
                 </div>
-              ) : null}
+              )}
             </div>
           </Card>
         </section>

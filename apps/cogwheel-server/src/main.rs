@@ -617,6 +617,7 @@ fn admin_router() -> Router<ServerState> {
         .route("/api/v1/runtime/pause", post(pause_runtime))
         .route("/api/v1/runtime/resume", post(resume_runtime))
         .route("/api/v1/tailscale/status", get(tailscale_status))
+        .route("/api/v1/tailscale/exit-node", post(tailscale_exit_node))
         .route("/api/v1/sync/status", get(sync_status))
         .route("/api/v1/sync/profile", get(sync_profile))
         .route("/api/v1/sync/profile", post(update_sync_profile))
@@ -1030,6 +1031,103 @@ async fn tailscale_status(
 ) -> Result<Json<ApiEnvelope<TailscaleStatusView>>, axum::http::StatusCode> {
     Ok(Json(ApiEnvelope {
         data: load_tailscale_status(),
+    }))
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct TailscaleExitNodeRequest {
+    enabled: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct TailscaleExitNodeResult {
+    success: bool,
+    message: String,
+}
+
+async fn tailscale_exit_node(
+    Json(request): Json<TailscaleExitNodeRequest>,
+) -> Result<Json<ApiEnvelope<TailscaleExitNodeResult>>, (axum::http::StatusCode, String)> {
+    let status = load_tailscale_status();
+
+    if !status.installed {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "Tailscale is not installed".to_string(),
+        ));
+    }
+
+    if !status.daemon_running {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "Tailscale daemon is not running".to_string(),
+        ));
+    }
+
+    let hostname = status.hostname.ok_or_else(|| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            "Cannot determine local Tailscale hostname".to_string(),
+        )
+    })?;
+
+    let cmd = if request.enabled {
+        let output = Command::new("tailscale")
+            .args(["ip", "-4"])
+            .output()
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        if !output.status.success() {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                "Failed to get Tailscale IP address".to_string(),
+            ));
+        }
+
+        let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if ip.is_empty() {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                "No Tailscale IP address found".to_string(),
+            ));
+        }
+
+        let output = Command::new("tailscale")
+            .args(["up", "--exit-node", &ip])
+            .output()
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        if !output.status.success() {
+            let err = String::from_utf8_lossy(&output.stderr);
+            return Err((
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to enable exit-node: {}", err),
+            ));
+        }
+
+        format!("Exit-node mode enabled on {}", hostname)
+    } else {
+        let output = Command::new("tailscale")
+            .args(["up", "--exit-node="])
+            .output()
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        if !output.status.success() {
+            let err = String::from_utf8_lossy(&output.stderr);
+            return Err((
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to disable exit-node: {}", err),
+            ));
+        }
+
+        format!("Exit-node mode disabled on {}", hostname)
+    };
+
+    Ok(Json(ApiEnvelope {
+        data: TailscaleExitNodeResult {
+            success: true,
+            message: cmd,
+        },
     }))
 }
 

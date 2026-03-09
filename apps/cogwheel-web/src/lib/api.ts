@@ -200,6 +200,11 @@ export type TailscaleStatus = {
   last_error: string | null;
 };
 
+export type TailscaleExitNodeResult = {
+  success: boolean;
+  message: string;
+};
+
 export type SyncProfileView = {
   profile: string;
 };
@@ -348,4 +353,9 @@ export const api = {
     }),
   securityEvents: () => fetchJson<SecurityEventRecord[]>("/api/v1/security-events"),
   tailscaleStatus: () => fetchJson<TailscaleStatus>("/api/v1/tailscale/status"),
+  tailscaleExitNode: (enabled: boolean) =>
+    fetchJson<TailscaleExitNodeResult>("/api/v1/tailscale/exit-node", {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    }),
 };
