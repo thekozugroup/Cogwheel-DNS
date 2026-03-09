@@ -228,7 +228,7 @@ Goal: Deliver a highly polished, low-cognitive-load GUI with a Rust backend.
 
 - [ ] Build onboarding wizard: discover server, verify health, finish in under 2 minutes.
 - [x] Create single-home dashboard with clear states: `Protected`, `Updating`, `Needs Attention`.
-- [ ] Expose only the two primary settings groups: blocklists and classifier.
+- [x] Expose only the two primary settings groups: blocklists and classifier.
 - [ ] Add optional `Services` view for curated allow/block toggles without exposing raw DNS complexity.
 - [ ] Add one-click safe actions: `Pause 10m`, `Rollback`, `Trust Domain`.
 - [x] Add guided issue recovery flows (no jargon, plain language).
@@ -253,6 +253,7 @@ Current implementation notes:
 - Setup checklist items now include direct jump actions into the relevant dashboard sections, reducing the amount of page scanning needed during initial configuration.
 - Notification delivery history now supports quick failure/security/control-plane filtering, making webhook troubleshooting faster without leaving the main dashboard.
 - Notification delivery health, history, and failure analytics now read from a dedicated delivery table instead of inferring everything from audit events.
+- Advanced notification settings are now hidden by default under a collapsible 'Show advanced settings' toggle, keeping the primary Settings group focused tightly on the classifier.
 - Remaining work is the actual `shadcn/ui` application, richer operator workflows, and client-side state management.
 
 Exit criteria:

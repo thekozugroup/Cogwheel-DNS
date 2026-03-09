@@ -91,6 +91,8 @@ export default function App() {
   const [auditEventFilter, setAuditEventFilter] = useState<"all" | "runtime" | "notifications" | "devices" | "rulesets">("all");
   const [notificationDeliveryFilter, setNotificationDeliveryFilter] = useState<"all" | "failed" | "security" | "control-plane">("all");
 
+  const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
+
   const [deviceId, setDeviceId] = useState<string | null>(null);
   const [deviceName, setDeviceName] = useState("");
   const [deviceIpAddress, setDeviceIpAddress] = useState("");
@@ -1075,160 +1077,168 @@ export default function App() {
 
             <Separator />
 
-            <section className="space-y-3">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <div className="font-medium">Alert delivery</div>
-                  <div className="text-sm text-muted-foreground">Send high-severity security alerts to an external webhook.</div>
+            {showAdvancedSettings ? (
+              <section className="space-y-3 animate-in fade-in slide-in-from-top-2">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="font-medium">Alert delivery</div>
+                    <div className="text-sm text-muted-foreground">Send high-severity security alerts to an external webhook.</div>
+                  </div>
+                  <Badge>{notificationEnabled ? `Webhook ${notificationMinSeverity}+` : "Disabled"}</Badge>
                 </div>
-                <Badge>{notificationEnabled ? `Webhook ${notificationMinSeverity}+` : "Disabled"}</Badge>
-              </div>
-              <label className="flex items-center gap-3 rounded-2xl border border-border/70 bg-muted/40 px-4 py-3 text-sm">
-                <input type="checkbox" checked={notificationEnabled} onChange={(event) => setNotificationEnabled(event.target.checked)} />
-                Enable outbound alert notifications
-              </label>
-              <div className="grid gap-3 sm:grid-cols-[1fr_170px_auto]">
-                <Input value={notificationWebhookUrl} onChange={(event) => setNotificationWebhookUrl(event.target.value)} placeholder="https://hooks.example.com/cogwheel" />
-                <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={notificationMinSeverity} onChange={(event) => setNotificationMinSeverity(event.target.value as "medium" | "high" | "critical")}>
-                  <option value="medium">Medium+</option>
-                  <option value="high">High+</option>
-                  <option value="critical">Critical only</option>
-                </select>
-                <div className="flex gap-2">
-                  <Button variant="secondary" onClick={() => void handleNotificationSave()} disabled={busyAction === "notifications-save"}>
-                    Save alerts
-                  </Button>
-                  <Button variant="ghost" onClick={() => void handleNotificationTest()} disabled={busyAction === "notifications-test" || !notificationWebhookUrl}>
-                    Send test
-                  </Button>
-                </div>
-              </div>
-              <div className="grid gap-3 sm:grid-cols-2">
-                <label className="grid gap-2 text-sm text-muted-foreground">
-                  <span>Notification analytics window</span>
-                  <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm text-foreground" value={notificationAnalyticsWindow} onChange={(event) => setNotificationAnalyticsWindow(Number.parseInt(event.target.value, 10) as 10 | 30 | 50 | 100)}>
-                    <option value="10">Last 10 events</option>
-                    <option value="30">Last 30 events</option>
-                    <option value="50">Last 50 events</option>
-                    <option value="100">Last 100 events</option>
-                  </select>
-                </label>
-                <label className="grid gap-2 text-sm text-muted-foreground">
-                  <span>Delivery history window</span>
-                  <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm text-foreground" value={notificationHistoryWindow} onChange={(event) => setNotificationHistoryWindow(Number.parseInt(event.target.value, 10) as 10 | 30 | 50 | 100)}>
-                    <option value="10">Last 10 events</option>
-                    <option value="30">Last 30 events</option>
-                    <option value="50">Last 50 events</option>
-                    <option value="100">Last 100 events</option>
-                  </select>
-                </label>
-              </div>
-              <div className="grid gap-3 sm:grid-cols-[1fr_170px]">
-                <Input value={notificationTestDomain} onChange={(event) => setNotificationTestDomain(event.target.value)} placeholder="notification-test.cogwheel.local" />
-                <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={notificationTestSeverity} onChange={(event) => setNotificationTestSeverity(event.target.value as "medium" | "high" | "critical") }>
-                  <option value="medium">Medium test</option>
-                  <option value="high">High test</option>
-                  <option value="critical">Critical test</option>
-                </select>
-              </div>
-              <div className="grid gap-3 sm:grid-cols-[1fr_180px_auto_auto]">
-                <Input value={notificationPresetName} onChange={(event) => setNotificationPresetName(event.target.value)} placeholder="weekday-health-check" />
-                <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={selectedNotificationPreset} onChange={(event) => setSelectedNotificationPreset(event.target.value)}>
-                  <option value="">Load saved preset</option>
-                  {settings.notification_test_presets.map((preset) => (
-                    <option key={preset.name} value={preset.name}>{preset.name}</option>
-                  ))}
-                </select>
-                <Button variant="ghost" onClick={() => void handleNotificationPresetSave()} disabled={busyAction === "notifications-preset-save"}>
-                  Save preset
-                </Button>
-                <Button variant="ghost" onClick={() => void handleNotificationPresetDelete()} disabled={busyAction === "notifications-preset-delete" || !selectedNotificationPreset}>
-                  Delete preset
-                </Button>
-              </div>
-              <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
-                <Input value={notificationTestDeviceName} onChange={(event) => setNotificationTestDeviceName(event.target.value)} placeholder="Control Plane Test" />
                 <label className="flex items-center gap-3 rounded-2xl border border-border/70 bg-muted/40 px-4 py-3 text-sm">
-                  <input type="checkbox" checked={notificationDryRun} onChange={(event) => setNotificationDryRun(event.target.checked)} />
-                  Validate only
+                  <input type="checkbox" checked={notificationEnabled} onChange={(event) => setNotificationEnabled(event.target.checked)} />
+                  Enable outbound alert notifications
                 </label>
-              </div>
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
-                  <div className="text-muted-foreground">Delivered</div>
-                  <div className="mt-1 font-medium">{dashboard.notification_health.delivered_count}</div>
-                  <div className="mt-1 text-xs text-muted-foreground">
-                    Last success: {dashboard.notification_health.last_delivery_at ? new Date(dashboard.notification_health.last_delivery_at).toLocaleString() : "none yet"}
+                <div className="grid gap-3 sm:grid-cols-[1fr_170px_auto]">
+                  <Input value={notificationWebhookUrl} onChange={(event) => setNotificationWebhookUrl(event.target.value)} placeholder="https://hooks.example.com/cogwheel" />
+                  <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={notificationMinSeverity} onChange={(event) => setNotificationMinSeverity(event.target.value as "medium" | "high" | "critical")}>
+                    <option value="medium">Medium+</option>
+                    <option value="high">High+</option>
+                    <option value="critical">Critical only</option>
+                  </select>
+                  <div className="flex gap-2">
+                    <Button variant="secondary" onClick={() => void handleNotificationSave()} disabled={busyAction === "notifications-save"}>
+                      Save alerts
+                    </Button>
+                    <Button variant="ghost" onClick={() => void handleNotificationTest()} disabled={busyAction === "notifications-test" || !notificationWebhookUrl}>
+                      Send test
+                    </Button>
                   </div>
                 </div>
-                <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
-                  <div className="text-muted-foreground">Failed</div>
-                  <div className="mt-1 font-medium">{dashboard.notification_health.failed_count}</div>
-                  <div className="mt-1 text-xs text-muted-foreground">
-                    Last failure: {dashboard.notification_health.last_failure_at ? new Date(dashboard.notification_health.last_failure_at).toLocaleString() : "none yet"}
-                  </div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <label className="grid gap-2 text-sm text-muted-foreground">
+                    <span>Notification analytics window</span>
+                    <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm text-foreground" value={notificationAnalyticsWindow} onChange={(event) => setNotificationAnalyticsWindow(Number.parseInt(event.target.value, 10) as 10 | 30 | 50 | 100)}>
+                      <option value="10">Last 10 events</option>
+                      <option value="30">Last 30 events</option>
+                      <option value="50">Last 50 events</option>
+                      <option value="100">Last 100 events</option>
+                    </select>
+                  </label>
+                  <label className="grid gap-2 text-sm text-muted-foreground">
+                    <span>Delivery history window</span>
+                    <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm text-foreground" value={notificationHistoryWindow} onChange={(event) => setNotificationHistoryWindow(Number.parseInt(event.target.value, 10) as 10 | 30 | 50 | 100)}>
+                      <option value="10">Last 10 events</option>
+                      <option value="30">Last 30 events</option>
+                      <option value="50">Last 50 events</option>
+                      <option value="100">Last 100 events</option>
+                    </select>
+                  </label>
                 </div>
-              </div>
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
-                  <div className="text-muted-foreground">Success rate</div>
-                  <div className="mt-1 font-medium">{dashboard.notification_failure_analytics.success_rate_percent.toFixed(1)}%</div>
-                  <div className="mt-1 text-xs text-muted-foreground">Based on the last {notificationAnalyticsWindow} delivery audit events.</div>
+                <div className="grid gap-3 sm:grid-cols-[1fr_170px]">
+                  <Input value={notificationTestDomain} onChange={(event) => setNotificationTestDomain(event.target.value)} placeholder="notification-test.cogwheel.local" />
+                  <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={notificationTestSeverity} onChange={(event) => setNotificationTestSeverity(event.target.value as "medium" | "high" | "critical") }>
+                    <option value="medium">Medium test</option>
+                    <option value="high">High test</option>
+                    <option value="critical">Critical test</option>
+                  </select>
                 </div>
-                <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
-                  <div className="text-muted-foreground">Top failed domains</div>
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    {dashboard.notification_failure_analytics.top_failed_domains.length === 0 ? (
-                      <span className="text-xs text-muted-foreground">No failed domains in the recent window.</span>
-                    ) : (
-                      dashboard.notification_failure_analytics.top_failed_domains.map((domain) => (
-                        <Badge key={domain.domain}>{domain.domain} x{domain.failure_count}</Badge>
-                      ))
-                    )}
-                  </div>
-                </div>
-              </div>
-              <div className="space-y-2">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="text-sm text-muted-foreground">Recent delivery history from the last {notificationHistoryWindow} delivery audit events.</div>
-                  <div className="flex flex-wrap gap-2">
-                    {[
-                      ["all", "All"],
-                      ["failed", "Failed"],
-                      ["security", "Security"],
-                      ["control-plane", "Control plane"],
-                    ].map(([value, label]) => (
-                      <Button key={value} variant={notificationDeliveryFilter === value ? "primary" : "ghost"} size="sm" onClick={() => setNotificationDeliveryFilter(value as "all" | "failed" | "security" | "control-plane")}>
-                        {label}
-                      </Button>
+                <div className="grid gap-3 sm:grid-cols-[1fr_180px_auto_auto]">
+                  <Input value={notificationPresetName} onChange={(event) => setNotificationPresetName(event.target.value)} placeholder="weekday-health-check" />
+                  <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={selectedNotificationPreset} onChange={(event) => setSelectedNotificationPreset(event.target.value)}>
+                    <option value="">Load saved preset</option>
+                    {settings.notification_test_presets.map((preset) => (
+                      <option key={preset.name} value={preset.name}>{preset.name}</option>
                     ))}
+                  </select>
+                  <Button variant="ghost" onClick={() => void handleNotificationPresetSave()} disabled={busyAction === "notifications-preset-save"}>
+                    Save preset
+                  </Button>
+                  <Button variant="ghost" onClick={() => void handleNotificationPresetDelete()} disabled={busyAction === "notifications-preset-delete" || !selectedNotificationPreset}>
+                    Delete preset
+                  </Button>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
+                  <Input value={notificationTestDeviceName} onChange={(event) => setNotificationTestDeviceName(event.target.value)} placeholder="Control Plane Test" />
+                  <label className="flex items-center gap-3 rounded-2xl border border-border/70 bg-muted/40 px-4 py-3 text-sm">
+                    <input type="checkbox" checked={notificationDryRun} onChange={(event) => setNotificationDryRun(event.target.checked)} />
+                    Validate only
+                  </label>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
+                    <div className="text-muted-foreground">Delivered</div>
+                    <div className="mt-1 font-medium">{dashboard.notification_health.delivered_count}</div>
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      Last success: {dashboard.notification_health.last_delivery_at ? new Date(dashboard.notification_health.last_delivery_at).toLocaleString() : "none yet"}
+                    </div>
+                  </div>
+                  <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
+                    <div className="text-muted-foreground">Failed</div>
+                    <div className="mt-1 font-medium">{dashboard.notification_health.failed_count}</div>
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      Last failure: {dashboard.notification_health.last_failure_at ? new Date(dashboard.notification_health.last_failure_at).toLocaleString() : "none yet"}
+                    </div>
                   </div>
                 </div>
-              </div>
-              <div className="grid gap-3">
-                {filteredNotificationDeliveries.length === 0 ? (
-                  <div className="rounded-2xl border border-dashed border-border/80 bg-muted/30 p-4 text-sm text-muted-foreground">
-                    No recent notification deliveries match the selected history filter.
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
+                    <div className="text-muted-foreground">Success rate</div>
+                    <div className="mt-1 font-medium">{dashboard.notification_failure_analytics.success_rate_percent.toFixed(1)}%</div>
+                    <div className="mt-1 text-xs text-muted-foreground">Based on the last {notificationAnalyticsWindow} delivery audit events.</div>
                   </div>
-                ) : (
-                  filteredNotificationDeliveries.map((delivery) => (
-                    <div key={`${delivery.created_at}-${delivery.title}-${delivery.status}`} className="rounded-2xl border border-border/70 bg-muted/60 p-3 text-sm">
-                      <div className="flex items-center justify-between gap-3">
-                        <div>
-                          <div className="font-medium">{delivery.title}</div>
-                          <div className="mt-1 text-xs text-muted-foreground">{delivery.target}</div>
-                        </div>
-                        <div className="flex flex-wrap gap-2">
-                          <Badge>{delivery.status}</Badge>
-                          <Badge>{delivery.event_type}</Badge>
-                        </div>
-                      </div>
-                      <div className="mt-1 text-muted-foreground">{delivery.summary}</div>
+                  <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
+                    <div className="text-muted-foreground">Top failed domains</div>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {dashboard.notification_failure_analytics.top_failed_domains.length === 0 ? (
+                        <span className="text-xs text-muted-foreground">No failed domains in the recent window.</span>
+                      ) : (
+                        dashboard.notification_failure_analytics.top_failed_domains.map((domain) => (
+                          <Badge key={domain.domain}>{domain.domain} x{domain.failure_count}</Badge>
+                        ))
+                      )}
                     </div>
-                  ))
-                )}
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="text-sm text-muted-foreground">Recent delivery history from the last {notificationHistoryWindow} delivery audit events.</div>
+                    <div className="flex flex-wrap gap-2">
+                      {[
+                        ["all", "All"],
+                        ["failed", "Failed"],
+                        ["security", "Security"],
+                        ["control-plane", "Control plane"],
+                      ].map(([value, label]) => (
+                        <Button key={value} variant={notificationDeliveryFilter === value ? "primary" : "ghost"} size="sm" onClick={() => setNotificationDeliveryFilter(value as "all" | "failed" | "security" | "control-plane")}>
+                          {label}
+                        </Button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+                <div className="grid gap-3">
+                  {filteredNotificationDeliveries.length === 0 ? (
+                    <div className="rounded-2xl border border-dashed border-border/80 bg-muted/30 p-4 text-sm text-muted-foreground">
+                      No recent notification deliveries match the selected history filter.
+                    </div>
+                  ) : (
+                    filteredNotificationDeliveries.map((delivery) => (
+                      <div key={`${delivery.created_at}-${delivery.title}-${delivery.status}`} className="rounded-2xl border border-border/70 bg-muted/60 p-3 text-sm">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <div className="font-medium">{delivery.title}</div>
+                            <div className="mt-1 text-xs text-muted-foreground">{delivery.target}</div>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            <Badge>{delivery.status}</Badge>
+                            <Badge>{delivery.event_type}</Badge>
+                          </div>
+                        </div>
+                        <div className="mt-1 text-muted-foreground">{delivery.summary}</div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </section>
+            ) : (
+              <div className="flex justify-center">
+                <Button variant="ghost" onClick={() => setShowAdvancedSettings(true)}>
+                  Show advanced settings
+                </Button>
               </div>
-            </section>
+            )}
 
             <Separator />
 
