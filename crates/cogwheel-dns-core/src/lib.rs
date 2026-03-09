@@ -72,6 +72,8 @@ pub struct DnsRuntimeStats {
     cache_hits_total: AtomicU64,
     cname_uncloaks_total: AtomicU64,
     cname_blocks_total: AtomicU64,
+    queries_total: AtomicU64,
+    blocked_total: AtomicU64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -81,6 +83,8 @@ pub struct DnsRuntimeSnapshot {
     pub cache_hits_total: u64,
     pub cname_uncloaks_total: u64,
     pub cname_blocks_total: u64,
+    pub queries_total: u64,
+    pub blocked_total: u64,
 }
 
 impl DnsRuntime {
@@ -170,6 +174,8 @@ impl DnsRuntime {
             cache_hits_total: self.stats.cache_hits_total.load(Ordering::Relaxed),
             cname_uncloaks_total: self.stats.cname_uncloaks_total.load(Ordering::Relaxed),
             cname_blocks_total: self.stats.cname_blocks_total.load(Ordering::Relaxed),
+            queries_total: self.stats.queries_total.load(Ordering::Relaxed),
+            blocked_total: self.stats.blocked_total.load(Ordering::Relaxed),
         }
     }
 
@@ -245,6 +251,7 @@ impl DnsRuntime {
         payload: &[u8],
         client_addr: Option<SocketAddr>,
     ) -> Result<Message> {
+        self.stats.queries_total.fetch_add(1, Ordering::Relaxed);
         let request = Message::from_vec(payload)?;
         let query = request
             .queries()
@@ -272,6 +279,7 @@ impl DnsRuntime {
 
         if let Some(block_mode) = forced_block_mode {
             let response = build_blocked_response(&request, block_mode);
+            self.stats.blocked_total.fetch_add(1, Ordering::Relaxed);
             self.cache
                 .insert(
                     cache_key,
@@ -289,10 +297,14 @@ impl DnsRuntime {
             .is_some_and(|rule| matches!(rule.action, RuleAction::Allow));
 
         let response = match decision.kind {
-            DecisionKind::Blocked(mode) => build_blocked_response(&request, mode),
+            DecisionKind::Blocked(mode) => {
+                self.stats.blocked_total.fetch_add(1, Ordering::Relaxed);
+                build_blocked_response(&request, mode)
+            }
             DecisionKind::Allowed => {
                 if !allow_matched {
                     if let Some(mode) = self.uncloaked_block_mode(&domain, &engine).await? {
+                        self.stats.blocked_total.fetch_add(1, Ordering::Relaxed);
                         let response = build_blocked_response(&request, mode);
                         self.cache
                             .insert(
@@ -641,6 +653,8 @@ mod tests {
             cache_hits_total: stats.cache_hits_total.load(Ordering::Relaxed),
             cname_uncloaks_total: stats.cname_uncloaks_total.load(Ordering::Relaxed),
             cname_blocks_total: stats.cname_blocks_total.load(Ordering::Relaxed),
+            queries_total: stats.queries_total.load(Ordering::Relaxed),
+            blocked_total: stats.blocked_total.load(Ordering::Relaxed),
         };
         assert_eq!(
             snapshot,
@@ -650,6 +664,8 @@ mod tests {
                 cache_hits_total: 0,
                 cname_uncloaks_total: 0,
                 cname_blocks_total: 0,
+                queries_total: 0,
+                blocked_total: 0,
             }
         );
     }

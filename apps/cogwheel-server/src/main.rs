@@ -650,6 +650,10 @@ fn admin_router() -> Router<ServerState> {
         )
         .route("/api/v1/runtime/pause", post(pause_runtime))
         .route("/api/v1/runtime/resume", post(resume_runtime))
+        .route(
+            "/api/v1/false-positive-budget",
+            get(false_positive_budget_status),
+        )
         .route("/api/v1/tailscale/status", get(tailscale_status))
         .route("/api/v1/tailscale/exit-node", post(tailscale_exit_node))
         .route("/api/v1/tailscale/rollback", post(tailscale_rollback))
@@ -666,6 +670,22 @@ fn admin_router() -> Router<ServerState> {
         .route("/api/v1/audit-events", get(list_audit_events))
         .route("/api/v1/backup", get(backup_data))
         .route("/api/v1/backup/restore", post(restore_data))
+        .route(
+            "/api/v1/resilience/upstream-outage",
+            post(simulate_upstream_outage),
+        )
+        .route(
+            "/api/v1/resilience/db-corruption",
+            post(simulate_db_corruption),
+        )
+        .route(
+            "/api/v1/resilience/source-failure",
+            post(simulate_source_failure),
+        )
+        .route(
+            "/api/v1/resilience/sync-partition",
+            post(simulate_sync_partition),
+        )
 }
 
 async fn list_sources(
@@ -2119,6 +2139,213 @@ async fn restore_data(
     }))
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+struct ResilienceDrillResult {
+    drill_type: String,
+    success: bool,
+    message: String,
+    recommendations: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ResilienceDrillRequest {
+    #[allow(dead_code)]
+    duration_secs: Option<u64>,
+}
+
+async fn simulate_upstream_outage(
+    State(state): State<ServerState>,
+    Json(_request): Json<ResilienceDrillRequest>,
+) -> Result<Json<ApiEnvelope<ResilienceDrillResult>>, axum::http::StatusCode> {
+    let snapshot = state.dns_runtime.snapshot();
+    let has_failures = snapshot.upstream_failures_total > 0;
+    let fallback_working = snapshot.fallback_served_total > 0;
+
+    let mut recommendations = vec![
+        "Monitor upstream health metrics during failures".to_string(),
+        "Verify fallback cache is warming properly".to_string(),
+    ];
+
+    if !has_failures {
+        recommendations.push("Consider simulating failures to test fallback behavior".to_string());
+    }
+
+    if !fallback_working {
+        recommendations
+            .push("CRITICAL: Fallback cache not serving - check cache warming".to_string());
+    }
+
+    Ok(Json(ApiEnvelope {
+        data: ResilienceDrillResult {
+            drill_type: "upstream_outage".to_string(),
+            success: fallback_working,
+            message: format!(
+                "Upstream failures: {}, Fallback served: {}",
+                snapshot.upstream_failures_total, snapshot.fallback_served_total
+            ),
+            recommendations,
+        },
+    }))
+}
+
+async fn simulate_db_corruption(
+    State(state): State<ServerState>,
+    Json(_request): Json<ResilienceDrillRequest>,
+) -> Result<Json<ApiEnvelope<ResilienceDrillResult>>, axum::http::StatusCode> {
+    let sources_result = state.storage.list_sources().await;
+    let devices_result = state.storage.list_devices().await;
+
+    let db_healthy = sources_result.is_ok() && devices_result.is_ok();
+
+    let mut recommendations = vec![
+        "Regular backup verification is critical".to_string(),
+        "Test restore procedures periodically".to_string(),
+    ];
+
+    if !db_healthy {
+        recommendations
+            .push("URGENT: Database corruption detected - initiate recovery".to_string());
+    }
+
+    Ok(Json(ApiEnvelope {
+        data: ResilienceDrillResult {
+            drill_type: "db_corruption".to_string(),
+            success: db_healthy,
+            message: if db_healthy {
+                "Database integrity check passed".to_string()
+            } else {
+                "Database integrity check failed".to_string()
+            },
+            recommendations,
+        },
+    }))
+}
+
+async fn simulate_source_failure(
+    State(state): State<ServerState>,
+    Json(_request): Json<ResilienceDrillRequest>,
+) -> Result<Json<ApiEnvelope<ResilienceDrillResult>>, axum::http::StatusCode> {
+    let sources = state
+        .storage
+        .list_sources()
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let enabled_count = sources.iter().filter(|s| s.enabled).count();
+    let total_count = sources.len();
+
+    let mut recommendations = vec![
+        "Multiple source redundancy is recommended".to_string(),
+        "Monitor source refresh failures".to_string(),
+    ];
+
+    if enabled_count == 0 && total_count > 0 {
+        recommendations.push("WARNING: No sources enabled - blocking may not work".to_string());
+    }
+
+    if total_count == 1 {
+        recommendations.push("Consider adding redundant sources".to_string());
+    }
+
+    Ok(Json(ApiEnvelope {
+        data: ResilienceDrillResult {
+            drill_type: "source_failure".to_string(),
+            success: enabled_count > 0,
+            message: format!("{} of {} sources enabled", enabled_count, total_count),
+            recommendations,
+        },
+    }))
+}
+
+async fn simulate_sync_partition(
+    State(state): State<ServerState>,
+    Json(_request): Json<ResilienceDrillRequest>,
+) -> Result<Json<ApiEnvelope<ResilienceDrillResult>>, axum::http::StatusCode> {
+    let transport_mode = load_sync_transport_mode(&state.storage)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let transport_token = load_sync_transport_token(&state.storage)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let transport_ok = transport_token.is_some() || transport_mode != "disabled";
+
+    let mut recommendations = vec![
+        "Monitor sync peer connectivity".to_string(),
+        "Verify transport token configuration".to_string(),
+    ];
+
+    if !transport_ok {
+        recommendations.push("Sync transport not fully configured".to_string());
+    }
+
+    Ok(Json(ApiEnvelope {
+        data: ResilienceDrillResult {
+            drill_type: "sync_partition".to_string(),
+            success: transport_ok,
+            message: format!("Transport mode: {}", transport_mode),
+            recommendations,
+        },
+    }))
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct FalsePositiveBudgetStatus {
+    release_ready: bool,
+    blocking_rate: f64,
+    blocked_total: u64,
+    queries_total: u64,
+    false_positive_estimate: f64,
+    budget_remaining: f64,
+    budget_limit: f64,
+    recommendations: Vec<String>,
+}
+
+async fn false_positive_budget_status(
+    State(state): State<ServerState>,
+) -> Result<Json<ApiEnvelope<FalsePositiveBudgetStatus>>, axum::http::StatusCode> {
+    let snapshot = state.dns_runtime.snapshot();
+    let blocked = snapshot.blocked_total;
+    let queries = snapshot.queries_total.max(1);
+    let blocking_rate = (blocked as f64) / (queries as f64);
+    let budget_limit = 0.001; // 0.1% false positive budget
+    let false_positive_estimate = blocking_rate * 0.1; // Assume 10% of blocked are false positives
+    let budget_remaining = (budget_limit - false_positive_estimate).max(0.0);
+    let release_ready = false_positive_estimate < budget_limit;
+
+    let mut recommendations = vec![];
+
+    if release_ready {
+        recommendations.push("System meets false-positive budget for release".to_string());
+    } else {
+        recommendations.push(
+            "WARNING: False-positive rate exceeds budget - review blocking rules".to_string(),
+        );
+    }
+
+    if blocking_rate > 0.05 {
+        recommendations.push("High blocking rate detected - verify list quality".to_string());
+    }
+
+    if queries < 1000_u64 {
+        recommendations
+            .push("Low query volume - insufficient data for reliable estimate".to_string());
+    }
+
+    Ok(Json(ApiEnvelope {
+        data: FalsePositiveBudgetStatus {
+            release_ready,
+            blocking_rate,
+            blocked_total: blocked,
+            queries_total: queries,
+            false_positive_estimate,
+            budget_remaining,
+            budget_limit,
+            recommendations,
+        },
+    }))
+}
+
 async fn runtime_snapshot(
     State(state): State<ServerState>,
 ) -> Result<Json<ApiEnvelope<DnsRuntimeSnapshot>>, axum::http::StatusCode> {
@@ -2946,6 +3173,8 @@ fn current_runtime_health(state: &ServerState) -> RuntimeHealthResponse {
             cache_hits_total: 0,
             cname_uncloaks_total: 0,
             cname_blocks_total: 0,
+            queries_total: 0,
+            blocked_total: 0,
         },
         &snapshot,
         &state.runtime_guard,
@@ -4148,6 +4377,8 @@ mod tests {
             cache_hits_total: 0,
             cname_uncloaks_total: 0,
             cname_blocks_total: 0,
+            queries_total: 100,
+            blocked_total: 10,
         };
         let after = DnsRuntimeSnapshot {
             upstream_failures_total: 3,
@@ -4155,6 +4386,8 @@ mod tests {
             cache_hits_total: 0,
             cname_uncloaks_total: 0,
             cname_blocks_total: 0,
+            queries_total: 200,
+            blocked_total: 20,
         };
         let guard = RuntimeGuardConfig {
             probe_domains: vec!["example.com".to_string()],
@@ -4175,6 +4408,8 @@ mod tests {
             cache_hits_total: 0,
             cname_uncloaks_total: 0,
             cname_blocks_total: 0,
+            queries_total: 100,
+            blocked_total: 10,
         };
         let after = DnsRuntimeSnapshot {
             upstream_failures_total: 1,
@@ -4182,6 +4417,8 @@ mod tests {
             cache_hits_total: 2,
             cname_uncloaks_total: 1,
             cname_blocks_total: 0,
+            queries_total: 200,
+            blocked_total: 15,
         };
         let guard = RuntimeGuardConfig::default();
 

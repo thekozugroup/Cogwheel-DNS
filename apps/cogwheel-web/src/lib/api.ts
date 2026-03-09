@@ -376,4 +376,14 @@ export const api = {
       method: "POST",
     }),
   tailscaleDnsCheck: () => fetchJson<TailscaleDnsCheckResult>("/api/v1/tailscale/dns-check"),
+  falsePositiveBudget: () => fetchJson<{
+    release_ready: boolean;
+    blocking_rate: number;
+    blocked_total: number;
+    queries_total: number;
+    false_positive_estimate: number;
+    budget_remaining: number;
+    budget_limit: number;
+    recommendations: string[];
+  }>("/api/v1/false-positive-budget"),
 };
