@@ -262,7 +262,10 @@ Exit criteria:
 
 Goal: Keep multiple Cogwheel nodes in sync safely.
 
-- [ ] Implement node identity (`ed25519`) and signed sync envelopes.
+Implementation notes:
+- The storage layer now automatically generates and persists an `ed25519` keypair (`node_identity_v1`) on first boot, providing a stable cryptographical identity for future peer-to-peer sync envelopes.
+
+- [x] Implement node identity (`ed25519`) and signed sync envelopes.
 - [ ] Sync only required state: blocklists, classifier config, allowlist/denylist overrides, versioned settings.
 - [ ] Add deterministic conflict resolution (`revision + vector clock` or server-authoritative mode).
 - [ ] Add selective replication profiles (`full`, `settings-only`, `read-only follower`).

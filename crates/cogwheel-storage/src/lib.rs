@@ -7,6 +7,10 @@ use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use uuid::Uuid;
 
+use base64::Engine as _;
+use ed25519_dalek::SigningKey;
+use rand::rngs::OsRng;
+
 const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_ruleset_artifacts.sql");
 const MIGRATION_0003: &str = include_str!("../migrations/0003_source_metadata.sql");
@@ -27,11 +31,20 @@ pub enum StorageError {
     Uuid(#[from] uuid::Error),
     #[error(transparent)]
     Chrono(#[from] chrono::ParseError),
+    #[error("internal storage error: {0}")]
+    Internal(String),
 }
 
 #[derive(Debug, Clone)]
 pub struct Storage {
     connection: Arc<Mutex<Connection>>,
+    node_identity: Arc<NodeIdentity>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NodeIdentity {
+    pub key: Arc<SigningKey>,
+    pub public_b64: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,9 +135,46 @@ impl Storage {
         connection.pragma_update(None, "foreign_keys", "ON")?;
         apply_migrations(&connection)?;
 
+        let node_identity_b64: Option<String> = connection
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'node_identity_v1'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let signing_key = if let Some(b64) = node_identity_b64 {
+            let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(&b64)
+                .map_err(|_| StorageError::Internal("invalid identity base64".to_string()))?;
+            let bytes_array: [u8; 32] = bytes
+                .try_into()
+                .map_err(|_| StorageError::Internal("invalid identity length".to_string()))?;
+            SigningKey::from_bytes(&bytes_array)
+        } else {
+            let key = SigningKey::generate(&mut OsRng);
+            let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key.to_bytes());
+            connection.execute(
+                "INSERT INTO settings (key, value, updated_at) VALUES ('node_identity_v1', ?1, CURRENT_TIMESTAMP)",
+                params![b64],
+            )?;
+            key
+        };
+
+        let public_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(signing_key.verifying_key().to_bytes());
+
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
+            node_identity: Arc::new(NodeIdentity {
+                key: Arc::new(signing_key),
+                public_b64,
+            }),
         })
+    }
+
+    pub fn identity(&self) -> Arc<NodeIdentity> {
+        self.node_identity.clone()
     }
 
     pub async fn upsert_setting(&self, key: &str, value: &str) -> Result<(), StorageError> {
