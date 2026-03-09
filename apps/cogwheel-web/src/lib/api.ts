@@ -187,6 +187,19 @@ export type SyncNodeStatus = {
   peers: SyncPeerStatus[];
 };
 
+export type TailscaleStatus = {
+  installed: boolean;
+  daemon_running: boolean;
+  backend_state: string | null;
+  hostname: string | null;
+  tailnet_name: string | null;
+  peer_count: number;
+  exit_node_active: boolean;
+  version: string | null;
+  health_warnings: string[];
+  last_error: string | null;
+};
+
 export type SyncProfileView = {
   profile: string;
 };
@@ -334,4 +347,5 @@ export const api = {
       body: JSON.stringify(input),
     }),
   securityEvents: () => fetchJson<SecurityEventRecord[]>("/api/v1/security-events"),
+  tailscaleStatus: () => fetchJson<TailscaleStatus>("/api/v1/tailscale/status"),
 };

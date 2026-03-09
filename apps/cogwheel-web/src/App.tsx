@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Activity, ListFilter, RefreshCw, ShieldCheck, Sparkles, Undo2 } from "lucide-react";
-import { api, type AuditEvent, type DashboardSummary, type SettingsSummary, type SyncNodeStatus } from "@/lib/api";
+import { api, type AuditEvent, type DashboardSummary, type SettingsSummary, type SyncNodeStatus, type TailscaleStatus } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
+import { Network } from "lucide-react";
 
 type LoadState = "idle" | "loading" | "ready" | "error";
 type Toast = { id: number; title: string; detail?: string; tone: "success" | "error" | "info" };
@@ -71,10 +72,24 @@ const emptySyncStatus: SyncNodeStatus = {
   peers: [],
 };
 
+const emptyTailscaleStatus: TailscaleStatus = {
+  installed: false,
+  daemon_running: false,
+  backend_state: null,
+  hostname: null,
+  tailnet_name: null,
+  peer_count: 0,
+  exit_node_active: false,
+  version: null,
+  health_warnings: [],
+  last_error: null,
+};
+
 export default function App() {
   const [dashboard, setDashboard] = useState<DashboardSummary>(emptyDashboard);
   const [settings, setSettings] = useState<SettingsSummary>(emptySettings);
   const [syncStatus, setSyncStatus] = useState<SyncNodeStatus>(emptySyncStatus);
+  const [tailscaleStatus, setTailscaleStatus] = useState<TailscaleStatus>(emptyTailscaleStatus);
   const [state, setState] = useState<LoadState>("idle");
   const [error, setError] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -124,28 +139,33 @@ export default function App() {
     setState("loading");
     setError(null);
     try {
-      const [dashboardData, settingsData, syncStatusData] = await Promise.all([
+      const [dashboardData, settingsData, syncStatusData, tailscaleData] = await Promise.all([
         api.dashboard(notificationAnalyticsWindow, notificationHistoryWindow),
         api.settings(),
         api.syncStatus(),
+        api.tailscaleStatus(),
       ]);
       localStorage.setItem("cogwheel_dashboard_cache", JSON.stringify(dashboardData));
       localStorage.setItem("cogwheel_settings_cache", JSON.stringify(settingsData));
       localStorage.setItem("cogwheel_sync_status_cache", JSON.stringify(syncStatusData));
+      localStorage.setItem("cogwheel_tailscale_cache", JSON.stringify(tailscaleData));
       setDashboard(dashboardData);
       setSettings(settingsData);
       setSyncStatus(syncStatusData);
+      setTailscaleStatus(tailscaleData);
       setState("ready");
     } catch (loadError) {
       const cachedDashboard = localStorage.getItem("cogwheel_dashboard_cache");
       const cachedSettings = localStorage.getItem("cogwheel_settings_cache");
       const cachedSyncStatus = localStorage.getItem("cogwheel_sync_status_cache");
+      const cachedTailscale = localStorage.getItem("cogwheel_tailscale_cache");
 
-      if (cachedDashboard && cachedSettings && cachedSyncStatus) {
+      if (cachedDashboard && cachedSettings && cachedSyncStatus && cachedTailscale) {
         try {
           setDashboard(JSON.parse(cachedDashboard) as DashboardSummary);
           setSettings(JSON.parse(cachedSettings) as SettingsSummary);
           setSyncStatus(JSON.parse(cachedSyncStatus) as SyncNodeStatus);
+          setTailscaleStatus(JSON.parse(cachedTailscale) as TailscaleStatus);
           setState("ready");
           pushToast("Working offline", "Showing cached data while the server is unreachable.", "info");
           return;
@@ -1048,8 +1068,56 @@ export default function App() {
               </div>
             </div>
           </div>
-        </Card>
-      </section>
+          <div className="mt-4 rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 font-medium">
+                <Network className="size-4" />
+                Tailscale status
+              </div>
+                {tailscaleStatus.installed && tailscaleStatus.daemon_running ? (
+                  <Badge className={tailscaleStatus.exit_node_active ? "bg-green-500 text-white" : "bg-secondary text-secondary-foreground"}>
+                    {tailscaleStatus.exit_node_active ? "Exit node active" : "Connected"}
+                  </Badge>
+                ) : (
+                  <Badge className="border border-input bg-transparent text-muted-foreground">Not connected</Badge>
+                )}
+              </div>
+              <div className="mt-2 grid gap-2 text-muted-foreground">
+                {tailscaleStatus.last_error ? (
+                  <div className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">
+                    {tailscaleStatus.last_error}
+                  </div>
+                ) : (
+                  <>
+                    <div>Host: <span className="font-medium text-foreground">{tailscaleStatus.hostname ?? "—"}</span></div>
+                    <div>Tailnet: <span className="font-medium text-foreground">{tailscaleStatus.tailnet_name ?? "—"}</span></div>
+                    <div>Version: <span className="font-medium text-foreground">{tailscaleStatus.version ?? "—"}</span></div>
+                    <div>Peers: <span className="font-medium text-foreground">{tailscaleStatus.peer_count}</span></div>
+                    <div>Daemon: <span className="font-medium text-foreground">{tailscaleStatus.backend_state ?? "unknown"}</span></div>
+                  </>
+                )}
+              </div>
+              {tailscaleStatus.health_warnings.length > 0 ? (
+                <div className="mt-3 rounded-lg bg-yellow-50 px-3 py-2 text-xs text-yellow-800">
+                  {tailscaleStatus.health_warnings.join(", ")}
+                </div>
+              ) : null}
+              {!tailscaleStatus.installed ? (
+                <div className="mt-3 text-xs text-muted-foreground">
+                  Tailscale is not installed. Install it to enable exit-node filtering.
+                </div>
+              ) : !tailscaleStatus.daemon_running ? (
+                <div className="mt-3 text-xs text-muted-foreground">
+                  Tailscale daemon is not running. Start it to enable exit-node filtering.
+                </div>
+              ) : !tailscaleStatus.exit_node_active ? (
+                <div className="mt-3 text-xs text-muted-foreground">
+                  Exit-node mode is not active. Enable it to route tailnet traffic through Cogwheel DNS filtering.
+                </div>
+              ) : null}
+            </div>
+          </Card>
+        </section>
 
       <section className="grid gap-6 lg:grid-cols-[1fr_1fr]">
         <Card id="guided-recovery">
