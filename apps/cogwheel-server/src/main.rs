@@ -329,6 +329,7 @@ struct UpsertDeviceRequest {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct SyncStatePayloadV1 {
     version: u32,
+    revision: u64,
     exported_at: chrono::DateTime<chrono::Utc>,
     blocklists: Vec<SourceRecord>,
     devices: Vec<DeviceRecord>,
@@ -857,13 +858,45 @@ async fn settings_summary(
 struct SyncImportResult {
     imported_sources: usize,
     imported_devices: usize,
+    applied_revision: u64,
+}
+
+async fn load_sync_revision(storage: &Storage) -> Result<u64> {
+    let value = storage.get_setting("sync_revision").await?;
+    Ok(value
+        .as_deref()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .unwrap_or(0))
+}
+
+async fn persist_sync_revision(storage: &Storage, revision: u64) -> Result<()> {
+    storage
+        .upsert_setting("sync_revision", &revision.to_string())
+        .await
+        .map_err(Into::into)
+}
+
+fn is_sync_payload_newer(
+    incoming_revision: u64,
+    incoming_node: &str,
+    local_revision: u64,
+    local_node: &str,
+) -> bool {
+    incoming_revision > local_revision
+        || (incoming_revision == local_revision && incoming_node > local_node)
 }
 
 async fn export_sync_state(
     State(state): State<ServerState>,
 ) -> Result<Json<ApiEnvelope<SyncEnvelope>>, axum::http::StatusCode> {
+    let revision = load_sync_revision(&state.storage)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+        .saturating_add(1);
+
     let payload = SyncStatePayloadV1 {
         version: 1,
+        revision,
         exported_at: chrono::Utc::now(),
         blocklists: state
             .storage
@@ -901,6 +934,19 @@ async fn import_sync_state(
 
     if payload.version != 1 {
         return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    let local_revision = load_sync_revision(&state.storage)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let local_node = state.storage.identity().public_b64.clone();
+    if !is_sync_payload_newer(
+        payload.revision,
+        &request.envelope.node_public_key,
+        local_revision,
+        &local_node,
+    ) {
+        return Err(axum::http::StatusCode::CONFLICT);
     }
 
     let existing_sources = state
@@ -957,6 +1003,10 @@ async fn import_sync_state(
         *notifications = payload.notifications.clone();
     }
 
+    persist_sync_revision(&state.storage, payload.revision)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
     sync_runtime_device_policies(&state)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -968,6 +1018,7 @@ async fn import_sync_state(
             event_type: "sync.state_imported".to_string(),
             payload: serde_json::json!({
                 "from": request.envelope.node_public_key,
+                "revision": payload.revision,
                 "sources": payload.blocklists.len(),
                 "devices": payload.devices.len(),
             })
@@ -981,6 +1032,7 @@ async fn import_sync_state(
         data: SyncImportResult {
             imported_sources: payload.blocklists.len(),
             imported_devices: payload.devices.len(),
+            applied_revision: payload.revision,
         },
     }))
 }
