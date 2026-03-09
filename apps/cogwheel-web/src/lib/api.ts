@@ -218,6 +218,18 @@ export type TailscaleDnsCheckResult = {
   suggestions: string[];
 };
 
+export type LoadTestResult = {
+  success: boolean;
+  queries_sent: number;
+  queries_succeeded: number;
+  queries_failed: number;
+  avg_latency_ms: number;
+  p95_latency_ms: number;
+  p99_latency_ms: number;
+  throughput_qps: number;
+  errors: string[];
+};
+
 export type SyncProfileView = {
   profile: string;
 };
@@ -386,4 +398,9 @@ export const api = {
     budget_limit: number;
     recommendations: string[];
   }>("/api/v1/false-positive-budget"),
+  runLoadTest: (duration_secs: number, qps: number, cache_hit_ratio: number) =>
+    fetchJson<LoadTestResult>("/api/v1/load-test", {
+      method: "POST",
+      body: JSON.stringify({ duration_secs, qps, cache_hit_ratio }),
+    }),
 };
