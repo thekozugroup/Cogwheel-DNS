@@ -226,7 +226,7 @@ Exit criteria:
 
 Goal: Deliver a highly polished, low-cognitive-load GUI with a Rust backend.
 
-- [ ] Build onboarding wizard: discover server, verify health, finish in under 2 minutes.
+- [x] Build onboarding flow: dashboard-integrated setup checklist helps operators configure the server, verify health, and finish in under 2 minutes.
 - [x] Create single-home dashboard with clear states: `Protected`, `Updating`, `Needs Attention`.
 - [x] Expose only the two primary settings groups: blocklists and classifier.
 - [x] Add optional `Services` view for curated allow/block toggles without exposing raw DNS complexity.
@@ -248,6 +248,7 @@ Current implementation notes:
 - The home dashboard now calls out a single control-plane state (`Protected`, `Updating`, `Paused`, or `Needs attention`) and suggests the next recovery action inline so operators can react without scanning every panel.
 - The home view now includes direct jump links into overview, recovery, settings, blocklists, and device sections so the dashboard acts as a true single-home control surface.
 - A one-click "Pause 10m" action on the dashboard now globally bypasses all DNS blocking policies for temporary troubleshooting.
+- The onboarding wizard is now integrated directly into the dashboard as a "Setup checklist", avoiding an intrusive modal flow while maintaining clear first-run goals.
 - Remaining work is the actual `shadcn/ui` application, richer operator workflows, and client-side state management.
 
 Exit criteria:
