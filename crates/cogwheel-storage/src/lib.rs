@@ -8,7 +8,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use base64::Engine as _;
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{Signer, SigningKey};
 use rand::rngs::OsRng;
 
 const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
@@ -121,7 +121,61 @@ pub struct NotificationDeliveryRecord {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncEnvelope {
+    pub node_public_key: String,
+    pub timestamp: DateTime<Utc>,
+    pub payload_b64: String,
+    pub signature_b64: String,
+}
+
 impl Storage {
+    pub fn sign_sync_payload(&self, payload: &[u8]) -> SyncEnvelope {
+        let signature = self.node_identity.key.sign(payload);
+        let signature_b64 =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature.to_bytes());
+        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload);
+
+        SyncEnvelope {
+            node_public_key: self.node_identity.public_b64.clone(),
+            timestamp: Utc::now(),
+            payload_b64,
+            signature_b64,
+        }
+    }
+
+    pub fn verify_sync_envelope(envelope: &SyncEnvelope) -> Result<Vec<u8>, StorageError> {
+        use ed25519_dalek::Signature;
+        use ed25519_dalek::{Verifier, VerifyingKey};
+
+        let pub_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(&envelope.node_public_key)
+            .map_err(|_| StorageError::Internal("invalid public key base64".to_string()))?;
+        let pub_bytes_array: [u8; 32] = pub_bytes
+            .try_into()
+            .map_err(|_| StorageError::Internal("invalid public key length".to_string()))?;
+        let verifying_key = VerifyingKey::from_bytes(&pub_bytes_array)
+            .map_err(|_| StorageError::Internal("invalid verifying key bytes".to_string()))?;
+
+        let sig_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(&envelope.signature_b64)
+            .map_err(|_| StorageError::Internal("invalid signature base64".to_string()))?;
+        let sig_bytes_array: [u8; 64] = sig_bytes
+            .try_into()
+            .map_err(|_| StorageError::Internal("invalid signature length".to_string()))?;
+        let signature = Signature::from_bytes(&sig_bytes_array);
+
+        let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(&envelope.payload_b64)
+            .map_err(|_| StorageError::Internal("invalid payload base64".to_string()))?;
+
+        verifying_key
+            .verify(&payload_bytes, &signature)
+            .map_err(|_| StorageError::Internal("signature verification failed".to_string()))?;
+
+        Ok(payload_bytes)
+    }
+
     pub async fn connect(database_url: &str) -> Result<Self, StorageError> {
         let path = database_url
             .strip_prefix("sqlite://")
