@@ -247,6 +247,7 @@ Current implementation notes:
 - The operator feed now supports quick runtime/notification/device/ruleset filtering, making the current dashboard easier to triage while broader Phase 5 simplification work remains open.
 - The home dashboard now calls out a single control-plane state (`Protected`, `Updating`, or `Needs attention`) and suggests the next recovery action inline so operators can react without scanning every panel.
 - Audit feed cards now summarize structured payload details instead of only showing raw event types, making rollback, runtime, notification, and device changes faster to interpret.
+- The dashboard now includes guided recovery actions plus a setup checklist, giving operators plain-language next steps while the broader onboarding flow remains under construction.
 - Remaining work is the actual `shadcn/ui` application, richer operator workflows, and client-side state management.
 
 Exit criteria:

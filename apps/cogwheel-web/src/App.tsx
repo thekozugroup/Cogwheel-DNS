@@ -238,6 +238,101 @@ export default function App() {
     };
   }, [busyAction, dashboard.notification_health.delivered_count, dashboard.notification_health.failed_count, dashboard.runtime_health.degraded, dashboard.runtime_health.notes, error, state]);
 
+  const recoveryActions = useMemo(() => {
+    const actions: Array<{
+      title: string;
+      detail: string;
+      actionLabel: string;
+      actionKey: "runtime-health-check" | "notifications" | "refresh-sources" | "rollback-ruleset";
+      disabled?: boolean;
+    }> = [];
+
+    if (dashboard.runtime_health.degraded) {
+      actions.push({
+        title: "Check runtime health again",
+        detail: dashboard.runtime_health.notes[0] ?? "Probe the runtime again to confirm whether the issue is still active.",
+        actionLabel: busyAction === "runtime-health-check" ? "Checking..." : "Run health check",
+        actionKey: "runtime-health-check",
+        disabled: busyAction === "runtime-health-check",
+      });
+    }
+
+    if (dashboard.notification_health.failed_count > 0) {
+      actions.push({
+        title: "Review notification delivery",
+        detail: "Open recent notification events and look for repeated delivery failures before the next alert is missed.",
+        actionLabel: "Show notifications",
+        actionKey: "notifications",
+      });
+    }
+
+    if (!dashboard.active_ruleset) {
+      actions.push({
+        title: "Refresh sources now",
+        detail: "The resolver does not have an active ruleset yet, so request a fresh source refresh from the control plane.",
+        actionLabel: busyAction === "refresh-sources" ? "Refreshing..." : "Refresh sources",
+        actionKey: "refresh-sources",
+        disabled: busyAction === "refresh-sources",
+      });
+    }
+
+    if (dashboard.active_ruleset && dashboard.runtime_health.degraded) {
+      actions.push({
+        title: "Roll back to the previous ruleset",
+        detail: "If the degraded state appeared after a recent change, roll back to the last known-good policy set.",
+        actionLabel: busyAction === "rollback-ruleset" ? "Rolling back..." : "Roll back",
+        actionKey: "rollback-ruleset",
+        disabled: busyAction === "rollback-ruleset",
+      });
+    }
+
+    if (actions.length === 0) {
+      actions.push({
+        title: "System looks steady",
+        detail: "No immediate recovery flow is needed right now. Use refresh or device editing when you are ready to make the next change.",
+        actionLabel: busyAction === "refresh-sources" ? "Refreshing..." : "Refresh sources",
+        actionKey: "refresh-sources",
+        disabled: busyAction === "refresh-sources",
+      });
+    }
+
+    return actions.slice(0, 3);
+  }, [busyAction, dashboard.active_ruleset, dashboard.notification_health.failed_count, dashboard.runtime_health.degraded, dashboard.runtime_health.notes]);
+
+  const onboardingChecklist = useMemo(() => {
+    const enabledBlocklistsCount = settings.blocklists.filter((source) => source.enabled).length;
+    const items = [
+      {
+        title: "Add a blocklist",
+        done: enabledBlocklistsCount > 0,
+        detail: enabledBlocklistsCount > 0 ? `${enabledBlocklistsCount} blocklist source${enabledBlocklistsCount === 1 ? " is" : "s are"} enabled.` : "Turn on at least one source so Cogwheel can build an active ruleset.",
+      },
+      {
+        title: "Enable the classifier",
+        done: settings.classifier.mode !== "Off",
+        detail: settings.classifier.mode !== "Off" ? `Classifier is in ${settings.classifier.mode} mode.` : "Switch the classifier out of Off mode for risky-domain detection.",
+      },
+      {
+        title: "Name a device",
+        done: settings.devices.length > 0,
+        detail: settings.devices.length > 0 ? `${settings.devices.length} named device${settings.devices.length === 1 ? "" : "s"} tracked.` : "Name at least one device so per-device policy and alerts are easier to interpret.",
+      },
+      {
+        title: "Configure alert delivery",
+        done: settings.notifications.enabled && Boolean(settings.notifications.webhook_url),
+        detail: settings.notifications.enabled && settings.notifications.webhook_url
+          ? `Webhook notifications are enabled at ${settings.notifications.min_severity} severity and above.`
+          : "Add a webhook destination so operators hear about degraded health and risky alerts quickly.",
+      },
+    ];
+
+    return {
+      completed: items.filter((item) => item.done).length,
+      total: items.length,
+      items,
+    };
+  }, [settings.blocklists, settings.classifier.mode, settings.devices.length, settings.notifications.enabled, settings.notifications.min_severity, settings.notifications.webhook_url]);
+
   const serviceLabelMap = useMemo(
     () =>
       new Map(
@@ -726,6 +821,65 @@ export default function App() {
             <Metric label="Enabled" value={String(dashboard.enabled_source_count)} icon={<ShieldCheck className="size-4" />} />
             <Metric label="Services" value={String(dashboard.service_toggle_count)} icon={<Sparkles className="size-4" />} />
             <Metric label="Devices" value={String(dashboard.device_count)} icon={<Activity className="size-4" />} />
+          </div>
+        </Card>
+      </section>
+
+      <section className="grid gap-6 lg:grid-cols-[1fr_1fr]">
+        <Card>
+          <CardTitle>Guided recovery</CardTitle>
+          <CardDescription>Plain-language next steps for the issues most likely to block protection or visibility.</CardDescription>
+          <div className="mt-5 grid gap-3">
+            {recoveryActions.map((item) => (
+              <div key={item.title} className="rounded-[24px] border border-border/70 bg-white/80 p-4">
+                <div className="font-medium">{item.title}</div>
+                <div className="mt-1 text-sm text-muted-foreground">{item.detail}</div>
+                <div className="mt-3">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => {
+                      if (item.actionKey === "runtime-health-check") {
+                        void handleRuntimeHealthCheck();
+                        return;
+                      }
+                      if (item.actionKey === "notifications") {
+                        setAuditEventFilter("notifications");
+                        return;
+                      }
+                      if (item.actionKey === "rollback-ruleset") {
+                        void handleRollbackRuleset();
+                        return;
+                      }
+                      void handleRefreshSources();
+                    }}
+                    disabled={item.disabled}
+                  >
+                    {item.actionLabel}
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+
+        <Card>
+          <CardTitle>Setup checklist</CardTitle>
+          <CardDescription>Track the core steps that turn the current control plane into a ready-to-run deployment.</CardDescription>
+          <div className="mt-5 rounded-[24px] border border-border/70 bg-muted/40 p-4">
+            <div className="text-sm text-muted-foreground">Completed</div>
+            <div className="mt-1 font-display text-3xl font-semibold">{onboardingChecklist.completed}/{onboardingChecklist.total}</div>
+          </div>
+          <div className="mt-4 grid gap-3">
+            {onboardingChecklist.items.map((item) => (
+              <div key={item.title} className="rounded-[24px] border border-border/70 bg-white/80 p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="font-medium">{item.title}</div>
+                  <Badge>{item.done ? "Done" : "Next"}</Badge>
+                </div>
+                <div className="mt-1 text-sm text-muted-foreground">{item.detail}</div>
+              </div>
+            ))}
           </div>
         </Card>
       </section>
