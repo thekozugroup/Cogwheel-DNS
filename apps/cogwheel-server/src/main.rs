@@ -882,6 +882,20 @@ async fn settings_summary(
     }))
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+struct TailscaleStatusView {
+    installed: bool,
+    daemon_running: bool,
+    backend_state: Option<String>,
+    hostname: Option<String>,
+    tailnet_name: Option<String>,
+    peer_count: usize,
+    exit_node_active: bool,
+    version: Option<String>,
+    health_warnings: Vec<String>,
+    last_error: Option<String>,
+}
+
 fn parse_tailscale_status_json(raw: &str) -> TailscaleStatusView {
     let value: serde_json::Value = match serde_json::from_str(raw) {
         Ok(value) => value,
