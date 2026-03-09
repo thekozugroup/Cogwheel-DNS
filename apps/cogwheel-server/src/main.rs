@@ -34,7 +34,7 @@ use reqwest::Client;
 use std::collections::{HashMap, HashSet};
 use std::process::Command;
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::time::interval;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
@@ -51,6 +51,39 @@ struct ServerState {
     protected_domains: Arc<HashSet<String>>,
     runtime_guard: RuntimeGuardConfig,
     sync_seen_nonces: Arc<Mutex<HashMap<String, chrono::DateTime<chrono::Utc>>>>,
+    rate_limiter: Arc<RateLimiter>,
+}
+
+#[derive(Clone)]
+struct RateLimiter {
+    requests: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
+    max_requests: usize,
+    window_secs: u64,
+}
+
+impl RateLimiter {
+    fn new(max_requests: usize, window_secs: u64) -> Self {
+        Self {
+            requests: Arc::new(Mutex::new(HashMap::new())),
+            max_requests,
+            window_secs,
+        }
+    }
+
+    fn is_allowed(&self, key: &str) -> bool {
+        let now = Instant::now();
+        let mut requests = self.requests.lock().unwrap();
+
+        let entry = requests.entry(key.to_string()).or_default();
+        entry.retain(|t| now.duration_since(*t) < Duration::from_secs(self.window_secs));
+
+        if entry.len() >= self.max_requests {
+            return false;
+        }
+
+        entry.push(now);
+        true
+    }
 }
 
 #[derive(Clone)]
@@ -495,6 +528,7 @@ async fn main() -> Result<()> {
         protected_domains,
         runtime_guard: config.runtime_guard,
         sync_seen_nonces: Arc::new(Mutex::new(HashMap::new())),
+        rate_limiter: Arc::new(RateLimiter::new(100, 60)),
     };
     if let Err(error) = warm_runtime_policy_catalog(&app_state).await {
         tracing::warn!(%error, "failed to warm runtime policy catalog on startup");
@@ -2066,6 +2100,10 @@ async fn resume_runtime(State(state): State<ServerState>) -> Result<(), axum::ht
 async fn refresh_sources(
     State(state): State<ServerState>,
 ) -> Result<Json<ApiEnvelope<RefreshResponse>>, axum::http::StatusCode> {
+    if !state.rate_limiter.is_allowed("refresh_sources") {
+        return Err(axum::http::StatusCode::TOO_MANY_REQUESTS);
+    }
+
     refresh_sources_once(&state, "manual", None)
         .await
         .map(|data| Json(ApiEnvelope { data }))
@@ -2310,6 +2348,10 @@ async fn upsert_blocklist(
     State(state): State<ServerState>,
     Json(request): Json<UpsertBlocklistRequest>,
 ) -> Result<Json<ApiEnvelope<RefreshResponse>>, axum::http::StatusCode> {
+    if !state.rate_limiter.is_allowed("upsert_blocklist") {
+        return Err(axum::http::StatusCode::TOO_MANY_REQUESTS);
+    }
+
     let normalized_kind =
         normalize_source_kind(&request.kind).ok_or(axum::http::StatusCode::BAD_REQUEST)?;
     Url::parse(&request.url).map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
