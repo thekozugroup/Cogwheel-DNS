@@ -230,6 +230,17 @@ export type LoadTestResult = {
   errors: string[];
 };
 
+export type FalsePositiveBudgetStatus = {
+  release_ready: boolean;
+  blocking_rate: number;
+  blocked_total: number;
+  queries_total: number;
+  false_positive_estimate: number;
+  budget_remaining: number;
+  budget_limit: number;
+  recommendations: string[];
+};
+
 export type SyncProfileView = {
   profile: string;
 };
@@ -388,16 +399,8 @@ export const api = {
       method: "POST",
     }),
   tailscaleDnsCheck: () => fetchJson<TailscaleDnsCheckResult>("/api/v1/tailscale/dns-check"),
-  falsePositiveBudget: () => fetchJson<{
-    release_ready: boolean;
-    blocking_rate: number;
-    blocked_total: number;
-    queries_total: number;
-    false_positive_estimate: number;
-    budget_remaining: number;
-    budget_limit: number;
-    recommendations: string[];
-  }>("/api/v1/false-positive-budget"),
+  falsePositiveBudget: () =>
+    fetchJson<FalsePositiveBudgetStatus>("/api/v1/false-positive-budget"),
   runLoadTest: (duration_secs: number, qps: number, cache_hit_ratio: number) =>
     fetchJson<LoadTestResult>("/api/v1/load-test", {
       method: "POST",
