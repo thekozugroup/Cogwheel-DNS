@@ -618,6 +618,7 @@ fn admin_router() -> Router<ServerState> {
         .route("/api/v1/runtime/resume", post(resume_runtime))
         .route("/api/v1/tailscale/status", get(tailscale_status))
         .route("/api/v1/tailscale/exit-node", post(tailscale_exit_node))
+        .route("/api/v1/tailscale/rollback", post(tailscale_rollback))
         .route("/api/v1/sync/status", get(sync_status))
         .route("/api/v1/sync/profile", get(sync_profile))
         .route("/api/v1/sync/profile", post(update_sync_profile))
@@ -1071,6 +1072,7 @@ async fn tailscale_exit_node(
         )
     })?;
 
+    let current_exit_node = status.exit_node_active;
     let cmd = if request.enabled {
         let output = Command::new("tailscale")
             .args(["ip", "-4"])
@@ -1123,10 +1125,127 @@ async fn tailscale_exit_node(
         format!("Exit-node mode disabled on {}", hostname)
     };
 
+    let _ = save_tailscale_state(current_exit_node, &hostname);
+
     Ok(Json(ApiEnvelope {
         data: TailscaleExitNodeResult {
             success: true,
             message: cmd,
+        },
+    }))
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct TailscaleSavedState {
+    exit_node_enabled: bool,
+    saved_at: String,
+    hostname: String,
+}
+
+fn get_tailscale_state_path() -> std::path::PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".cogwheel_tailscale_state.json")
+}
+
+fn save_tailscale_state(exit_node_enabled: bool, hostname: &str) -> Result<(), String> {
+    let state = TailscaleSavedState {
+        exit_node_enabled,
+        saved_at: chrono::Utc::now().to_rfc3339(),
+        hostname: hostname.to_string(),
+    };
+    let json = serde_json::to_string_pretty(&state).map_err(|e| e.to_string())?;
+    std::fs::write(get_tailscale_state_path(), json).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn load_tailscale_state() -> Option<TailscaleSavedState> {
+    let path = get_tailscale_state_path();
+    let content = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct TailscaleRollbackResult {
+    success: bool,
+    message: String,
+    previous_state: Option<bool>,
+}
+
+async fn tailscale_rollback()
+-> Result<Json<ApiEnvelope<TailscaleRollbackResult>>, (axum::http::StatusCode, String)> {
+    let saved_state = load_tailscale_state().ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "No previous Tailscale state found to rollback".to_string(),
+        )
+    })?;
+
+    let status = load_tailscale_status();
+
+    if !status.installed {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "Tailscale is not installed".to_string(),
+        ));
+    }
+
+    if !status.daemon_running {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "Tailscale daemon is not running".to_string(),
+        ));
+    }
+
+    let output = if saved_state.exit_node_enabled {
+        let output = Command::new("tailscale")
+            .args(["ip", "-4"])
+            .output()
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        if !output.status.success() {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                "Failed to get Tailscale IP address".to_string(),
+            ));
+        }
+
+        let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Command::new("tailscale")
+            .args(["up", "--exit-node", &ip])
+            .output()
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    } else {
+        Command::new("tailscale")
+            .args(["up", "--exit-node="])
+            .output()
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    };
+
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        return Err((
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to rollback exit-node: {}", err),
+        ));
+    }
+
+    let _ = std::fs::remove_file(get_tailscale_state_path());
+
+    Ok(Json(ApiEnvelope {
+        data: TailscaleRollbackResult {
+            success: true,
+            message: format!(
+                "Rolled back to previous state: exit-node {}",
+                if saved_state.exit_node_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            ),
+            previous_state: Some(saved_state.exit_node_enabled),
         },
     }))
 }

@@ -706,6 +706,23 @@ export default function App() {
     }
   }
 
+  async function handleTailscaleRollback() {
+    setBusyAction("tailscale-rollback");
+    try {
+      const result = await api.tailscaleRollback();
+      pushToast("Exit node rolled back", result.message, "success");
+      await load();
+    } catch (mutationError) {
+      pushToast(
+        "Rollback failed",
+        mutationError instanceof Error ? mutationError.message : "Unknown error",
+        "error",
+      );
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
   async function handleRefreshSources() {
     setBusyAction("refresh-sources");
     try {
@@ -1151,6 +1168,15 @@ export default function App() {
                       Exit-node mode routes all tailnet traffic through this node, enabling DNS filtering for connected clients.
                     </div>
                   )}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => void handleTailscaleRollback()}
+                    disabled={busyAction === "tailscale-rollback"}
+                    className="mt-2"
+                  >
+                    {busyAction === "tailscale-rollback" ? "Rolling back..." : "Roll back to previous state"}
+                  </Button>
                 </div>
               )}
             </div>

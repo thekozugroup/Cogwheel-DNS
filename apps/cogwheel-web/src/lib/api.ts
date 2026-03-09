@@ -205,6 +205,12 @@ export type TailscaleExitNodeResult = {
   message: string;
 };
 
+export type TailscaleRollbackResult = {
+  success: boolean;
+  message: string;
+  previous_state: boolean | null;
+};
+
 export type SyncProfileView = {
   profile: string;
 };
@@ -357,5 +363,9 @@ export const api = {
     fetchJson<TailscaleExitNodeResult>("/api/v1/tailscale/exit-node", {
       method: "POST",
       body: JSON.stringify({ enabled }),
+    }),
+  tailscaleRollback: () =>
+    fetchJson<TailscaleRollbackResult>("/api/v1/tailscale/rollback", {
+      method: "POST",
     }),
 };
