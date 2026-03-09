@@ -125,20 +125,34 @@ pub struct NotificationDeliveryRecord {
 pub struct SyncEnvelope {
     pub node_public_key: String,
     pub timestamp: DateTime<Utc>,
+    pub nonce: String,
     pub payload_b64: String,
     pub signature_b64: String,
 }
 
+fn sync_signing_message(timestamp: &DateTime<Utc>, nonce: &str, payload: &[u8]) -> Vec<u8> {
+    let mut message = timestamp.to_rfc3339().into_bytes();
+    message.push(b'|');
+    message.extend_from_slice(nonce.as_bytes());
+    message.push(b'|');
+    message.extend_from_slice(payload);
+    message
+}
+
 impl Storage {
     pub fn sign_sync_payload(&self, payload: &[u8]) -> SyncEnvelope {
-        let signature = self.node_identity.key.sign(payload);
+        let timestamp = Utc::now();
+        let nonce = Uuid::new_v4().to_string();
+        let message = sync_signing_message(&timestamp, &nonce, payload);
+        let signature = self.node_identity.key.sign(&message);
         let signature_b64 =
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature.to_bytes());
         let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload);
 
         SyncEnvelope {
             node_public_key: self.node_identity.public_b64.clone(),
-            timestamp: Utc::now(),
+            timestamp,
+            nonce,
             payload_b64,
             signature_b64,
         }
@@ -168,9 +182,10 @@ impl Storage {
         let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(&envelope.payload_b64)
             .map_err(|_| StorageError::Internal("invalid payload base64".to_string()))?;
+        let message = sync_signing_message(&envelope.timestamp, &envelope.nonce, &payload_bytes);
 
         verifying_key
-            .verify(&payload_bytes, &signature)
+            .verify(&message, &signature)
             .map_err(|_| StorageError::Internal("signature verification failed".to_string()))?;
 
         Ok(payload_bytes)

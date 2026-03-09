@@ -31,8 +31,7 @@ use prometheus_client::metrics::counter::Counter;
 use prometheus_client::registry::Registry;
 use reqwest::Client;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use std::sync::RwLock;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use tokio::time::interval;
 use tower_http::trace::TraceLayer;
@@ -49,6 +48,7 @@ struct ServerState {
     notification_settings: Arc<RwLock<NotificationSettings>>,
     protected_domains: Arc<HashSet<String>>,
     runtime_guard: RuntimeGuardConfig,
+    sync_seen_nonces: Arc<Mutex<HashMap<String, chrono::DateTime<chrono::Utc>>>>,
 }
 
 #[derive(Clone)]
@@ -492,6 +492,7 @@ async fn main() -> Result<()> {
         notification_settings,
         protected_domains,
         runtime_guard: config.runtime_guard,
+        sync_seen_nonces: Arc::new(Mutex::new(HashMap::new())),
     };
     if let Err(error) = warm_runtime_policy_catalog(&app_state).await {
         tracing::warn!(%error, "failed to warm runtime policy catalog on startup");
@@ -971,6 +972,30 @@ fn is_sync_payload_newer(
         || (incoming_revision == local_revision && incoming_node > local_node)
 }
 
+fn register_sync_nonce(state: &ServerState, envelope: &SyncEnvelope) -> bool {
+    let now = chrono::Utc::now();
+
+    let max_age = chrono::Duration::minutes(10);
+    let max_future_skew = chrono::Duration::seconds(30);
+    if envelope.timestamp < (now - max_age) || envelope.timestamp > (now + max_future_skew) {
+        return false;
+    }
+
+    let key = format!("{}:{}", envelope.node_public_key, envelope.nonce);
+    let mut guard = state
+        .sync_seen_nonces
+        .lock()
+        .expect("sync nonce lock poisoned");
+    guard.retain(|_, ts| *ts >= (now - chrono::Duration::minutes(30)));
+
+    if guard.contains_key(&key) {
+        return false;
+    }
+
+    guard.insert(key, now);
+    true
+}
+
 async fn export_sync_state(
     State(state): State<ServerState>,
     Query(query): Query<SyncExportQuery>,
@@ -1043,6 +1068,10 @@ async fn import_sync_state(
         serde_json::from_slice(&payload_bytes).map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
 
     if payload.version != 1 {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    if !register_sync_nonce(&state, &request.envelope) {
         return Err(axum::http::StatusCode::BAD_REQUEST);
     }
 

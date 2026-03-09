@@ -265,11 +265,12 @@ Goal: Keep multiple Cogwheel nodes in sync safely.
 Implementation notes:
 - The storage layer now automatically generates and persists an `ed25519` keypair (`node_identity_v1`) on first boot, providing a stable cryptographical identity for future peer-to-peer sync envelopes.
 - Sync imports now enforce deterministic conflict resolution using `revision` ordering with node public-key tie-breakers, and reject stale envelopes with HTTP 409.
+- Sync replication now supports explicit profiles (`full`, `settings-only`, `read-only-follower`) and blocks stale/replayed envelopes using signed nonce + timestamp checks.
 
 - [x] Implement node identity (`ed25519`) and signed sync envelopes.
 - [x] Sync only required state: blocklists, classifier config, allowlist/denylist overrides, versioned settings.
 - [x] Add deterministic conflict resolution (`revision + vector clock` or server-authoritative mode).
-- [ ] Add selective replication profiles (`full`, `settings-only`, `read-only follower`).
+- [x] Add selective replication profiles (`full`, `settings-only`, `read-only follower`).
 - [ ] Add encrypted transport and replay protection.
 - [ ] Add health/status view in GUI for each node.
 
