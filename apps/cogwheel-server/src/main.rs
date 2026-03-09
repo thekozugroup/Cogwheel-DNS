@@ -1281,7 +1281,8 @@ fn get_local_dns_server() -> Option<String> {
     }
 }
 
-async fn tailscale_dns_check() -> Result<Json<ApiEnvelope<TailscaleDnsCheckResult>>, (axum::http::StatusCode, String)> {
+async fn tailscale_dns_check()
+-> Result<Json<ApiEnvelope<TailscaleDnsCheckResult>>, (axum::http::StatusCode, String)> {
     let status = load_tailscale_status();
     let local_dns = get_local_dns_server();
 
@@ -1296,10 +1297,13 @@ async fn tailscale_dns_check() -> Result<Json<ApiEnvelope<TailscaleDnsCheckResul
         message = "Tailscale daemon is not running.".to_string();
         configured = false;
     } else if !status.exit_node_active {
-        message = "Exit-node mode is not active. Enable it to start filtering tailnet traffic.".to_string();
-        suggestions.push("Click 'Enable exit node' in the dashboard to start filtering.".to_string());
+        message = "Exit-node mode is not active. Enable it to start filtering tailnet traffic."
+            .to_string();
+        suggestions
+            .push("Click 'Enable exit node' in the dashboard to start filtering.".to_string());
     } else {
-        message = "Exit-node mode is active. DNS filtering is enabled for tailnet clients.".to_string();
+        message =
+            "Exit-node mode is active. DNS filtering is enabled for tailnet clients.".to_string();
         if let Some(ref dns) = local_dns {
             suggestions.push(format!(
                 "This machine is using {} as its DNS server. Ensure Cogwheel is running on {} to filter DNS queries.",
@@ -4629,5 +4633,54 @@ mod tests {
             Some(now - chrono::TimeDelta::minutes(45)),
             now,
         ));
+    }
+
+    #[test]
+    fn parse_tailscale_status_json_handles_missing_fields() {
+        let status = parse_tailscale_status_json("{}");
+        assert!(status.installed);
+        assert!(status.daemon_running);
+        assert!(status.hostname.is_none());
+        assert!(!status.exit_node_active);
+    }
+
+    #[test]
+    fn parse_tailscale_status_json_detects_exit_node_status_variants() {
+        let status_with_exit_node = parse_tailscale_status_json(
+            &serde_json::json!({
+                "Self": { "ExitNode": true }
+            })
+            .to_string(),
+        );
+        assert!(status_with_exit_node.exit_node_active);
+
+        let status_with_exit_node_status = parse_tailscale_status_json(
+            &serde_json::json!({
+                "Self": { "ExitNodeStatus": "Active" }
+            })
+            .to_string(),
+        );
+        assert!(status_with_exit_node_status.exit_node_active);
+
+        let status_without_exit = parse_tailscale_status_json(
+            &serde_json::json!({
+                "Self": { "ExitNode": false }
+            })
+            .to_string(),
+        );
+        assert!(!status_without_exit.exit_node_active);
+    }
+
+    #[test]
+    fn tailscale_saved_state_serialization() {
+        let state = TailscaleSavedState {
+            exit_node_enabled: true,
+            saved_at: "2024-01-01T00:00:00Z".to_string(),
+            hostname: "test-node".to_string(),
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        let parsed: TailscaleSavedState = serde_json::from_str(&json).unwrap();
+        assert!(parsed.exit_node_enabled);
+        assert_eq!(parsed.hostname, "test-node");
     }
 }
