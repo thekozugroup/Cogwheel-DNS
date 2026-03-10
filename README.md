@@ -33,6 +33,7 @@ cargo run -p cogwheel-server
 For a local Web UI session that avoids privileged ports on macOS:
 
 ```bash
+COGWHEEL_PROFILE=dev \
 COGWHEEL_SERVER__HTTP_BIND_ADDR=127.0.0.1:30080 \
 COGWHEEL_SERVER__DNS_UDP_BIND_ADDR=127.0.0.1:30053 \
 COGWHEEL_SERVER__DNS_TCP_BIND_ADDR=127.0.0.1:30053 \
@@ -43,6 +44,7 @@ cargo run -p cogwheel-server
 
 The server reads settings from environment variables with the `COGWHEEL_` prefix.
 
+- `COGWHEEL_PROFILE` (`dev`, `home`, `smb`)
 - `COGWHEEL_SERVER__HTTP_BIND_ADDR`
 - `COGWHEEL_SERVER__DNS_UDP_BIND_ADDR`
 - `COGWHEEL_SERVER__DNS_TCP_BIND_ADDR`

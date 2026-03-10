@@ -86,7 +86,7 @@ Goal: Establish clean modular boundaries and delivery pipeline.
 
 - [x] Initialize Cargo workspace with all crates/apps listed above.
 - [x] Add CI: `fmt`, `clippy`, tests, security checks (`cargo audit`, `cargo deny`).
-- [ ] Add typed config layer with environment profiles (`dev`, `home`, `smb`).
+- [x] Add typed config layer with environment profiles (`dev`, `home`, `smb`).
 - [x] Add migration framework and initial schema (`sources`, `rulesets`, `settings`, `audit_events`).
 - [x] Add tracing, request IDs, and Prometheus endpoint.
 - [x] Add shared error model and API error envelope across crates.

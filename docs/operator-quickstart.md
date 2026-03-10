@@ -13,6 +13,7 @@ This guide is for people deploying and maintaining a Cogwheel node.
 Run Cogwheel directly for a local test session:
 
 ```bash
+COGWHEEL_PROFILE=dev \
 COGWHEEL_SERVER__HTTP_BIND_ADDR=127.0.0.1:30080 \
 COGWHEEL_SERVER__DNS_UDP_BIND_ADDR=127.0.0.1:30053 \
 COGWHEEL_SERVER__DNS_TCP_BIND_ADDR=127.0.0.1:30053 \
@@ -20,6 +21,12 @@ cargo run -p cogwheel-server
 ```
 
 Then open `http://localhost:30080`.
+
+Built-in deployment profiles:
+
+- `dev` - loopback-only, non-privileged local ports
+- `home` - default home-lab profile
+- `smb` - small-business profile with DNS on port `53` and stricter guard thresholds
 
 ## Docker Run
 
@@ -45,6 +52,7 @@ For Raspberry Pi deployment details, see `DEPLOY.md` and `DEPLOYMENT.md`.
 - `COGWHEEL_SERVER__HTTP_BIND_ADDR`
 - `COGWHEEL_SERVER__DNS_UDP_BIND_ADDR`
 - `COGWHEEL_SERVER__DNS_TCP_BIND_ADDR`
+- `COGWHEEL_PROFILE`
 - `COGWHEEL_STORAGE__DATABASE_URL`
 - `COGWHEEL_UPSTREAM__SERVERS`
 
