@@ -322,7 +322,7 @@ Goal: Ship a stable v1 and establish maintainable evolution.
 - [x] Publish operator docs and user docs with quick-start paths.
 - [ ] Add plugin interface for optional threat-intel providers.
 - [ ] Add optional privacy-preserving federated-learning interface (model updates only, no raw logs).
-- [ ] Define release cadence, LTS/support windows, and contribution model.
+- [x] Define release cadence, LTS/support windows, and contribution model.
 
 Exit criteria:
 

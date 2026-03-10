@@ -23,3 +23,10 @@ cargo fmt --all
 cargo clippy --workspace --all-targets --all-features
 cargo test --workspace
 ```
+
+## Release Expectations
+
+- Keep `main` releasable with passing checks.
+- Document migration and compatibility impact for API or schema changes.
+- Update `docs/operator-quickstart.md` or `docs/user-quickstart.md` when behavior changes.
+- Follow `docs/release-policy.md` for support windows and release criteria.
