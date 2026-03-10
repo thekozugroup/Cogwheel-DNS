@@ -73,7 +73,7 @@ Goal: Lock the new product direction and remove plan ambiguity.
 - [x] Define product principles: simplicity-first, safe-defaults, modular internals.
 - [x] Document strict UX limits: only two primary user settings surfaces.
 - [x] Define reliability and latency budgets for DNS hot path.
-- [ ] Create architecture decision records (ADRs) for crate boundaries.
+- [x] Create architecture decision records (ADRs) for crate boundaries.
 
 Exit criteria:
 
