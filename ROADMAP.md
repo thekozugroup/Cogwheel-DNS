@@ -318,7 +318,7 @@ Exit criteria:
 
 Goal: Ship a stable v1 and establish maintainable evolution.
 
-- [ ] Finalize versioned config schema and migration compatibility policy.
+- [x] Finalize versioned config schema and migration compatibility policy.
 - [ ] Publish operator docs and user docs with quick-start paths.
 - [ ] Add plugin interface for optional threat-intel providers.
 - [ ] Add optional privacy-preserving federated-learning interface (model updates only, no raw logs).
