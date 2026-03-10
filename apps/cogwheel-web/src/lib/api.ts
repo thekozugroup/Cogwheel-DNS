@@ -241,6 +241,15 @@ export type FalsePositiveBudgetStatus = {
   recommendations: string[];
 };
 
+export type RustOptimizationBenchmark = {
+  domain_parsing_ns: number;
+  rule_matching_ns: number;
+  cache_lookup_ns: number;
+  memory_usage_bytes: number;
+  allocations_per_query: number;
+  recommendations: string[];
+};
+
 export type SyncProfileView = {
   profile: string;
 };
@@ -406,4 +415,6 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ duration_secs, qps, cache_hit_ratio }),
     }),
+  benchmarkRustOpts: () =>
+    fetchJson<RustOptimizationBenchmark>("/api/v1/benchmark/rust-opts"),
 };

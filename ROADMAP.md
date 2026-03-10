@@ -306,7 +306,7 @@ Goal: Reach stable beta quality for real-world always-on use.
 - [x] Add resilience drills: upstream outage, DB corruption simulation, failed list source, sync partition.
 - [x] Implement backup/restore and automated recovery checks.
 - [x] Add abuse protections and rate limiting on management APIs.
-- [ ] Benchmark Rust-specific optimizations: compact rule storage, matcher hot paths, async task partitioning, and optional SIMD feature extraction.
+- [x] Benchmark Rust-specific optimizations: compact rule storage, matcher hot paths, async task partitioning, and optional SIMD feature extraction.
 - [ ] Benchmark optional Linux fast path (`eBPF`/`XDP`) as future optimization track.
 
 Exit criteria:

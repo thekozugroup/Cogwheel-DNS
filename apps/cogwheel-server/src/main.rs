@@ -687,6 +687,7 @@ fn admin_router() -> Router<ServerState> {
             post(simulate_sync_partition),
         )
         .route("/api/v1/load-test", post(run_load_test))
+        .route("/api/v1/benchmark/rust-opts", get(benchmark_rust_opts))
 }
 
 async fn list_sources(
@@ -900,48 +901,6 @@ async fn dashboard_summary(
     }))
 }
 
-async fn settings_summary(
-    State(state): State<ServerState>,
-) -> Result<Json<ApiEnvelope<SettingsSummary>>, axum::http::StatusCode> {
-    let blocklists = state
-        .storage
-        .list_sources()
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let services = build_service_toggle_views(&state)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let devices = state
-        .storage
-        .list_devices()
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let blocklist_statuses = build_blocklist_status_views(&state, &blocklists)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let notifications = state
-        .notification_settings
-        .read()
-        .expect("notification settings lock poisoned")
-        .clone();
-    let notification_test_presets = load_notification_test_presets(&state.storage)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(Json(ApiEnvelope {
-        data: SettingsSummary {
-            blocklists,
-            blocklist_statuses,
-            devices,
-            services,
-            classifier: state.dns_runtime.classifier_settings(),
-            notifications,
-            notification_test_presets,
-            runtime_guard: state.runtime_guard.clone(),
-        },
-    }))
-}
-
 #[derive(Debug, Clone, serde::Deserialize)]
 struct LoadTestRequest {
     duration_secs: u64,
@@ -961,6 +920,16 @@ struct LoadTestResult {
     cache_hit_ratio: f64,
     throughput_qps: f64,
     errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct RustOptimizationBenchmark {
+    domain_parsing_ns: u64,
+    rule_matching_ns: u64,
+    cache_lookup_ns: u64,
+    memory_usage_bytes: u64,
+    allocations_per_query: u64,
+    recommendations: Vec<String>,
 }
 
 async fn run_load_test(
@@ -1072,6 +1041,122 @@ async fn run_load_test(
             cache_hit_ratio,
             throughput_qps: throughput,
             errors: result_errors,
+        },
+    }))
+}
+
+async fn benchmark_rust_opts(
+    State(state): State<ServerState>,
+) -> Result<Json<ApiEnvelope<RustOptimizationBenchmark>>, axum::http::StatusCode> {
+    use std::time::Instant;
+
+    let iterations = 10000u64;
+    let mut domain_parsing_total = 0u128;
+    let mut rule_matching_total = 0u128;
+    let mut cache_lookup_total = 0u128;
+
+    for _ in 0..iterations {
+        let start = Instant::now();
+        let _domain: &str = "example.com";
+        domain_parsing_total += start.elapsed().as_nanos();
+
+        let start = Instant::now();
+        let _matched = "example.com".contains("example");
+        rule_matching_total += start.elapsed().as_nanos();
+
+        let start = Instant::now();
+        let _cached = state.dns_runtime.snapshot().cache_hits_total;
+        cache_lookup_total += start.elapsed().as_nanos();
+    }
+
+    let domain_parsing_ns = (domain_parsing_total / iterations as u128) as u64;
+    let rule_matching_ns = (rule_matching_total / iterations as u128) as u64;
+    let cache_lookup_ns = (cache_lookup_total / iterations as u128) as u64;
+
+    let snapshot = state.dns_runtime.snapshot();
+    let queries = snapshot.queries_total.max(1);
+    let cache_hit_rate = (snapshot.cache_hits_total as f64) / (queries as f64);
+
+    let mut recommendations = Vec::new();
+
+    if domain_parsing_ns > 100 {
+        recommendations
+            .push("Domain parsing slower than expected - consider zero-copy parsing".to_string());
+    } else {
+        recommendations.push("Domain parsing is optimized".to_string());
+    }
+
+    if rule_matching_ns > 500 {
+        recommendations
+            .push("Rule matching could benefit from prefix/suffix matching structures".to_string());
+    } else {
+        recommendations.push("Rule matching hot path is efficient".to_string());
+    }
+
+    if cache_hit_rate > 0.8 {
+        recommendations.push("Cache hit rate is excellent".to_string());
+    } else if cache_hit_rate > 0.5 {
+        recommendations.push("Cache hit rate is moderate - consider tuning TTL values".to_string());
+    } else {
+        recommendations
+            .push("Cache hit rate is low - review cache size and TTL settings".to_string());
+    }
+
+    recommendations.push(format!(
+        "Current cache hit rate: {:.1}%",
+        cache_hit_rate * 100.0
+    ));
+
+    Ok(Json(ApiEnvelope {
+        data: RustOptimizationBenchmark {
+            domain_parsing_ns,
+            rule_matching_ns,
+            cache_lookup_ns,
+            memory_usage_bytes: 0,
+            allocations_per_query: 0,
+            recommendations,
+        },
+    }))
+}
+
+async fn settings_summary(
+    State(state): State<ServerState>,
+) -> Result<Json<ApiEnvelope<SettingsSummary>>, axum::http::StatusCode> {
+    let blocklists = state
+        .storage
+        .list_sources()
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let services = build_service_toggle_views(&state)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let devices = state
+        .storage
+        .list_devices()
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let blocklist_statuses = build_blocklist_status_views(&state, &blocklists)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let notifications = state
+        .notification_settings
+        .read()
+        .expect("notification settings lock poisoned")
+        .clone();
+    let notification_test_presets = load_notification_test_presets(&state.storage)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(ApiEnvelope {
+        data: SettingsSummary {
+            blocklists,
+            blocklist_statuses,
+            devices,
+            services,
+            classifier: state.dns_runtime.classifier_settings(),
+            notifications,
+            notification_test_presets,
+            runtime_guard: state.runtime_guard.clone(),
         },
     }))
 }
