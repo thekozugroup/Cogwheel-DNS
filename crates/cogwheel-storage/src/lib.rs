@@ -20,6 +20,10 @@ const MIGRATION_0006: &str = include_str!("../migrations/0006_device_protection_
 const MIGRATION_0007: &str = include_str!("../migrations/0007_device_allowed_domains.sql");
 const MIGRATION_0008: &str = include_str!("../migrations/0008_device_service_overrides.sql");
 const MIGRATION_0009: &str = include_str!("../migrations/0009_notification_deliveries.sql");
+const MIGRATION_0010: &str = include_str!("../migrations/0010_config_version.sql");
+
+pub const SCHEMA_VERSION: u32 = 10;
+pub const CONFIG_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -614,6 +618,13 @@ impl Storage {
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(StorageError::from)
     }
+
+    pub fn get_config_version(&self) -> Result<u32, StorageError> {
+        let connection = self.connection.lock().expect("storage mutex poisoned");
+        let mut statement = connection.prepare("SELECT version FROM config_schema WHERE id = 1")?;
+        let version: u32 = statement.query_row([], |row| row.get(0))?;
+        Ok(version)
+    }
 }
 
 fn apply_migrations(connection: &Connection) -> Result<(), StorageError> {
@@ -626,6 +637,7 @@ fn apply_migrations(connection: &Connection) -> Result<(), StorageError> {
     let _ = connection.execute_batch(MIGRATION_0007);
     let _ = connection.execute_batch(MIGRATION_0008);
     let _ = connection.execute_batch(MIGRATION_0009);
+    let _ = connection.execute_batch(MIGRATION_0010);
     Ok(())
 }
 

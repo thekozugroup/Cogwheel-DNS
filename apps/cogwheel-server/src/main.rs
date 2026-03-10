@@ -688,6 +688,8 @@ fn admin_router() -> Router<ServerState> {
         )
         .route("/api/v1/load-test", post(run_load_test))
         .route("/api/v1/benchmark/rust-opts", get(benchmark_rust_opts))
+        .route("/api/v1/config/version", get(config_version))
+        .route("/api/v1/config/version", get(config_version))
 }
 
 async fn list_sources(
@@ -1114,6 +1116,51 @@ async fn benchmark_rust_opts(
             cache_lookup_ns,
             memory_usage_bytes: 0,
             allocations_per_query: 0,
+            recommendations,
+        },
+    }))
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct ConfigVersionStatus {
+    schema_version: u32,
+    config_version: u32,
+    cogwheel_version: String,
+    migration_count: u32,
+    upgrade_available: bool,
+    recommendations: Vec<String>,
+}
+
+async fn config_version(
+    State(state): State<ServerState>,
+) -> Result<Json<ApiEnvelope<ConfigVersionStatus>>, axum::http::StatusCode> {
+    let mut recommendations = Vec::new();
+
+    let current_config_version = cogwheel_storage::CONFIG_SCHEMA_VERSION;
+    let schema_version = cogwheel_storage::SCHEMA_VERSION;
+
+    let stored_version = state.storage.get_config_version().unwrap_or(1);
+
+    let upgrade_available = stored_version < current_config_version;
+
+    if upgrade_available {
+        recommendations.push(format!(
+            "Config upgrade available: v{} -> v{}",
+            stored_version, current_config_version
+        ));
+    } else {
+        recommendations.push("Config schema is up to date".to_string());
+    }
+
+    recommendations.push(format!("Database schema version: {}", schema_version));
+
+    Ok(Json(ApiEnvelope {
+        data: ConfigVersionStatus {
+            schema_version,
+            config_version: stored_version,
+            cogwheel_version: env!("CARGO_PKG_VERSION").to_string(),
+            migration_count: 10,
+            upgrade_available,
             recommendations,
         },
     }))
