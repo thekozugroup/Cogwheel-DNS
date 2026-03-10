@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Activity, ListFilter, RefreshCw, ShieldCheck, Sparkles, Undo2 } from "lucide-react";
-import { api, type AuditEvent, type DashboardSummary, type SettingsSummary, type SyncNodeStatus, type TailscaleStatus, type TailscaleDnsCheckResult } from "@/lib/api";
+import { api, type AuditEvent, type DashboardSummary, type FederatedLearningSettings, type SettingsSummary, type SyncNodeStatus, type TailscaleDnsCheckResult, type TailscaleStatus, type ThreatIntelSettings } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
@@ -92,12 +92,31 @@ const emptyTailscaleDnsCheck: TailscaleDnsCheckResult = {
   suggestions: [],
 };
 
+const emptyThreatIntelSettings: ThreatIntelSettings = {
+  providers: [],
+  recommendations: [],
+};
+
+const emptyFederatedLearningSettings: FederatedLearningSettings = {
+  enabled: false,
+  coordinator_url: null,
+  node_id: "",
+  round_interval_hours: 24,
+  last_round_at: null,
+  last_model_version: null,
+  privacy_mode: "model-updates-only",
+  raw_log_export_enabled: false,
+  recommendations: [],
+};
+
 export default function App() {
   const [dashboard, setDashboard] = useState<DashboardSummary>(emptyDashboard);
   const [settings, setSettings] = useState<SettingsSummary>(emptySettings);
   const [syncStatus, setSyncStatus] = useState<SyncNodeStatus>(emptySyncStatus);
   const [tailscaleStatus, setTailscaleStatus] = useState<TailscaleStatus>(emptyTailscaleStatus);
   const [tailscaleDnsCheck, setTailscaleDnsCheck] = useState<TailscaleDnsCheckResult>(emptyTailscaleDnsCheck);
+  const [threatIntelSettings, setThreatIntelSettings] = useState<ThreatIntelSettings>(emptyThreatIntelSettings);
+  const [federatedLearningSettings, setFederatedLearningSettings] = useState<FederatedLearningSettings>(emptyFederatedLearningSettings);
   const [state, setState] = useState<LoadState>("idle");
   const [error, setError] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -147,23 +166,29 @@ export default function App() {
     setState("loading");
     setError(null);
     try {
-      const [dashboardData, settingsData, syncStatusData, tailscaleData, tailscaleDns] = await Promise.all([
+      const [dashboardData, settingsData, syncStatusData, tailscaleData, tailscaleDns, threatIntelData, federatedLearningData] = await Promise.all([
         api.dashboard(notificationAnalyticsWindow, notificationHistoryWindow),
         api.settings(),
         api.syncStatus(),
         api.tailscaleStatus(),
         api.tailscaleDnsCheck(),
+        api.threatIntelProviders(),
+        api.federatedLearningStatus(),
       ]);
       localStorage.setItem("cogwheel_dashboard_cache", JSON.stringify(dashboardData));
       localStorage.setItem("cogwheel_settings_cache", JSON.stringify(settingsData));
       localStorage.setItem("cogwheel_sync_status_cache", JSON.stringify(syncStatusData));
       localStorage.setItem("cogwheel_tailscale_cache", JSON.stringify(tailscaleData));
       localStorage.setItem("cogwheel_tailscale_dns_cache", JSON.stringify(tailscaleDns));
+      localStorage.setItem("cogwheel_threat_intel_cache", JSON.stringify(threatIntelData));
+      localStorage.setItem("cogwheel_federated_learning_cache", JSON.stringify(federatedLearningData));
       setDashboard(dashboardData);
       setSettings(settingsData);
       setSyncStatus(syncStatusData);
       setTailscaleStatus(tailscaleData);
       setTailscaleDnsCheck(tailscaleDns);
+      setThreatIntelSettings(threatIntelData);
+      setFederatedLearningSettings(federatedLearningData);
       setState("ready");
     } catch (loadError) {
       const cachedDashboard = localStorage.getItem("cogwheel_dashboard_cache");
@@ -171,14 +196,18 @@ export default function App() {
       const cachedSyncStatus = localStorage.getItem("cogwheel_sync_status_cache");
       const cachedTailscale = localStorage.getItem("cogwheel_tailscale_cache");
       const cachedTailscaleDns = localStorage.getItem("cogwheel_tailscale_dns_cache");
+      const cachedThreatIntel = localStorage.getItem("cogwheel_threat_intel_cache");
+      const cachedFederatedLearning = localStorage.getItem("cogwheel_federated_learning_cache");
 
-      if (cachedDashboard && cachedSettings && cachedSyncStatus && cachedTailscale && cachedTailscaleDns) {
+      if (cachedDashboard && cachedSettings && cachedSyncStatus && cachedTailscale && cachedTailscaleDns && cachedThreatIntel && cachedFederatedLearning) {
         try {
           setDashboard(JSON.parse(cachedDashboard) as DashboardSummary);
           setSettings(JSON.parse(cachedSettings) as SettingsSummary);
           setSyncStatus(JSON.parse(cachedSyncStatus) as SyncNodeStatus);
           setTailscaleStatus(JSON.parse(cachedTailscale) as TailscaleStatus);
           setTailscaleDnsCheck(JSON.parse(cachedTailscaleDns) as TailscaleDnsCheckResult);
+          setThreatIntelSettings(JSON.parse(cachedThreatIntel) as ThreatIntelSettings);
+          setFederatedLearningSettings(JSON.parse(cachedFederatedLearning) as FederatedLearningSettings);
           setState("ready");
           pushToast("Working offline", "Showing cached data while the server is unreachable.", "info");
           return;
@@ -731,6 +760,49 @@ export default function App() {
         mutationError instanceof Error ? mutationError.message : "Unknown error",
         "error",
       );
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleThreatIntelProviderSave(providerId: string) {
+    const provider = threatIntelSettings.providers.find((item) => item.id === providerId);
+    if (!provider) {
+      pushToast("Provider missing", "The selected provider could not be found.", "error");
+      return;
+    }
+
+    setBusyAction(`threat-intel-${providerId}`);
+    try {
+      const next = await api.updateThreatIntelProvider(
+        provider.id,
+        provider.enabled,
+        provider.feed_url,
+        provider.update_interval_minutes,
+      );
+      setThreatIntelSettings(next);
+      pushToast("Threat intel updated", `${provider.display_name} settings saved.`, "success");
+      await load();
+    } catch (mutationError) {
+      pushToast("Threat intel update failed", mutationError instanceof Error ? mutationError.message : "Unknown error", "error");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleFederatedLearningSave() {
+    setBusyAction("federated-learning-save");
+    try {
+      const next = await api.updateFederatedLearningStatus(
+        federatedLearningSettings.enabled,
+        federatedLearningSettings.coordinator_url,
+        federatedLearningSettings.round_interval_hours,
+      );
+      setFederatedLearningSettings(next);
+      pushToast("Federated learning updated", next.enabled ? "Coordinator settings are active with model-updates-only privacy." : "Federated learning is disabled.", "success");
+      await load();
+    } catch (mutationError) {
+      pushToast("Federated learning update failed", mutationError instanceof Error ? mutationError.message : "Unknown error", "error");
     } finally {
       setBusyAction(null);
     }
@@ -1566,6 +1638,148 @@ export default function App() {
                 </Button>
               </div>
             )}
+
+            <Separator />
+
+            <section className="space-y-4">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="font-medium">Optional intelligence feeds</div>
+                  <div className="text-sm text-muted-foreground">Keep enrichment providers off the DNS hot path and enable them only when you need added context.</div>
+                </div>
+                <Badge>{threatIntelSettings.providers.filter((provider) => provider.enabled).length} enabled</Badge>
+              </div>
+              <div className="grid gap-3">
+                {threatIntelSettings.providers.map((provider) => (
+                  <div key={provider.id} className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="font-medium">{provider.display_name}</div>
+                        <div className="mt-1 text-xs text-muted-foreground">{provider.capabilities.join(" • ")}</div>
+                      </div>
+                      <Badge className={provider.enabled ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground"}>{provider.enabled ? "Enabled" : "Disabled"}</Badge>
+                    </div>
+                    <label className="mt-3 flex items-center gap-3 rounded-2xl border border-border/70 bg-background/80 px-4 py-3 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={provider.enabled}
+                        onChange={(event) =>
+                          setThreatIntelSettings((current) => ({
+                            ...current,
+                            providers: current.providers.map((item) =>
+                              item.id === provider.id ? { ...item, enabled: event.target.checked } : item,
+                            ),
+                          }))
+                        }
+                      />
+                      Enable provider
+                    </label>
+                    <div className="mt-3 grid gap-3 sm:grid-cols-[1fr_180px_auto]">
+                      <Input
+                        value={provider.feed_url ?? ""}
+                        onChange={(event) =>
+                          setThreatIntelSettings((current) => ({
+                            ...current,
+                            providers: current.providers.map((item) =>
+                              item.id === provider.id ? { ...item, feed_url: event.target.value || null } : item,
+                            ),
+                          }))
+                        }
+                        placeholder="https://feed.example.invalid/dns"
+                      />
+                      <Input
+                        value={String(provider.update_interval_minutes)}
+                        onChange={(event) => {
+                          const nextValue = Number.parseInt(event.target.value, 10);
+                          setThreatIntelSettings((current) => ({
+                            ...current,
+                            providers: current.providers.map((item) =>
+                              item.id === provider.id
+                                ? { ...item, update_interval_minutes: Number.isNaN(nextValue) ? item.update_interval_minutes : nextValue }
+                                : item,
+                            ),
+                          }));
+                        }}
+                        placeholder="60"
+                      />
+                      <Button variant="secondary" size="sm" onClick={() => void handleThreatIntelProviderSave(provider.id)} disabled={busyAction === `threat-intel-${provider.id}`}>
+                        {busyAction === `threat-intel-${provider.id}` ? "Saving..." : "Save"}
+                      </Button>
+                    </div>
+                    <div className="mt-2 text-xs text-muted-foreground">
+                      API key configured: {provider.api_key_configured ? "yes" : "no"}
+                      {provider.last_sync_at ? ` • Last sync ${new Date(provider.last_sync_at).toLocaleString()}` : " • No sync yet"}
+                    </div>
+                    {provider.last_error ? <div className="mt-2 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">{provider.last_error}</div> : null}
+                  </div>
+                ))}
+              </div>
+              {threatIntelSettings.recommendations.length > 0 ? (
+                <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm text-muted-foreground">
+                  {threatIntelSettings.recommendations.join(" ")}
+                </div>
+              ) : null}
+            </section>
+
+            <Separator />
+
+            <section className="space-y-4">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="font-medium">Federated learning</div>
+                  <div className="text-sm text-muted-foreground">Share model updates only. Raw logs stay local to preserve the default privacy boundary.</div>
+                </div>
+                <Badge>{federatedLearningSettings.enabled ? federatedLearningSettings.privacy_mode : "Disabled"}</Badge>
+              </div>
+              <label className="flex items-center gap-3 rounded-2xl border border-border/70 bg-muted/40 px-4 py-3 text-sm">
+                <input
+                  type="checkbox"
+                  checked={federatedLearningSettings.enabled}
+                  onChange={(event) => setFederatedLearningSettings((current) => ({ ...current, enabled: event.target.checked }))}
+                />
+                Enable federated learning coordinator sync
+              </label>
+              <div className="grid gap-3 sm:grid-cols-[1fr_180px_auto]">
+                <Input
+                  value={federatedLearningSettings.coordinator_url ?? ""}
+                  onChange={(event) => setFederatedLearningSettings((current) => ({ ...current, coordinator_url: event.target.value || null }))}
+                  placeholder="https://coordinator.example.invalid"
+                />
+                <Input
+                  value={String(federatedLearningSettings.round_interval_hours)}
+                  onChange={(event) => {
+                    const nextValue = Number.parseInt(event.target.value, 10);
+                    setFederatedLearningSettings((current) => ({
+                      ...current,
+                      round_interval_hours: Number.isNaN(nextValue) ? current.round_interval_hours : nextValue,
+                    }));
+                  }}
+                  placeholder="24"
+                />
+                <Button variant="secondary" onClick={() => void handleFederatedLearningSave()} disabled={busyAction === "federated-learning-save"}>
+                  {busyAction === "federated-learning-save" ? "Saving..." : "Save"}
+                </Button>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-3">
+                <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
+                  <div className="text-muted-foreground">Node id</div>
+                  <div className="mt-1 font-medium">{federatedLearningSettings.node_id || "Pending"}</div>
+                </div>
+                <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
+                  <div className="text-muted-foreground">Last round</div>
+                  <div className="mt-1 font-medium">{federatedLearningSettings.last_round_at ? new Date(federatedLearningSettings.last_round_at).toLocaleString() : "Not started"}</div>
+                </div>
+                <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
+                  <div className="text-muted-foreground">Raw log export</div>
+                  <div className="mt-1 font-medium">{federatedLearningSettings.raw_log_export_enabled ? "Enabled" : "Disabled"}</div>
+                </div>
+              </div>
+              {federatedLearningSettings.recommendations.length > 0 ? (
+                <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm text-muted-foreground">
+                  {federatedLearningSettings.recommendations.join(" ")}
+                </div>
+              ) : null}
+            </section>
 
             <Separator />
 

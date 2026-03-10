@@ -321,7 +321,7 @@ Goal: Ship a stable v1 and establish maintainable evolution.
 - [x] Finalize versioned config schema and migration compatibility policy.
 - [x] Publish operator docs and user docs with quick-start paths.
 - [x] Add plugin interface for optional threat-intel providers.
-- [ ] Add optional privacy-preserving federated-learning interface (model updates only, no raw logs).
+- [x] Add optional privacy-preserving federated-learning interface (model updates only, no raw logs).
 - [x] Define release cadence, LTS/support windows, and contribution model.
 
 Exit criteria:
