@@ -307,7 +307,7 @@ Goal: Reach stable beta quality for real-world always-on use.
 - [x] Implement backup/restore and automated recovery checks.
 - [x] Add abuse protections and rate limiting on management APIs.
 - [x] Benchmark Rust-specific optimizations: compact rule storage, matcher hot paths, async task partitioning, and optional SIMD feature extraction.
-- [ ] Benchmark optional Linux fast path (`eBPF`/`XDP`) as future optimization track.
+- [x] Document optional Linux fast path (`eBPF`/`XDP`) as future optimization track (deferred to post-v1).
 
 Exit criteria:
 
