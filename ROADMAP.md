@@ -338,6 +338,15 @@ Exit criteria:
 - [ ] Keep default user-facing settings minimal and understandable.
 - [ ] Preserve modular crate boundaries; avoid cross-crate coupling drift.
 
+## UX Refinement Follow-Up
+
+Goal: Make the control plane feel approachable for a household first, while keeping operator-grade controls available in a quieter settings surface.
+
+- [x] Add overview-first navigation with quick health and recent domain activity visuals.
+- [ ] Add block profiles page with emoji, friendly naming, list composition, and save/edit flows.
+- [ ] Add devices page with clear labeling and profile assignment.
+- [ ] Move advanced sync, recovery, and operator controls into a dedicated settings page.
+
 ## Phase 10 - Android Companion App
 
 Goal: Provide a mobile companion app for Android focused on monitoring, safe controls, and remote-friendly administration.

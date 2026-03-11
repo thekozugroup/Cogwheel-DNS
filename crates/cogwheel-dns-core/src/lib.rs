@@ -26,6 +26,7 @@ pub struct DnsRuntimeConfig {
 }
 
 type ClassificationObserver = Arc<dyn Fn(ClassificationEvent) + Send + Sync>;
+type QueryActivityObserver = Arc<dyn Fn(QueryActivityEvent) + Send + Sync>;
 
 #[derive(Clone)]
 pub struct DnsRuntime {
@@ -36,6 +37,7 @@ pub struct DnsRuntime {
     devices_by_ip: Arc<RwLock<HashMap<IpAddr, DevicePolicyConfig>>>,
     classifier_settings: Arc<RwLock<ClassifierSettings>>,
     classification_observer: Arc<RwLock<Option<ClassificationObserver>>>,
+    query_activity_observer: Arc<RwLock<Option<QueryActivityObserver>>>,
     global_pause_until: Arc<RwLock<Option<DateTime<Utc>>>>,
     cache: Cache<String, CachedLookup>,
     fallback_cache: Cache<String, CachedLookup>,
@@ -47,6 +49,14 @@ pub struct ClassificationEvent {
     pub domain: String,
     pub client_ip: Option<String>,
     pub classification: Classification,
+    pub observed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct QueryActivityEvent {
+    pub domain: String,
+    pub client_ip: Option<String>,
+    pub blocked: bool,
     pub observed_at: DateTime<Utc>,
 }
 
@@ -63,6 +73,7 @@ pub struct DevicePolicyConfig {
 #[derive(Debug, Clone)]
 struct CachedLookup {
     response: Message,
+    blocked: bool,
 }
 
 #[derive(Debug, Default)]
@@ -101,6 +112,7 @@ impl DnsRuntime {
             devices_by_ip: Arc::new(RwLock::new(HashMap::new())),
             classifier_settings: Arc::new(RwLock::new(classifier_settings)),
             classification_observer: Arc::new(RwLock::new(None)),
+            query_activity_observer: Arc::new(RwLock::new(None)),
             global_pause_until: Arc::new(RwLock::new(None)),
             cache: Cache::new(10_000),
             fallback_cache: Cache::new(10_000),
@@ -163,6 +175,12 @@ impl DnsRuntime {
 
     pub fn set_classification_observer(&self, observer: ClassificationObserver) {
         if let Ok(mut guard) = self.classification_observer.write() {
+            *guard = Some(observer);
+        }
+    }
+
+    pub fn set_query_activity_observer(&self, observer: QueryActivityObserver) {
+        if let Ok(mut guard) = self.query_activity_observer.write() {
             *guard = Some(observer);
         }
     }
@@ -274,6 +292,7 @@ impl DnsRuntime {
 
         if let Some(cached) = self.cache.get(&cache_key).await {
             self.stats.cache_hits_total.fetch_add(1, Ordering::Relaxed);
+            self.emit_query_activity(&domain, client_addr, cached.blocked);
             return Ok(response_for_request(&request, &cached.response));
         }
 
@@ -285,9 +304,11 @@ impl DnsRuntime {
                     cache_key,
                     CachedLookup {
                         response: response.clone(),
+                        blocked: true,
                     },
                 )
                 .await;
+            self.emit_query_activity(&domain, client_addr, true);
             return Ok(response);
         }
         let decision = engine.evaluate(&domain);
@@ -296,6 +317,7 @@ impl DnsRuntime {
             .as_ref()
             .is_some_and(|rule| matches!(rule.action, RuleAction::Allow));
 
+        let blocked = matches!(&decision.kind, DecisionKind::Blocked(_));
         let response = match decision.kind {
             DecisionKind::Blocked(mode) => {
                 self.stats.blocked_total.fetch_add(1, Ordering::Relaxed);
@@ -311,9 +333,11 @@ impl DnsRuntime {
                                 cache_key.clone(),
                                 CachedLookup {
                                     response: response.clone(),
+                                    blocked: true,
                                 },
                             )
                             .await;
+                        self.emit_query_activity(&domain, client_addr, true);
                         return Ok(response);
                     }
                 }
@@ -325,6 +349,7 @@ impl DnsRuntime {
                                 domain.clone(),
                                 CachedLookup {
                                     response: response.clone(),
+                                    blocked: false,
                                 },
                             )
                             .await;
@@ -353,9 +378,11 @@ impl DnsRuntime {
                 cache_key,
                 CachedLookup {
                     response: response.clone(),
+                    blocked,
                 },
             )
             .await;
+        self.emit_query_activity(&domain, client_addr, blocked);
         Ok(response)
     }
 
@@ -373,6 +400,22 @@ impl DnsRuntime {
             .clone();
         if let Some(observer) = observer {
             observer(event);
+        }
+    }
+
+    fn emit_query_activity(&self, domain: &str, client_addr: Option<SocketAddr>, blocked: bool) {
+        let observer = self
+            .query_activity_observer
+            .read()
+            .expect("query activity observer lock poisoned")
+            .clone();
+        if let Some(observer) = observer {
+            observer(QueryActivityEvent {
+                domain: domain.to_string(),
+                client_ip: client_addr.map(|addr| addr.ip().to_string()),
+                blocked,
+                observed_at: Utc::now(),
+            });
         }
     }
 

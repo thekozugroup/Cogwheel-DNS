@@ -95,6 +95,17 @@ export type SecuritySummary = {
   top_devices: DeviceSecuritySummary[];
 };
 
+export type DomainInsightEntry = {
+  domain: string;
+  count: number;
+};
+
+export type DomainInsights = {
+  top_queried_domains: DomainInsightEntry[];
+  top_blocked_domains: DomainInsightEntry[];
+  observed_queries: number;
+};
+
 export type NotificationSettings = {
   enabled: boolean;
   webhook_url: string | null;
@@ -167,6 +178,7 @@ export type DashboardSummary = {
   notification_health: NotificationHealthSummary;
   notification_failure_analytics: NotificationFailureAnalytics;
   security_summary: SecuritySummary;
+  domain_insights: DomainInsights;
 };
 
 export type SyncPeerStatus = {

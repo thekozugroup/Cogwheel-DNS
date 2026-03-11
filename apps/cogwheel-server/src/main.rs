@@ -7,6 +7,7 @@ use cogwheel_api::{ApiEnvelope, ApiState, AppConfig, RuntimeGuardConfig, router}
 use cogwheel_classifier::ClassifierSettings;
 use cogwheel_dns_core::{
     ClassificationEvent, DevicePolicyConfig, DnsRuntime, DnsRuntimeConfig, DnsRuntimeSnapshot,
+    QueryActivityEvent,
 };
 use cogwheel_lists::{
     ParsedSource, SourceDefinition, SourceKind, build_policy_engine, fetch_and_parse_source,
@@ -31,7 +32,7 @@ use hickory_resolver::proto::xfer::Protocol;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::registry::Registry;
 use reqwest::Client;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex, RwLock};
@@ -52,6 +53,7 @@ struct ServerState {
     notification_settings: Arc<RwLock<NotificationSettings>>,
     threat_intel_settings: Arc<RwLock<ThreatIntelSettings>>,
     federated_learning_settings: Arc<RwLock<FederatedLearningSettings>>,
+    recent_dns_activity: Arc<Mutex<VecDeque<DomainActivityRecord>>>,
     protected_domains: Arc<HashSet<String>>,
     runtime_guard: RuntimeGuardConfig,
     sync_seen_nonces: Arc<Mutex<HashMap<String, chrono::DateTime<chrono::Utc>>>>,
@@ -181,6 +183,27 @@ struct DashboardSummary {
     notification_health: NotificationHealthSummary,
     notification_failure_analytics: NotificationFailureAnalytics,
     security_summary: SecuritySummary,
+    domain_insights: DomainInsights,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DomainInsightEntry {
+    domain: String,
+    count: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DomainInsights {
+    top_queried_domains: Vec<DomainInsightEntry>,
+    top_blocked_domains: Vec<DomainInsightEntry>,
+    observed_queries: usize,
+}
+
+#[derive(Debug, Clone)]
+struct DomainActivityRecord {
+    domain: String,
+    blocked: bool,
+    observed_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -533,6 +556,7 @@ async fn main() -> Result<()> {
     let resolver = build_resolver(&config.upstream.servers)?;
     let classifier_settings = load_classifier_settings(&storage).await?;
     let notification_settings = Arc::new(RwLock::new(load_notification_settings(&storage).await?));
+    let recent_dns_activity = Arc::new(Mutex::new(VecDeque::with_capacity(4096)));
     let http_client = Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
@@ -560,6 +584,10 @@ async fn main() -> Result<()> {
             });
         }
     }));
+    dns_runtime.set_query_activity_observer(Arc::new({
+        let recent_dns_activity = recent_dns_activity.clone();
+        move |event| record_recent_dns_activity(&recent_dns_activity, event)
+    }));
 
     let dns_handle = tokio::spawn({
         let runtime = dns_runtime.clone();
@@ -578,6 +606,7 @@ async fn main() -> Result<()> {
         notification_settings,
         threat_intel_settings: Arc::new(RwLock::new(default_threat_intel_settings())),
         federated_learning_settings: Arc::new(RwLock::new(default_federated_learning_settings())),
+        recent_dns_activity,
         protected_domains,
         runtime_guard: config.runtime_guard,
         sync_seen_nonces: Arc::new(Mutex::new(HashMap::new())),
@@ -959,6 +988,7 @@ async fn dashboard_summary(
     let notification_health = build_notification_health_summary(&notification_analytics_deliveries);
     let notification_failure_analytics =
         build_notification_failure_analytics(&notification_analytics_deliveries);
+    let domain_insights = build_domain_insights(&state);
     let snapshot = load_service_toggle_snapshot(&state.storage)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -997,8 +1027,72 @@ async fn dashboard_summary(
             notification_health,
             notification_failure_analytics,
             security_summary,
+            domain_insights,
         },
     }))
+}
+
+fn record_recent_dns_activity(
+    activity: &Arc<Mutex<VecDeque<DomainActivityRecord>>>,
+    event: QueryActivityEvent,
+) {
+    let mut guard = activity.lock().expect("recent dns activity lock poisoned");
+    let cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
+    while let Some(front) = guard.front() {
+        if front.observed_at >= cutoff && guard.len() < 4096 {
+            break;
+        }
+        guard.pop_front();
+    }
+    guard.push_back(DomainActivityRecord {
+        domain: event.domain,
+        blocked: event.blocked,
+        observed_at: event.observed_at,
+    });
+}
+
+fn build_domain_insights(state: &ServerState) -> DomainInsights {
+    let cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
+    let guard = state
+        .recent_dns_activity
+        .lock()
+        .expect("recent dns activity lock poisoned");
+
+    let mut queried = HashMap::<String, usize>::new();
+    let mut blocked = HashMap::<String, usize>::new();
+    let mut observed_queries = 0usize;
+
+    for item in guard.iter().filter(|item| item.observed_at >= cutoff) {
+        observed_queries += 1;
+        *queried.entry(item.domain.clone()).or_default() += 1;
+        if item.blocked {
+            *blocked.entry(item.domain.clone()).or_default() += 1;
+        }
+    }
+
+    DomainInsights {
+        top_queried_domains: top_domain_entries(&queried),
+        top_blocked_domains: top_domain_entries(&blocked),
+        observed_queries,
+    }
+}
+
+fn top_domain_entries(counts: &HashMap<String, usize>) -> Vec<DomainInsightEntry> {
+    let mut entries = counts
+        .iter()
+        .map(|(domain, count)| DomainInsightEntry {
+            domain: domain.clone(),
+            count: *count,
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| {
+        right
+            .count
+            .cmp(&left.count)
+            .then_with(|| left.domain.cmp(&right.domain))
+    });
+    entries.truncate(6);
+    entries
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]

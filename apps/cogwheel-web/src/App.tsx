@@ -10,6 +10,7 @@ import { Network } from "lucide-react";
 
 type LoadState = "idle" | "loading" | "ready" | "error";
 type Toast = { id: number; title: string; detail?: string; tone: "success" | "error" | "info" };
+type NavPage = "overview" | "profiles" | "devices" | "settings";
 
 const emptyDashboard: DashboardSummary = {
   protection_status: "Loading",
@@ -48,6 +49,11 @@ const emptyDashboard: DashboardSummary = {
     high_count: 0,
     critical_count: 0,
     top_devices: [],
+  },
+  domain_insights: {
+    top_queried_domains: [],
+    top_blocked_domains: [],
+    observed_queries: 0,
   },
 };
 
@@ -121,6 +127,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [activePage, setActivePage] = useState<NavPage>("overview");
 
   const [blocklistName, setBlocklistName] = useState("");
   const [blocklistUrl, setBlocklistUrl] = useState("");
@@ -453,6 +460,44 @@ export default function App() {
 
     return actions.slice(0, 3);
   }, [busyAction, dashboard.active_ruleset, dashboard.notification_health.failed_count, dashboard.runtime_health.degraded, dashboard.runtime_health.notes]);
+
+  const navItems: Array<{ id: NavPage; label: string; detail: string }> = [
+    { id: "overview", label: "Overview", detail: "Health, activity, and traffic patterns" },
+    { id: "profiles", label: "Block Profiles", detail: "Friendly presets for strict or relaxed browsing" },
+    { id: "devices", label: "Devices", detail: "Label devices and assign profiles" },
+    { id: "settings", label: "Settings", detail: "Advanced sync, recovery, and operator controls" },
+  ];
+
+  const overviewStats = useMemo(
+    () => [
+      {
+        label: "Observed queries",
+        value: dashboard.domain_insights.observed_queries.toLocaleString(),
+        detail: "Recent activity captured from the DNS hot path.",
+      },
+      {
+        label: "Blocked requests",
+        value: dashboard.runtime_health.snapshot.cname_blocks_total.toLocaleString(),
+        detail: "CNAME uncloaks and direct blocks currently enforced.",
+      },
+      {
+        label: "Devices seen",
+        value: dashboard.device_count.toLocaleString(),
+        detail: "Named and discovered devices visible to the control plane.",
+      },
+      {
+        label: "Enabled sources",
+        value: dashboard.enabled_source_count.toLocaleString(),
+        detail: "Sources feeding the active ruleset right now.",
+      },
+    ],
+    [
+      dashboard.device_count,
+      dashboard.domain_insights.observed_queries,
+      dashboard.enabled_source_count,
+      dashboard.runtime_health.snapshot.cname_blocks_total,
+    ],
+  );
 
   const onboardingChecklist = useMemo(() => {
     const enabledBlocklistsCount = settings.blocklists.filter((source) => source.enabled).length;
@@ -1046,6 +1091,31 @@ export default function App() {
         ))}
       </div>
 
+      <header className="sticky top-4 z-40 rounded-[28px] border border-border/60 bg-white/90 px-4 py-4 shadow-sm backdrop-blur">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <div className="text-xs uppercase tracking-[0.28em] text-muted-foreground">Cogwheel</div>
+            <div className="mt-1 font-display text-2xl font-semibold tracking-tight">Calmer controls for everyday filtering.</div>
+          </div>
+          <nav className="grid gap-2 sm:grid-cols-2 lg:flex">
+            {navItems.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => setActivePage(item.id)}
+                className={`rounded-2xl px-4 py-3 text-left transition ${activePage === item.id ? "bg-foreground text-background shadow-sm" : "bg-muted/70 text-foreground hover:bg-muted"}`}
+              >
+                <div className="text-sm font-medium">{item.label}</div>
+                <div className={`text-xs ${activePage === item.id ? "text-background/70" : "text-muted-foreground"}`}>{item.detail}</div>
+              </button>
+            ))}
+          </nav>
+        </div>
+      </header>
+
+      {activePage === "overview" ? (
+        <>
+
       <section className="grid gap-4 md:grid-cols-[1.4fr_0.9fr]">
         <Card className="overflow-hidden bg-gradient-to-br from-card via-white to-secondary/70">
           <div className="flex flex-col gap-6">
@@ -1277,6 +1347,73 @@ export default function App() {
                     {busyAction === "tailscale-rollback" ? "Rolling back..." : "Roll back to previous state"}
                   </Button>
                 </div>
+              )}
+            </div>
+          </Card>
+        </section>
+
+        <section className="grid gap-6 lg:grid-cols-[0.9fr_1.1fr_1.1fr]">
+          <Card>
+            <CardTitle>Overview pulse</CardTitle>
+            <CardDescription>The at-a-glance numbers a household checks first.</CardDescription>
+            <div className="mt-5 grid gap-3">
+              {overviewStats.map((item) => (
+                <div key={item.label} className="rounded-[24px] border border-border/70 bg-white/80 p-4">
+                  <div className="text-sm text-muted-foreground">{item.label}</div>
+                  <div className="mt-2 font-display text-3xl font-semibold tracking-tight">{item.value}</div>
+                  <div className="mt-2 text-xs text-muted-foreground">{item.detail}</div>
+                </div>
+              ))}
+            </div>
+          </Card>
+
+          <Card>
+            <CardTitle>Top queried domains</CardTitle>
+            <CardDescription>Recent destinations seen by the resolver over the last day.</CardDescription>
+            <div className="mt-5 grid gap-3">
+              {dashboard.domain_insights.top_queried_domains.length === 0 ? (
+                <div className="rounded-[24px] border border-dashed border-border/70 bg-muted/30 p-5 text-sm text-muted-foreground">
+                  Query activity will appear here once devices begin sending traffic through Cogwheel.
+                </div>
+              ) : (
+                dashboard.domain_insights.top_queried_domains.map((entry, index) => (
+                  <div key={entry.domain} className="rounded-[24px] border border-border/70 bg-white/85 p-4">
+                    <div className="flex items-center justify-between gap-4">
+                      <div>
+                        <div className="text-xs uppercase tracking-[0.24em] text-muted-foreground">{String(index + 1).padStart(2, "0")}</div>
+                        <div className="mt-1 font-medium text-foreground">{entry.domain}</div>
+                      </div>
+                      <div className="text-right">
+                        <div className="font-display text-2xl font-semibold">{entry.count}</div>
+                        <div className="text-xs text-muted-foreground">queries</div>
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </Card>
+
+          <Card>
+            <CardTitle>Top blocked domains</CardTitle>
+            <CardDescription>Where protection is actively stepping in right now.</CardDescription>
+            <div className="mt-5 grid gap-3">
+              {dashboard.domain_insights.top_blocked_domains.length === 0 ? (
+                <div className="rounded-[24px] border border-dashed border-border/70 bg-muted/30 p-5 text-sm text-muted-foreground">
+                  No blocked domains yet. When filtering engages, the busiest blocked destinations will appear here.
+                </div>
+              ) : (
+                dashboard.domain_insights.top_blocked_domains.map((entry) => (
+                  <div key={entry.domain} className="rounded-[24px] border border-border/70 bg-[linear-gradient(135deg,rgba(250,245,239,0.9),rgba(255,255,255,0.96))] p-4">
+                    <div className="flex items-center justify-between gap-4">
+                      <div>
+                        <div className="font-medium text-foreground">{entry.domain}</div>
+                        <div className="mt-1 text-xs text-muted-foreground">Blocked before the query could complete.</div>
+                      </div>
+                      <Badge className="bg-foreground text-background">{entry.count} blocked</Badge>
+                    </div>
+                  </div>
+                ))
               )}
             </div>
           </Card>
@@ -2204,6 +2341,27 @@ export default function App() {
           {enabledBlocklists.length} enabled blocklists, {settings.devices.length} named devices, classifier threshold {settings.classifier.threshold.toFixed(2)}.
         </div>
       ) : null}
+        </>
+      ) : (
+        <section className="grid gap-6 lg:grid-cols-[0.95fr_1.05fr]">
+          <Card>
+            <CardTitle>{navItems.find((item) => item.id === activePage)?.label}</CardTitle>
+            <CardDescription>{navItems.find((item) => item.id === activePage)?.detail}</CardDescription>
+            <div className="mt-5 rounded-[24px] border border-border/70 bg-white/80 p-5 text-sm text-muted-foreground">
+              This guided page is the next step in the refinement pass. The existing controls remain available under Overview while the dedicated flow is being carved out cleanly.
+            </div>
+          </Card>
+          <Card>
+            <CardTitle>What lands next</CardTitle>
+            <CardDescription>The follow-up iterations will replace the old control-wall with friendlier task-focused screens.</CardDescription>
+            <div className="mt-5 grid gap-3 text-sm text-muted-foreground">
+              <div className="rounded-[24px] border border-border/70 bg-muted/40 p-4">Block profiles will get emoji, name, list composition, and save/edit flows.</div>
+              <div className="rounded-[24px] border border-border/70 bg-muted/40 p-4">Devices will get naming, discovery, and profile assignment in one place.</div>
+              <div className="rounded-[24px] border border-border/70 bg-muted/40 p-4">Technical controls like sync, recovery, and operator feeds will move into Settings.</div>
+            </div>
+          </Card>
+        </section>
+      )}
     </main>
   );
 }
