@@ -21,13 +21,14 @@ Since SSH password authentication is currently failing, follow these manual step
    docker run -d \
      --name cogwheel \
      --restart unless-stopped \
-     -p 30053:30053/udp \
-     -p 30053:30053/tcp \
+     -p 53:30053/udp \
+     -p 53:30053/tcp \
      -p 30080:30080 \
      -e COGWHEEL_PROFILE=dev \
      -e COGWHEEL_SERVER__HTTP_BIND_ADDR=0.0.0.0:30080 \
      -e COGWHEEL_SERVER__DNS_UDP_BIND_ADDR=0.0.0.0:30053 \
      -e COGWHEEL_SERVER__DNS_TCP_BIND_ADDR=0.0.0.0:30053 \
+     -e COGWHEEL_SERVER__ADVERTISED_DNS_PORT=53 \
      -e COGWHEEL_STORAGE__DATABASE_URL=sqlite:///app/data/cogwheel.db \
      -v /home/michaelwong/cogwheel-data:/app/data \
      cogwheel:arm64
@@ -113,16 +114,17 @@ docker rm -f cogwheel
 docker run -d \
   --name cogwheel \
   --restart unless-stopped \
-  -p 30053:30053/udp \
-  -p 30053:30053/tcp \
-  -p 30080:30080 \
-  -e COGWHEEL_PROFILE=dev \
-  -e COGWHEEL_SERVER__HTTP_BIND_ADDR=0.0.0.0:30080 \
-  -e COGWHEEL_SERVER__DNS_UDP_BIND_ADDR=0.0.0.0:30053 \
-  -e COGWHEEL_SERVER__DNS_TCP_BIND_ADDR=0.0.0.0:30053 \
-  -e COGWHEEL_STORAGE__DATABASE_URL=sqlite:///app/data/cogwheel.db \
-  -v /home/michaelwong/cogwheel-data:/app/data \
-  <previous-image-tag>
+   -p 53:30053/udp \
+   -p 53:30053/tcp \
+   -p 30080:30080 \
+   -e COGWHEEL_PROFILE=dev \
+   -e COGWHEEL_SERVER__HTTP_BIND_ADDR=0.0.0.0:30080 \
+   -e COGWHEEL_SERVER__DNS_UDP_BIND_ADDR=0.0.0.0:30053 \
+   -e COGWHEEL_SERVER__DNS_TCP_BIND_ADDR=0.0.0.0:30053 \
+   -e COGWHEEL_SERVER__ADVERTISED_DNS_PORT=53 \
+   -e COGWHEEL_STORAGE__DATABASE_URL=sqlite:///app/data/cogwheel.db \
+   -v /home/michaelwong/cogwheel-data:/app/data \
+   <previous-image-tag>
 ```
 
 Keep `/home/michaelwong/cogwheel-data` mounted so rollback preserves state. Verify rollback with:
@@ -130,7 +132,7 @@ Keep `/home/michaelwong/cogwheel-data` mounted so rollback preserves state. Veri
 ```bash
 curl http://fractal.local:30080/api/v1/dashboard
 curl -I http://fractal.local:30080/
-dig @fractal.local -p 30053 example.com +short
+dig @fractal.local example.com +short
 ```
 
 ## Troubleshooting
@@ -146,7 +148,7 @@ docker rm -f cogwheel
 ```bash
 # Check what's using port 53
 sudo netstat -tulpn | grep :53
-# Stop conflicting service (e.g., systemd-resolved)
+# Stop or reconfigure conflicting service (for example systemd-resolved or another DNS server)
 sudo systemctl stop systemd-resolved
 ```
 
