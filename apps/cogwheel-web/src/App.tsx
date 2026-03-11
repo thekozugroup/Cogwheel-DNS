@@ -8,7 +8,7 @@ import { Separator } from "@/components/ui/separator";
 
 type LoadState = "idle" | "loading" | "ready" | "error";
 type Toast = { id: number; title: string; detail?: string; tone: "success" | "error" | "info" };
-type NavPage = "overview" | "profiles" | "devices" | "settings";
+type NavPage = "overview" | "profiles" | "devices" | "grease-ai" | "settings";
 
 const emptyDashboard: DashboardSummary = {
   protection_status: "Loading",
@@ -132,7 +132,7 @@ const emptyResolverAccess: ResolverAccessStatus = {
 
 const emptyBlockProfileDraft: BlockProfileRecord = {
   id: "",
-  emoji: "🧩",
+  emoji: "",
   name: "",
   description: "",
   blocklists: [],
@@ -508,6 +508,7 @@ export default function App() {
     { id: "overview", label: "Overview" },
     { id: "profiles", label: "Block Profiles" },
     { id: "devices", label: "Devices" },
+    { id: "grease-ai", label: "Grease-AI" },
     { id: "settings", label: "Settings" },
   ];
 
@@ -534,6 +535,30 @@ export default function App() {
       },
     ];
   }, [dashboard.device_count, dashboard.enabled_source_count, dashboard.runtime_health.snapshot.blocked_total, dashboard.runtime_health.snapshot.queries_total, settings.block_profiles, settings.blocklists.length]);
+
+  const greaseAiSignals = useMemo(() => {
+    const totalQueries = Math.max(dashboard.runtime_health.snapshot.queries_total, 1);
+    const blockedRatio = dashboard.runtime_health.snapshot.blocked_total / totalQueries;
+    const riskyEventRatio = Math.min(dashboard.recent_security_events.length / 6, 1);
+    const latencyHeadroom = latencyBudget.within_budget ? 0.78 : 0.46;
+    return [
+      {
+        label: "Classifier confidence",
+        value: Math.min(0.35 + blockedRatio * 1.8, 0.96),
+        tint: "from-sky-400/80 to-cyan-300/80",
+      },
+      {
+        label: "Risk memory",
+        value: Math.min(0.22 + riskyEventRatio * 0.7, 0.92),
+        tint: "from-amber-400/85 to-orange-300/80",
+      },
+      {
+        label: "Latency headroom",
+        value: latencyHeadroom,
+        tint: "from-emerald-400/85 to-lime-300/80",
+      },
+    ];
+  }, [dashboard.recent_security_events.length, dashboard.runtime_health.snapshot.blocked_total, dashboard.runtime_health.snapshot.queries_total, latencyBudget.within_budget]);
 
   const serviceLabelMap = useMemo(
     () =>
@@ -1278,28 +1303,12 @@ export default function App() {
           </div>
         </Card>
 
-        <Card>
-          <CardTitle>Latency budgets</CardTitle>
-          <CardDescription>Live hot-path budget checks after the latest traffic observed by this resolver.</CardDescription>
-          <div className="mt-5 grid gap-3 sm:grid-cols-3">
-            {latencyBudget.checks.map((check) => (
-              <div key={check.label} className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="font-medium text-foreground">{check.label}</div>
-                  <Badge>{check.status}</Badge>
-                </div>
-                <div className="mt-2 text-xl font-semibold text-foreground">{check.observed_ms.toFixed(3)} ms</div>
-                <div className="mt-1 text-xs text-muted-foreground">Target {check.target_p50_ms.toFixed(1)} ms • {check.sample_count} samples</div>
-              </div>
-            ))}
-          </div>
-        </Card>
       </section>
 
       {state === "loading" ? <div className="text-sm text-muted-foreground">Loading control plane data...</div> : null}
       {state === "ready" ? (
         <div className="text-sm text-muted-foreground">
-          {enabledBlocklists.length} enabled blocklists, {settings.devices.length} named devices, classifier threshold {settings.classifier.threshold.toFixed(2)}.
+          {enabledBlocklists.length} enabled blocklists and {settings.devices.length} named devices.
         </div>
       ) : null}
         </>
@@ -1327,7 +1336,7 @@ export default function App() {
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div>
-                        <div className="text-2xl">{profile.emoji}</div>
+                        <div className="text-2xl">{profile.emoji || "◌"}</div>
                         <div className="mt-2 font-medium">{profile.name}</div>
                         <div className={`mt-1 text-sm ${selectedBlockProfileId === profile.id ? "text-background/70" : "text-muted-foreground"}`}>{profile.description || "No summary yet."}</div>
                       </div>
@@ -1347,7 +1356,7 @@ export default function App() {
             <CardDescription>Pick the OISD lists this profile should use, add any custom GitHub list, and save a clear set of exceptions.</CardDescription>
             <div className="mt-5 grid gap-4">
               <div className="grid gap-3 sm:grid-cols-[120px_1fr]">
-                <Input value={blockProfileDraft.emoji} onChange={(event) => setBlockProfileDraft((current) => ({ ...current, emoji: event.target.value || "🧩" }))} placeholder="🧩" />
+                <Input value={blockProfileDraft.emoji} onChange={(event) => setBlockProfileDraft((current) => ({ ...current, emoji: event.target.value }))} placeholder="Optional emoji" />
                 <Input value={blockProfileDraft.name} onChange={(event) => setBlockProfileDraft((current) => ({ ...current, name: event.target.value }))} placeholder="Homework time" />
               </div>
               <Input value={blockProfileDraft.description} onChange={(event) => setBlockProfileDraft((current) => ({ ...current, description: event.target.value }))} placeholder="Short summary shown when assigning this profile to devices" />
@@ -1394,8 +1403,8 @@ export default function App() {
               </div>
 
               <div className="rounded-[26px] border border-border/70 bg-muted/30 p-4">
-                <div className="font-medium text-foreground">Selected blocklists</div>
-                <div className="mt-1 text-sm text-muted-foreground">These sources travel with the profile and are shown again during device assignment.</div>
+                <div className="font-medium text-foreground">Blocklist sources</div>
+                <div className="mt-1 text-sm text-muted-foreground">These upstream lists define what the profile blocks before device-specific exceptions are applied.</div>
                 <div className="mt-4 grid gap-3">
                   {blockProfileDraft.blocklists.length === 0 ? (
                     <div className="rounded-2xl border border-dashed border-border/70 bg-white/70 p-4 text-sm text-muted-foreground">Choose at least one OISD preset or add a custom GitHub list.</div>
@@ -1416,7 +1425,11 @@ export default function App() {
                 </div>
               </div>
 
-              <Input value={blockProfileAllowlistDraft} onChange={(event) => setBlockProfileAllowlistDraft(event.target.value)} placeholder="school.example, video.example" />
+              <div className="rounded-[26px] border border-border/70 bg-white/85 p-4">
+                <div className="font-medium text-foreground">Allowlist exceptions</div>
+                <div className="mt-1 text-sm text-muted-foreground">Add domains that should stay reachable even when one of the selected blocklists would normally catch them.</div>
+                <Input className="mt-4" value={blockProfileAllowlistDraft} onChange={(event) => setBlockProfileAllowlistDraft(event.target.value)} placeholder="school.example, video.example" />
+              </div>
               <div className="rounded-[24px] border border-border/70 bg-muted/30 p-4 text-sm text-muted-foreground">
                 Device assignment uses the profile name as the runtime override today, so keeping names short and obvious still makes the household UI easier to scan.
               </div>
@@ -1578,6 +1591,97 @@ export default function App() {
                     </div>
                   ))
                 )}
+              </div>
+            </Card>
+          </div>
+        </section>
+      ) : activePage === "grease-ai" ? (
+        <section className="grid gap-6 xl:grid-cols-[1.05fr_0.95fr]">
+          <Card>
+            <CardTitle>Grease-AI</CardTitle>
+            <CardDescription>A placeholder home for the AI classifier while we shape how the learning loop should feel in the household control plane.</CardDescription>
+            <div className="mt-5 rounded-[28px] border border-border/70 bg-[radial-gradient(circle_at_top_left,rgba(115,196,255,0.2),transparent_35%),radial-gradient(circle_at_bottom_right,rgba(129,224,170,0.22),transparent_38%),linear-gradient(180deg,rgba(255,255,255,0.96),rgba(246,244,240,0.94))] p-5">
+              <div className="grid gap-4 lg:grid-cols-[0.9fr_1.1fr]">
+                <div className="space-y-3">
+                  <div className="text-sm font-medium text-foreground">Learning pulse</div>
+                  <div className="space-y-3">
+                    {greaseAiSignals.map((signal) => (
+                      <div key={signal.label} className="rounded-2xl border border-border/60 bg-white/75 p-4">
+                        <div className="flex items-center justify-between gap-3 text-sm">
+                          <span className="font-medium text-foreground">{signal.label}</span>
+                          <span className="text-muted-foreground">{Math.round(signal.value * 100)}%</span>
+                        </div>
+                        <div className="mt-3 h-3 overflow-hidden rounded-full bg-muted/60">
+                          <div className={`h-full rounded-full bg-gradient-to-r ${signal.tint}`} style={{ width: `${Math.max(signal.value * 100, 6)}%` }} />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="rounded-[26px] border border-border/70 bg-slate-950 p-5 text-slate-100 shadow-inner">
+                  <div className="text-xs uppercase tracking-[0.24em] text-slate-400">Classifier animation</div>
+                  <div className="mt-4 grid gap-3">
+                    {[0, 1, 2, 3, 4].map((row) => (
+                      <div key={row} className="grid grid-cols-8 gap-2">
+                        {greaseAiSignals.map((signal, index) => (
+                          <div
+                            key={`${row}-${signal.label}-${index}`}
+                            className="h-5 rounded-full bg-gradient-to-r from-sky-400/20 via-cyan-300/80 to-emerald-300/30"
+                            style={{ opacity: Math.max(0.2, signal.value - row * 0.12 + index * 0.04) }}
+                          />
+                        ))}
+                        <div className="h-5 rounded-full bg-white/10" />
+                        <div className="h-5 rounded-full bg-white/5" />
+                        <div className="h-5 rounded-full bg-white/10" />
+                        <div className="h-5 rounded-full bg-white/5" />
+                        <div className="h-5 rounded-full bg-white/10" />
+                      </div>
+                    ))}
+                  </div>
+                  <div className="mt-4 text-sm text-slate-300">The bars brighten as more DNS activity arrives, blocked decisions climb, and the runtime stays inside latency budget.</div>
+                </div>
+              </div>
+            </div>
+          </Card>
+
+          <div className="grid gap-6">
+            <Card>
+              <CardTitle>Classifier stats</CardTitle>
+              <CardDescription>Operational numbers behind the current learning pulse.</CardDescription>
+              <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
+                  <div className="text-muted-foreground">Mode</div>
+                  <div className="mt-1 text-xl font-semibold text-foreground">{settings.classifier.mode}</div>
+                </div>
+                <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
+                  <div className="text-muted-foreground">Threshold</div>
+                  <div className="mt-1 text-xl font-semibold text-foreground">{settings.classifier.threshold.toFixed(2)}</div>
+                </div>
+                <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
+                  <div className="text-muted-foreground">Queries observed</div>
+                  <div className="mt-1 text-xl font-semibold text-foreground">{dashboard.runtime_health.snapshot.queries_total.toLocaleString()}</div>
+                </div>
+                <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
+                  <div className="text-muted-foreground">Blocked queries</div>
+                  <div className="mt-1 text-xl font-semibold text-foreground">{dashboard.runtime_health.snapshot.blocked_total.toLocaleString()}</div>
+                </div>
+              </div>
+            </Card>
+
+            <Card>
+              <CardTitle>Latency budgets</CardTitle>
+              <CardDescription>Live hot-path budget checks after the latest traffic observed by this resolver.</CardDescription>
+              <div className="mt-5 grid gap-3 sm:grid-cols-3">
+                {latencyBudget.checks.map((check) => (
+                  <div key={check.label} className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="font-medium text-foreground">{check.label}</div>
+                      <Badge>{check.status}</Badge>
+                    </div>
+                    <div className="mt-2 text-xl font-semibold text-foreground">{check.observed_ms.toFixed(3)} ms</div>
+                    <div className="mt-1 text-xs text-muted-foreground">Target {check.target_p50_ms.toFixed(1)} ms • {check.sample_count} samples</div>
+                  </div>
+                ))}
               </div>
             </Card>
           </div>
