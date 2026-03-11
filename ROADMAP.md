@@ -347,6 +347,7 @@ Goal: Make the control plane feel approachable for a household first, while keep
 - [x] Add devices page with clear labeling and profile assignment.
 - [x] Move advanced sync, recovery, and operator controls into a dedicated settings page.
 - [x] Polish navigation and overview layout into a simpler dashboard-first household view.
+- [x] Refresh the responsive shell and redesign block profiles around OISD list selection plus manual GitHub lists.
 
 ## Phase 10 - Android Companion App
 

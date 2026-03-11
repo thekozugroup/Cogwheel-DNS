@@ -73,9 +73,17 @@ export type BlockProfileRecord = {
   emoji: string;
   name: string;
   description: string;
-  blocklists: string[];
+  blocklists: BlockProfileListRecord[];
   allowlists: string[];
   updated_at: string;
+};
+
+export type BlockProfileListRecord = {
+  id: string;
+  name: string;
+  url: string;
+  kind: string;
+  family: string;
 };
 
 export type DeviceServiceOverride = {
@@ -448,7 +456,7 @@ export const api = {
     emoji: string;
     name: string;
     description?: string;
-    blocklists: string[];
+    blocklists: BlockProfileListRecord[];
     allowlists: string[];
   }) =>
     fetchJson<BlockProfileRecord[]>("/api/v1/settings/block-profiles", {

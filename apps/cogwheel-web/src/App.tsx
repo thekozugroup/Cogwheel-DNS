@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, type AuditEvent, type BlockProfileRecord, type DashboardSummary, type FederatedLearningSettings, type LatencyBudgetStatus, type ResolverAccessStatus, type SettingsSummary, type SyncNodeStatus, type TailscaleDnsCheckResult, type TailscaleStatus, type ThreatIntelSettings } from "@/lib/api";
+import { api, type AuditEvent, type BlockProfileListRecord, type BlockProfileRecord, type DashboardSummary, type FederatedLearningSettings, type LatencyBudgetStatus, type ResolverAccessStatus, type SettingsSummary, type SyncNodeStatus, type TailscaleDnsCheckResult, type TailscaleStatus, type ThreatIntelSettings } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
@@ -140,6 +140,13 @@ const emptyBlockProfileDraft: BlockProfileRecord = {
   updated_at: new Date(0).toISOString(),
 };
 
+const oisdProfileOptions: BlockProfileListRecord[] = [
+  { id: "oisd-small", name: "OISD Small", url: "https://small.oisd.nl", kind: "preset", family: "core-small" },
+  { id: "oisd-big", name: "OISD Big", url: "https://big.oisd.nl", kind: "preset", family: "core-full" },
+  { id: "oisd-nsfw-small", name: "OISD NSFW Small", url: "https://nsfw-small.oisd.nl", kind: "preset", family: "nsfw-small" },
+  { id: "oisd-nsfw", name: "OISD NSFW", url: "https://nsfw.oisd.nl", kind: "preset", family: "nsfw-full" },
+];
+
 export default function App() {
   const [dashboard, setDashboard] = useState<DashboardSummary>(emptyDashboard);
   const [settings, setSettings] = useState<SettingsSummary>(emptySettings);
@@ -192,6 +199,8 @@ export default function App() {
   const [selectedBlockProfileId, setSelectedBlockProfileId] = useState<string | null>(null);
   const [blockProfileDraft, setBlockProfileDraft] = useState<BlockProfileRecord>(emptyBlockProfileDraft);
   const [blockProfileAllowlistDraft, setBlockProfileAllowlistDraft] = useState("");
+  const [customProfileListName, setCustomProfileListName] = useState("");
+  const [customProfileListUrl, setCustomProfileListUrl] = useState("");
 
   const load = useCallback(async () => {
     setState("loading");
@@ -816,12 +825,75 @@ export default function App() {
     setSelectedBlockProfileId(null);
     setBlockProfileDraft({ ...emptyBlockProfileDraft, updated_at: new Date().toISOString() });
     setBlockProfileAllowlistDraft("");
+    setCustomProfileListName("");
+    setCustomProfileListUrl("");
   }
 
   function selectBlockProfile(profile: BlockProfileRecord) {
     setSelectedBlockProfileId(profile.id);
     setBlockProfileDraft(profile);
     setBlockProfileAllowlistDraft(profile.allowlists.join(", "));
+    setCustomProfileListName("");
+    setCustomProfileListUrl("");
+  }
+
+  function togglePresetBlocklist(option: BlockProfileListRecord) {
+    setBlockProfileDraft((current) => {
+      const exists = current.blocklists.some((entry) => entry.id === option.id);
+      if (exists) {
+        return {
+          ...current,
+          blocklists: current.blocklists.filter((entry) => entry.id !== option.id),
+        };
+      }
+
+      let nextLists = current.blocklists.filter((entry) => {
+        if (option.id === "oisd-big") return entry.id !== "oisd-small";
+        if (option.id === "oisd-small") return entry.id !== "oisd-big";
+        if (option.id === "oisd-nsfw") return entry.id !== "oisd-nsfw-small";
+        if (option.id === "oisd-nsfw-small") return entry.id !== "oisd-nsfw";
+        return true;
+      });
+
+      nextLists = [...nextLists, option].sort((left, right) => left.name.localeCompare(right.name));
+      return { ...current, blocklists: nextLists };
+    });
+  }
+
+  function addCustomBlocklistToProfile() {
+    const name = customProfileListName.trim();
+    const url = customProfileListUrl.trim();
+    if (!name || !url) {
+      pushToast("List details required", "Enter both a list name and a GitHub URL before adding it.", "error");
+      return;
+    }
+
+    if (!(url.includes("github.com") || url.includes("raw.githubusercontent.com"))) {
+      pushToast("GitHub URL required", "Manual lists should point at a GitHub or raw GitHub blocklist URL.", "error");
+      return;
+    }
+
+    const nextList: BlockProfileListRecord = {
+      id: name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || `custom-${Date.now()}`,
+      name,
+      url,
+      kind: "custom",
+      family: "custom",
+    };
+
+    setBlockProfileDraft((current) => ({
+      ...current,
+      blocklists: [...current.blocklists.filter((entry) => entry.url !== url), nextList].sort((left, right) => left.name.localeCompare(right.name)),
+    }));
+    setCustomProfileListName("");
+    setCustomProfileListUrl("");
+  }
+
+  function removeBlocklistFromProfile(id: string) {
+    setBlockProfileDraft((current) => ({
+      ...current,
+      blocklists: current.blocklists.filter((entry) => entry.id !== id),
+    }));
   }
 
   async function handleRefreshSources() {
@@ -1013,7 +1085,7 @@ export default function App() {
   }
 
   return (
-    <main className="mx-auto flex min-h-screen max-w-7xl flex-col gap-6 px-6 py-8 md:px-10">
+    <main className="mx-auto flex min-h-screen w-full max-w-[1540px] flex-col gap-4 px-3 py-3 sm:px-4 sm:py-4 lg:px-5 lg:py-5">
       <div className="pointer-events-none fixed right-4 top-4 z-50 flex w-full max-w-sm flex-col gap-3">
         {toasts.map((toast) => (
           <div
@@ -1025,6 +1097,8 @@ export default function App() {
           </div>
         ))}
       </div>
+
+      <div className="flex flex-1 flex-col gap-5 rounded-[34px] border border-border/60 bg-[linear-gradient(180deg,rgba(255,255,255,0.96),rgba(246,244,240,0.94))] p-3 shadow-sm sm:p-4 lg:p-5">
 
       <header className="sticky top-4 z-40 rounded-[28px] border border-border/60 bg-white/90 px-4 py-4 shadow-sm backdrop-blur">
         <div className="flex flex-col gap-4 lg:grid lg:grid-cols-[auto_1fr_auto] lg:items-center">
@@ -1230,10 +1304,10 @@ export default function App() {
       ) : null}
         </>
       ) : activePage === "profiles" ? (
-        <section className="grid gap-6 lg:grid-cols-[0.9fr_1.1fr]">
+        <section className="grid gap-6 xl:grid-cols-[0.88fr_1.12fr]">
           <Card>
             <CardTitle>Block profiles</CardTitle>
-            <CardDescription>Friendly presets for strict, relaxed, or purpose-built browsing moments.</CardDescription>
+            <CardDescription>Build named household profiles from OISD defaults, allowlists, and any extra GitHub-hosted list you trust.</CardDescription>
             <div className="mt-5 flex items-center justify-between gap-3">
               <div className="text-sm text-muted-foreground">Saved profiles can be assigned to devices without reopening the full settings wall.</div>
               <Button variant="secondary" size="sm" onClick={startNewBlockProfile}>New profile</Button>
@@ -1257,10 +1331,10 @@ export default function App() {
                         <div className="mt-2 font-medium">{profile.name}</div>
                         <div className={`mt-1 text-sm ${selectedBlockProfileId === profile.id ? "text-background/70" : "text-muted-foreground"}`}>{profile.description || "No summary yet."}</div>
                       </div>
-                      <Badge className={selectedBlockProfileId === profile.id ? "bg-background text-foreground" : "bg-muted text-muted-foreground"}>{profile.blocklists.length} lists</Badge>
+                      <Badge className={selectedBlockProfileId === profile.id ? "bg-background text-foreground" : "bg-muted text-muted-foreground"}>{profile.blocklists.length} sources</Badge>
                     </div>
                     <div className={`mt-3 text-xs ${selectedBlockProfileId === profile.id ? "text-background/70" : "text-muted-foreground"}`}>
-                      Updated {new Date(profile.updated_at).toLocaleString()}
+                      Updated {new Date(profile.updated_at).toLocaleString()} • {profile.allowlists.length} allowlist entr{profile.allowlists.length === 1 ? "y" : "ies"}
                     </div>
                   </button>
                 ))
@@ -1270,44 +1344,81 @@ export default function App() {
 
           <Card>
             <CardTitle>{selectedBlockProfileId ? "Edit profile" : "Create profile"}</CardTitle>
-            <CardDescription>Pick an emoji, give it a clear name, and decide which list families and allowlist exceptions belong together.</CardDescription>
+            <CardDescription>Pick the OISD lists this profile should use, add any custom GitHub list, and save a clear set of exceptions.</CardDescription>
             <div className="mt-5 grid gap-4">
               <div className="grid gap-3 sm:grid-cols-[120px_1fr]">
                 <Input value={blockProfileDraft.emoji} onChange={(event) => setBlockProfileDraft((current) => ({ ...current, emoji: event.target.value || "🧩" }))} placeholder="🧩" />
                 <Input value={blockProfileDraft.name} onChange={(event) => setBlockProfileDraft((current) => ({ ...current, name: event.target.value }))} placeholder="Homework time" />
               </div>
               <Input value={blockProfileDraft.description} onChange={(event) => setBlockProfileDraft((current) => ({ ...current, description: event.target.value }))} placeholder="Short summary shown when assigning this profile to devices" />
-              <div className="grid gap-3 sm:grid-cols-3">
-                {[
-                  { id: "essential", label: "Essential" },
-                  { id: "balanced", label: "Balanced" },
-                  { id: "aggressive", label: "Aggressive" },
-                ].map((option) => {
-                  const enabled = blockProfileDraft.blocklists.includes(option.id);
-                  return (
-                    <label key={option.id} className={`rounded-[24px] border px-4 py-4 text-sm transition ${enabled ? "border-foreground bg-foreground text-background" : "border-border/70 bg-white/80"}`}>
+              <div className="rounded-[26px] border border-border/70 bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,246,243,0.9))] p-4">
+                <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
+                  <div>
+                    <div className="font-medium text-foreground">OISD presets</div>
+                    <div className="text-sm text-muted-foreground">Pick any combination except the overlapping small/full pair in the same family.</div>
+                  </div>
+                  <div className="text-xs text-muted-foreground">Core and NSFW families are kept mutually exclusive automatically.</div>
+                </div>
+                <div className="mt-4 grid gap-3 lg:grid-cols-2">
+                  {oisdProfileOptions.map((option) => {
+                    const enabled = blockProfileDraft.blocklists.some((entry) => entry.id === option.id);
+                    return (
+                    <label key={option.id} className={`rounded-[24px] border px-4 py-4 text-sm transition ${enabled ? "border-foreground bg-foreground text-background shadow-sm" : "border-border/70 bg-white/80 hover:bg-muted/30"}`}>
                       <input
                         type="checkbox"
                         className="sr-only"
                         checked={enabled}
-                        onChange={(event) => {
-                          setBlockProfileDraft((current) => ({
-                            ...current,
-                            blocklists: event.target.checked
-                              ? [...current.blocklists, option.id].filter((value, index, items) => items.indexOf(value) === index)
-                              : current.blocklists.filter((value) => value !== option.id),
-                          }));
-                        }}
+                        onChange={() => togglePresetBlocklist(option)}
                       />
-                      <div className="font-medium">{option.label}</div>
-                      <div className={`mt-1 text-xs ${enabled ? "text-background/70" : "text-muted-foreground"}`}>Include the {option.label.toLowerCase()} list family.</div>
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <div className="font-medium">{option.name}</div>
+                          <div className={`mt-1 text-xs ${enabled ? "text-background/70" : "text-muted-foreground"}`}>{option.id.includes("nsfw") ? "Adult-content focused OISD feed." : "General-purpose OISD protection feed."}</div>
+                        </div>
+                        <Badge className={enabled ? "bg-background text-foreground" : "bg-muted text-muted-foreground"}>{option.id.includes("small") ? "small" : "full"}</Badge>
+                      </div>
                     </label>
                   );
                 })}
+                </div>
               </div>
+
+              <div className="rounded-[26px] border border-border/70 bg-white/85 p-4">
+                <div className="font-medium text-foreground">Manual GitHub list</div>
+                <div className="mt-1 text-sm text-muted-foreground">Add a named list from GitHub or raw GitHub and keep it bundled with this profile.</div>
+                <div className="mt-4 grid gap-3 lg:grid-cols-[0.85fr_1.15fr_auto]">
+                  <Input value={customProfileListName} onChange={(event) => setCustomProfileListName(event.target.value)} placeholder="My family allowlist companion" />
+                  <Input value={customProfileListUrl} onChange={(event) => setCustomProfileListUrl(event.target.value)} placeholder="https://raw.githubusercontent.com/.../domains.txt" />
+                  <Button variant="secondary" onClick={addCustomBlocklistToProfile}>Add list</Button>
+                </div>
+              </div>
+
+              <div className="rounded-[26px] border border-border/70 bg-muted/30 p-4">
+                <div className="font-medium text-foreground">Selected blocklists</div>
+                <div className="mt-1 text-sm text-muted-foreground">These sources travel with the profile and are shown again during device assignment.</div>
+                <div className="mt-4 grid gap-3">
+                  {blockProfileDraft.blocklists.length === 0 ? (
+                    <div className="rounded-2xl border border-dashed border-border/70 bg-white/70 p-4 text-sm text-muted-foreground">Choose at least one OISD preset or add a custom GitHub list.</div>
+                  ) : (
+                    blockProfileDraft.blocklists.map((list) => (
+                      <div key={list.id} className="flex flex-col gap-3 rounded-2xl border border-border/70 bg-white/85 p-4 sm:flex-row sm:items-center sm:justify-between">
+                        <div>
+                          <div className="font-medium text-foreground">{list.name}</div>
+                          <div className="mt-1 break-all text-xs text-muted-foreground">{list.url}</div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Badge>{list.kind}</Badge>
+                          <Button variant="ghost" size="sm" onClick={() => removeBlocklistFromProfile(list.id)}>Remove</Button>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+
               <Input value={blockProfileAllowlistDraft} onChange={(event) => setBlockProfileAllowlistDraft(event.target.value)} placeholder="school.example, video.example" />
               <div className="rounded-[24px] border border-border/70 bg-muted/30 p-4 text-sm text-muted-foreground">
-                Device assignment uses the profile name as the runtime override today, so keeping names short and obvious makes the household UI easier to scan.
+                Device assignment uses the profile name as the runtime override today, so keeping names short and obvious still makes the household UI easier to scan.
               </div>
               <div className="flex flex-wrap gap-3">
                 <Button onClick={() => void handleBlockProfileSave()} disabled={busyAction === "block-profile-save"}>
@@ -1815,6 +1926,7 @@ export default function App() {
           </section>
         </section>
       )}
+      </div>
     </main>
   );
 }

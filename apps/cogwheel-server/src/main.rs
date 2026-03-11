@@ -421,12 +421,21 @@ struct UpdateBlocklistStateRequest {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct BlockProfileListRecord {
+    id: String,
+    name: String,
+    url: String,
+    kind: String,
+    family: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct BlockProfileRecord {
     id: String,
     emoji: String,
     name: String,
     description: String,
-    blocklists: Vec<String>,
+    blocklists: Vec<BlockProfileListRecord>,
     allowlists: Vec<String>,
     updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -437,7 +446,7 @@ struct UpsertBlockProfileRequest {
     emoji: String,
     name: String,
     description: Option<String>,
-    blocklists: Vec<String>,
+    blocklists: Vec<BlockProfileListRecord>,
     allowlists: Vec<String>,
 }
 
@@ -4014,7 +4023,13 @@ async fn load_block_profiles(storage: &Storage) -> Result<Vec<BlockProfileRecord
         return Ok(default_block_profiles());
     };
 
-    let parsed = serde_json::from_str::<Vec<BlockProfileRecord>>(&value)
+    let parsed = serde_json::from_str::<Vec<StoredBlockProfileRecord>>(&value)
+        .map(|profiles| {
+            profiles
+                .into_iter()
+                .map(StoredBlockProfileRecord::into_block_profile)
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_else(|_| default_block_profiles());
     Ok(normalize_block_profiles(parsed))
 }
@@ -4030,12 +4045,15 @@ fn default_block_profiles() -> Vec<BlockProfileRecord> {
     let now = chrono::Utc::now();
     vec![
         BlockProfileRecord {
-            id: "kids".to_string(),
+            id: "family".to_string(),
             emoji: "🛡️".to_string(),
-            name: "Kids".to_string(),
-            description: "Stricter defaults for younger browsers and shared family devices."
+            name: "Family".to_string(),
+            description: "Covers the everyday family setup with the core OISD list plus lighter NSFW filtering."
                 .to_string(),
-            blocklists: vec!["aggressive".to_string(), "balanced".to_string()],
+            blocklists: vec![
+                preset_block_profile_list("oisd-small").unwrap(),
+                preset_block_profile_list("oisd-nsfw-small").unwrap(),
+            ],
             allowlists: vec!["pbskids.org".to_string(), "khanacademy.org".to_string()],
             updated_at: now,
         },
@@ -4043,14 +4061,104 @@ fn default_block_profiles() -> Vec<BlockProfileRecord> {
             id: "focus".to_string(),
             emoji: "🌿".to_string(),
             name: "Focus".to_string(),
-            description:
-                "Balanced filtering with a short allowlist for essential work and school sites."
-                    .to_string(),
-            blocklists: vec!["balanced".to_string()],
+            description: "A quieter setup for work or school devices with the smaller OISD core list only."
+                .to_string(),
+            blocklists: vec![preset_block_profile_list("oisd-small").unwrap()],
             allowlists: vec!["calendar.google.com".to_string(), "notion.so".to_string()],
             updated_at: now,
         },
     ]
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(untagged)]
+enum StoredBlockProfileListRecord {
+    Id(String),
+    Record(BlockProfileListRecord),
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct StoredBlockProfileRecord {
+    id: String,
+    emoji: String,
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    blocklists: Vec<StoredBlockProfileListRecord>,
+    #[serde(default)]
+    allowlists: Vec<String>,
+    updated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl StoredBlockProfileRecord {
+    fn into_block_profile(self) -> BlockProfileRecord {
+        let now = chrono::Utc::now();
+        BlockProfileRecord {
+            id: self.id,
+            emoji: self.emoji,
+            name: self.name,
+            description: self.description,
+            blocklists: self
+                .blocklists
+                .into_iter()
+                .filter_map(|entry| match entry {
+                    StoredBlockProfileListRecord::Id(id) => legacy_block_profile_list(&id),
+                    StoredBlockProfileListRecord::Record(record) => Some(record),
+                })
+                .collect(),
+            allowlists: self.allowlists,
+            updated_at: self.updated_at.unwrap_or(now),
+        }
+    }
+}
+
+fn preset_block_profile_lists() -> Vec<BlockProfileListRecord> {
+    vec![
+        BlockProfileListRecord {
+            id: "oisd-small".to_string(),
+            name: "OISD Small".to_string(),
+            url: "https://small.oisd.nl".to_string(),
+            kind: "preset".to_string(),
+            family: "core-small".to_string(),
+        },
+        BlockProfileListRecord {
+            id: "oisd-big".to_string(),
+            name: "OISD Big".to_string(),
+            url: "https://big.oisd.nl".to_string(),
+            kind: "preset".to_string(),
+            family: "core-full".to_string(),
+        },
+        BlockProfileListRecord {
+            id: "oisd-nsfw-small".to_string(),
+            name: "OISD NSFW Small".to_string(),
+            url: "https://nsfw-small.oisd.nl".to_string(),
+            kind: "preset".to_string(),
+            family: "nsfw-small".to_string(),
+        },
+        BlockProfileListRecord {
+            id: "oisd-nsfw".to_string(),
+            name: "OISD NSFW".to_string(),
+            url: "https://nsfw.oisd.nl".to_string(),
+            kind: "preset".to_string(),
+            family: "nsfw-full".to_string(),
+        },
+    ]
+}
+
+fn preset_block_profile_list(id: &str) -> Option<BlockProfileListRecord> {
+    preset_block_profile_lists()
+        .into_iter()
+        .find(|entry| entry.id == id)
+}
+
+fn legacy_block_profile_list(id: &str) -> Option<BlockProfileListRecord> {
+    match id {
+        "essential" => preset_block_profile_list("oisd-small"),
+        "balanced" => preset_block_profile_list("oisd-big"),
+        "aggressive" => preset_block_profile_list("oisd-big"),
+        other => preset_block_profile_list(other),
+    }
 }
 
 fn normalize_block_profile_id(value: &str) -> Option<String> {
@@ -4104,13 +4212,73 @@ fn normalize_domain_list(entries: Vec<String>) -> Vec<String> {
     normalized
 }
 
-fn normalize_block_profile_lists(entries: Vec<String>) -> Vec<String> {
+fn normalize_block_profile_list_name(value: &str) -> Option<String> {
+    let normalized = value.trim();
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized.to_string())
+    }
+}
+
+fn normalize_block_profile_list_url(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn normalize_block_profile_lists(
+    entries: Vec<BlockProfileListRecord>,
+) -> Vec<BlockProfileListRecord> {
     let mut normalized = entries
         .into_iter()
-        .filter_map(|entry| normalize_profile_name(&entry))
+        .filter_map(|entry| {
+            if let Some(preset) = preset_block_profile_list(&entry.id) {
+                return Some(preset);
+            }
+
+            let name = normalize_block_profile_list_name(&entry.name)?;
+            let url = normalize_block_profile_list_url(&entry.url)?;
+            let id = normalize_block_profile_id(&entry.id)
+                .or_else(|| normalize_block_profile_id(&name))
+                .unwrap_or_else(|| Uuid::new_v4().to_string());
+
+            Some(BlockProfileListRecord {
+                id,
+                name,
+                url,
+                kind: if entry.kind.trim().is_empty() {
+                    "custom".to_string()
+                } else {
+                    entry.kind.trim().to_string()
+                },
+                family: if entry.family.trim().is_empty() {
+                    "custom".to_string()
+                } else {
+                    entry.family.trim().to_string()
+                },
+            })
+        })
         .collect::<Vec<_>>();
-    normalized.sort();
-    normalized.dedup();
+
+    let has_core_full = normalized.iter().any(|entry| entry.id == "oisd-big");
+    let has_nsfw_full = normalized.iter().any(|entry| entry.id == "oisd-nsfw");
+    if has_core_full {
+        normalized.retain(|entry| entry.id != "oisd-small");
+    }
+    if has_nsfw_full {
+        normalized.retain(|entry| entry.id != "oisd-nsfw-small");
+    }
+
+    normalized.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    normalized.dedup_by(|left, right| left.id == right.id || left.url == right.url);
     normalized
 }
 
