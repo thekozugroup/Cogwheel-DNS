@@ -54,6 +54,14 @@ This mirrors the way Pi-hole and AdGuard Home expose standard DNS on the host wh
 
 For a reusable installer-style command, use `scripts/install-home-docker.sh`.
 
+Optional Tailscale bootstrap:
+
+```bash
+sudo INSTALL_TAILSCALE=1 TAILSCALE_AUTH_KEY=tskey-example scripts/install-home-docker.sh
+```
+
+This installs Tailscale, authenticates when a key is supplied, and advertises the node as an exit node while keeping `--accept-dns=false` so exit-node traffic continues to flow through Cogwheel's DNS path.
+
 For Raspberry Pi deployment details, see `DEPLOY.md` and `DEPLOYMENT.md`.
 
 ## Required Environment Variables

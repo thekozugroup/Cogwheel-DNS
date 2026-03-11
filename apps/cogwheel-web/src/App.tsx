@@ -1677,7 +1677,7 @@ export default function App() {
               <div className="rounded-[24px] border border-border/70 bg-muted/40 p-4 text-sm">
                 <div className="flex items-center justify-between gap-3">
                   <div className="font-medium">Tailscale</div>
-                  <Badge>{tailscaleStatus.exit_node_active ? "Exit node active" : tailscaleStatus.installed ? "Installed" : "Not installed"}</Badge>
+                  <Badge>{tailscaleStatus.exit_node_active ? "Exit node advertised" : tailscaleStatus.installed ? "Installed" : "Not installed"}</Badge>
                 </div>
                 <div className="mt-2 grid gap-2 text-muted-foreground">
                   <div>Host: <span className="font-medium text-foreground">{tailscaleStatus.hostname ?? "-"}</span></div>
@@ -1686,7 +1686,7 @@ export default function App() {
                 </div>
                 <div className="mt-4 flex flex-wrap gap-2">
                   <Button variant={tailscaleStatus.exit_node_active ? "ghost" : "secondary"} size="sm" onClick={() => void handleTailscaleExitNodeToggle()} disabled={busyAction === "tailscale-exit-node"}>
-                    {busyAction === "tailscale-exit-node" ? "Updating..." : tailscaleStatus.exit_node_active ? "Disable exit node" : "Enable exit node"}
+                    {busyAction === "tailscale-exit-node" ? "Updating..." : tailscaleStatus.exit_node_active ? "Disable exit-node filtering" : "Enable exit-node filtering"}
                   </Button>
                   <Button variant="ghost" size="sm" onClick={() => void handleTailscaleRollback()} disabled={busyAction === "tailscale-rollback"}>
                     {busyAction === "tailscale-rollback" ? "Rolling back..." : "Roll back"}
@@ -1695,6 +1695,7 @@ export default function App() {
                 {tailscaleDnsCheck.suggestions.length > 0 ? (
                   <div className="mt-3 rounded-lg bg-blue-50 px-3 py-2 text-xs text-blue-800">{tailscaleDnsCheck.message}</div>
                 ) : null}
+                <div className="mt-3 text-xs text-muted-foreground">When enabled, Cogwheel advertises this machine as a Tailscale exit node and keeps DNS on the local filter path for exit-node traffic only.</div>
               </div>
             </div>
             <div className="mt-4 rounded-[24px] border border-border/70 bg-muted/30 p-4">

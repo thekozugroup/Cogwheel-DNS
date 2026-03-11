@@ -1664,6 +1664,7 @@ fn parse_tailscale_status_json(raw: &str) -> TailscaleStatusView {
         .and_then(serde_json::Value::as_object)
         .map(|peers| peers.len())
         .unwrap_or(0);
+    let advertised_exit_node = read_tailscale_exit_node_pref().unwrap_or(false);
     let exit_node_active = value
         .get("Self")
         .and_then(|self_value| {
@@ -1680,7 +1681,7 @@ fn parse_tailscale_status_json(raw: &str) -> TailscaleStatusView {
                     .unwrap_or_else(|| value.as_str().is_some_and(|s| !s.is_empty()))
             })
         })
-        .unwrap_or(false);
+        .unwrap_or(advertised_exit_node);
     let health_warnings = value
         .get("Health")
         .and_then(serde_json::Value::as_array)
@@ -1799,58 +1800,22 @@ async fn tailscale_exit_node(
         )
     })?;
 
-    let current_exit_node = status.exit_node_active;
-    let cmd = if request.enabled {
-        let output = Command::new("tailscale")
-            .args(["ip", "-4"])
-            .output()
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-        if !output.status.success() {
-            return Err((
-                axum::http::StatusCode::BAD_REQUEST,
-                "Failed to get Tailscale IP address".to_string(),
-            ));
-        }
-
-        let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if ip.is_empty() {
-            return Err((
-                axum::http::StatusCode::BAD_REQUEST,
-                "No Tailscale IP address found".to_string(),
-            ));
-        }
-
-        let output = Command::new("tailscale")
-            .args(["up", "--exit-node", &ip])
-            .output()
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-        if !output.status.success() {
-            let err = String::from_utf8_lossy(&output.stderr);
-            return Err((
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to enable exit-node: {}", err),
-            ));
-        }
-
-        format!("Exit-node mode enabled on {}", hostname)
-    } else {
-        let output = Command::new("tailscale")
-            .args(["up", "--exit-node="])
-            .output()
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-        if !output.status.success() {
-            let err = String::from_utf8_lossy(&output.stderr);
-            return Err((
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to disable exit-node: {}", err),
-            ));
-        }
-
-        format!("Exit-node mode disabled on {}", hostname)
-    };
+    let current_exit_node = read_tailscale_exit_node_pref().unwrap_or(status.exit_node_active);
+    let cmd = configure_tailscale_exit_node(request.enabled)
+        .map(|_| {
+            if request.enabled {
+                format!(
+                    "Exit-node advertising enabled on {} with DNS kept on Cogwheel.",
+                    hostname
+                )
+            } else {
+                format!(
+                    "Exit-node advertising disabled on {} and prior Tailscale routing restored.",
+                    hostname
+                )
+            }
+        })
+        .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?;
 
     let _ = save_tailscale_state(current_exit_node, &hostname);
 
@@ -1926,38 +1891,8 @@ async fn tailscale_rollback()
         ));
     }
 
-    let output = if saved_state.exit_node_enabled {
-        let output = Command::new("tailscale")
-            .args(["ip", "-4"])
-            .output()
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-        if !output.status.success() {
-            return Err((
-                axum::http::StatusCode::BAD_REQUEST,
-                "Failed to get Tailscale IP address".to_string(),
-            ));
-        }
-
-        let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        Command::new("tailscale")
-            .args(["up", "--exit-node", &ip])
-            .output()
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    } else {
-        Command::new("tailscale")
-            .args(["up", "--exit-node="])
-            .output()
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    };
-
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr);
-        return Err((
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to rollback exit-node: {}", err),
-        ));
-    }
+    configure_tailscale_exit_node(saved_state.exit_node_enabled)
+        .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?;
 
     let _ = std::fs::remove_file(get_tailscale_state_path());
 
@@ -2051,6 +1986,55 @@ async fn tailscale_dns_check()
             suggestions,
         },
     }))
+}
+
+fn configure_tailscale_exit_node(enabled: bool) -> Result<(), String> {
+    let advertise_flag = if enabled {
+        "--advertise-exit-node"
+    } else {
+        "--advertise-exit-node=false"
+    };
+
+    let output = Command::new("tailscale")
+        .args(["up", advertise_flag, "--accept-dns=false"])
+        .output()
+        .map_err(|error| error.to_string())?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Failed to update Tailscale exit-node advertising: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
+fn read_tailscale_exit_node_pref() -> Option<bool> {
+    let output = Command::new("tailscale")
+        .args(["debug", "prefs", "--json"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    value
+        .get("AdvertiseExitNode")
+        .and_then(serde_json::Value::as_bool)
+        .or_else(|| {
+            value
+                .get("AdvertiseRoutes")
+                .and_then(serde_json::Value::as_array)
+                .map(|routes| {
+                    routes.iter().any(|route| {
+                        route
+                            .as_str()
+                            .is_some_and(|entry| entry == "0.0.0.0/0" || entry == "::/0")
+                    })
+                })
+        })
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

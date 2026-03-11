@@ -351,6 +351,7 @@ Goal: Make the control plane feel approachable for a household first, while keep
 - [x] Move classifier visuals and stats into a dedicated Grease-AI surface.
 - [x] Add a standard-DNS install path that exposes host port 53 while keeping safe internal binds.
 - [x] Nest profile source selection under blocklist settings so OISD and manual GitHub lists read as blocklist controls.
+- [x] Add Tailscale installer/bootstrap support for exit-node-only traffic through Cogwheel when enabled in settings.
 
 ## Phase 10 - Android Companion App
 

@@ -183,3 +183,13 @@ This will:
 4. Load image on Pi
 5. Stop old container
 6. Run new container with proper networking
+
+## Optional Tailscale Install
+
+If you want the node to advertise itself as a Tailscale exit node and keep exit-node DNS traffic on Cogwheel, run the tracked installer with:
+
+```bash
+sudo INSTALL_TAILSCALE=1 TAILSCALE_AUTH_KEY=tskey-example scripts/install-home-docker.sh
+```
+
+If you prefer to authenticate interactively, omit `TAILSCALE_AUTH_KEY` and complete `tailscale up --advertise-exit-node --accept-dns=false` after the package install finishes.

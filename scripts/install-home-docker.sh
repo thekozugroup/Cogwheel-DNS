@@ -11,6 +11,8 @@ CONTAINER_NAME="${CONTAINER_NAME:-cogwheel}"
 DATA_DIR="${DATA_DIR:-/var/lib/cogwheel}"
 DNS_HOST_PORT="${DNS_HOST_PORT:-53}"
 WEB_HOST_PORT="${WEB_HOST_PORT:-30080}"
+INSTALL_TAILSCALE="${INSTALL_TAILSCALE:-0}"
+TAILSCALE_AUTH_KEY="${TAILSCALE_AUTH_KEY:-}"
 
 if [[ "$DNS_HOST_PORT" == "53" ]] && command -v systemctl >/dev/null 2>&1; then
   mkdir -p /etc/systemd/resolved.conf.d
@@ -24,6 +26,15 @@ fi
 if ss -lntup "( sport = :${DNS_HOST_PORT} )" | grep -q LISTEN; then
   echo "Port ${DNS_HOST_PORT} is still busy. Stop the conflicting DNS service, then rerun this installer." >&2
   exit 1
+fi
+
+if [[ "$INSTALL_TAILSCALE" == "1" ]]; then
+  curl -fsSL https://tailscale.com/install.sh | sh
+  if [[ -n "$TAILSCALE_AUTH_KEY" ]]; then
+    tailscale up --auth-key "$TAILSCALE_AUTH_KEY" --advertise-exit-node --accept-dns=false
+  else
+    echo "Tailscale installed. Complete 'tailscale up --advertise-exit-node --accept-dns=false' after authenticating the node." >&2
+  fi
 fi
 
 mkdir -p "$DATA_DIR"
@@ -49,3 +60,6 @@ docker run -d \
 echo "Cogwheel is running."
 echo "- DNS target: $(hostname):${DNS_HOST_PORT}"
 echo "- Web UI: http://$(hostname):${WEB_HOST_PORT}"
+if [[ "$INSTALL_TAILSCALE" == "1" ]]; then
+  echo "- Tailscale exit-node advertising prepared. Toggle it in Settings once the node is authenticated."
+fi
