@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { Activity, ListFilter, RefreshCw, ShieldCheck, Sparkles, Undo2 } from "lucide-react";
+import { Activity, RefreshCw, ShieldCheck, Sparkles, Undo2 } from "lucide-react";
 import { api, type AuditEvent, type BlockProfileRecord, type DashboardSummary, type FederatedLearningSettings, type LatencyBudgetStatus, type SettingsSummary, type SyncNodeStatus, type TailscaleDnsCheckResult, type TailscaleStatus, type ThreatIntelSettings } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
-import { Network } from "lucide-react";
 
 type LoadState = "idle" | "loading" | "ready" | "error";
 type Toast = { id: number; title: string; detail?: string; tone: "success" | "error" | "info" };
@@ -27,6 +26,8 @@ const emptyDashboard: DashboardSummary = {
       cache_hits_total: 0,
       cname_uncloaks_total: 0,
       cname_blocks_total: 0,
+      queries_total: 0,
+      blocked_total: 0,
     },
     degraded: false,
     notes: [],
@@ -510,89 +511,36 @@ export default function App() {
     return actions.slice(0, 3);
   }, [busyAction, dashboard.active_ruleset, dashboard.notification_health.failed_count, dashboard.runtime_health.degraded, dashboard.runtime_health.notes]);
 
-  const navItems: Array<{ id: NavPage; label: string; detail: string }> = [
-    { id: "overview", label: "Overview", detail: "Health, activity, and traffic patterns" },
-    { id: "profiles", label: "Block Profiles", detail: "Friendly presets for strict or relaxed browsing" },
-    { id: "devices", label: "Devices", detail: "Label devices and assign profiles" },
-    { id: "settings", label: "Settings", detail: "Advanced sync, recovery, and operator controls" },
+  const navItems: Array<{ id: NavPage; label: string }> = [
+    { id: "overview", label: "Overview" },
+    { id: "profiles", label: "Block Profiles" },
+    { id: "devices", label: "Devices" },
+    { id: "settings", label: "Settings" },
   ];
 
-  const overviewStats = useMemo(
-    () => [
+  const overviewStats = useMemo(() => {
+    const allowlistCount = settings.block_profiles.reduce((total, profile) => total + profile.allowlists.length, 0);
+    return [
       {
-        label: "Observed queries",
-        value: dashboard.domain_insights.observed_queries.toLocaleString(),
-        detail: "Recent activity captured from the DNS hot path.",
-      },
-      {
-        label: "Blocked requests",
-        value: dashboard.runtime_health.snapshot.cname_blocks_total.toLocaleString(),
-        detail: "CNAME uncloaks and direct blocks currently enforced.",
-      },
-      {
-        label: "Devices seen",
-        value: dashboard.device_count.toLocaleString(),
-        detail: "Named and discovered devices visible to the control plane.",
-      },
-      {
-        label: "Enabled sources",
+        label: "Sources",
         value: dashboard.enabled_source_count.toLocaleString(),
-        detail: "Sources feeding the active ruleset right now.",
-      },
-    ],
-    [
-      dashboard.device_count,
-      dashboard.domain_insights.observed_queries,
-      dashboard.enabled_source_count,
-      dashboard.runtime_health.snapshot.cname_blocks_total,
-    ],
-  );
-
-  const onboardingChecklist = useMemo(() => {
-    const enabledBlocklistsCount = settings.blocklists.filter((source) => source.enabled).length;
-    const items = [
-      {
-        title: "Add a blocklist",
-        done: enabledBlocklistsCount > 0,
-        detail: enabledBlocklistsCount > 0 ? `${enabledBlocklistsCount} blocklist source${enabledBlocklistsCount === 1 ? " is" : "s are"} enabled.` : "Turn on at least one source so Cogwheel can build an active ruleset.",
-        actionLabel: "Open blocklists",
-        actionKey: "blocklists" as const,
+        accent: "border-sky-200 bg-sky-50/70",
+        detail: `${settings.blocklists.length} blocklist source${settings.blocklists.length === 1 ? "" : "s"} and ${allowlistCount} saved allowlist entr${allowlistCount === 1 ? "y" : "ies"}`,
       },
       {
-        title: "Enable the classifier",
-        done: settings.classifier.mode !== "Off",
-        detail: settings.classifier.mode !== "Off" ? `Classifier is in ${settings.classifier.mode} mode.` : "Switch the classifier out of Off mode for risky-domain detection.",
-        actionLabel: "Open settings",
-        actionKey: "settings" as const,
+        label: "Blocked DNS Queries",
+        value: dashboard.runtime_health.snapshot.blocked_total.toLocaleString(),
+        accent: "border-rose-200 bg-rose-50/70",
+        detail: `${dashboard.runtime_health.snapshot.queries_total.toLocaleString()} total queries observed by this node`,
       },
       {
-        title: "Name a device",
-        done: settings.devices.length > 0,
-        detail: settings.devices.length > 0 ? `${settings.devices.length} named device${settings.devices.length === 1 ? "" : "s"} tracked.` : "Name at least one device so per-device policy and alerts are easier to interpret.",
-        actionLabel: "Open devices",
-        actionKey: "devices" as const,
-      },
-      {
-        title: "Configure alert delivery",
-        done: settings.notifications.enabled && Boolean(settings.notifications.webhook_url),
-        detail: settings.notifications.enabled && settings.notifications.webhook_url
-          ? `Webhook notifications are enabled at ${settings.notifications.min_severity} severity and above.`
-          : "Add a webhook destination so operators hear about degraded health and risky alerts quickly.",
-        actionLabel: "Open settings",
-        actionKey: "settings" as const,
+        label: "Devices",
+        value: dashboard.device_count.toLocaleString(),
+        accent: "border-emerald-200 bg-emerald-50/70",
+        detail: "Recognized unique devices currently visible to the control plane",
       },
     ];
-
-    return {
-      completed: items.filter((item) => item.done).length,
-      total: items.length,
-      items,
-    };
-  }, [settings.blocklists, settings.classifier.mode, settings.devices.length, settings.notifications.enabled, settings.notifications.min_severity, settings.notifications.webhook_url]);
-
-  function scrollToSection(sectionId: string) {
-    document.getElementById(sectionId)?.scrollIntoView({ behavior: "smooth", block: "start" });
-  }
+  }, [dashboard.device_count, dashboard.enabled_source_count, dashboard.runtime_health.snapshot.blocked_total, dashboard.runtime_health.snapshot.queries_total, settings.block_profiles, settings.blocklists.length]);
 
   const serviceLabelMap = useMemo(
     () =>
@@ -1184,280 +1132,69 @@ export default function App() {
       </div>
 
       <header className="sticky top-4 z-40 rounded-[28px] border border-border/60 bg-white/90 px-4 py-4 shadow-sm backdrop-blur">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-          <div>
-            <div className="text-xs uppercase tracking-[0.28em] text-muted-foreground">Cogwheel</div>
-            <div className="mt-1 font-display text-2xl font-semibold tracking-tight">Calmer controls for everyday filtering.</div>
+        <div className="flex flex-col gap-4 lg:grid lg:grid-cols-[auto_1fr_auto] lg:items-center">
+          <div className="flex items-center gap-3">
+            <div className="flex size-10 items-center justify-center rounded-2xl border border-border/70 bg-muted/60 text-lg">⚙️</div>
+            <div className="font-display text-2xl font-semibold tracking-tight">Cogwheel</div>
           </div>
-          <nav className="grid gap-2 sm:grid-cols-2 lg:flex">
+          <nav className="grid gap-2 sm:grid-cols-2 lg:mx-auto lg:flex lg:justify-center">
             {navItems.map((item) => (
               <button
                 key={item.id}
                 type="button"
                 onClick={() => setActivePage(item.id)}
-                className={`rounded-2xl px-4 py-3 text-left transition ${activePage === item.id ? "bg-foreground text-background shadow-sm" : "bg-muted/70 text-foreground hover:bg-muted"}`}
+                className={`rounded-full px-5 py-2.5 text-center text-sm font-medium transition ${activePage === item.id ? "bg-foreground text-background shadow-sm" : "border border-border/70 bg-white text-foreground hover:bg-muted/60"}`}
               >
-                <div className="text-sm font-medium">{item.label}</div>
-                <div className={`text-xs ${activePage === item.id ? "text-background/70" : "text-muted-foreground"}`}>{item.detail}</div>
+                {item.label}
               </button>
             ))}
           </nav>
+          <div className="flex items-center justify-end">
+            <Badge className={controlPlaneStatus.tone === "primary" ? "bg-primary text-primary-foreground" : controlPlaneStatus.tone === "secondary" ? "bg-secondary text-secondary-foreground" : "bg-muted text-foreground"}>
+              {controlPlaneStatus.label}
+            </Badge>
+          </div>
         </div>
       </header>
 
       {activePage === "overview" ? (
         <>
 
-      <section className="grid gap-4 md:grid-cols-[1.4fr_0.9fr]">
-        <Card className="overflow-hidden bg-gradient-to-br from-card via-white to-secondary/70">
-          <div className="flex flex-col gap-6">
-            <div className="flex flex-col gap-6 md:flex-row md:items-end md:justify-between">
-              <div className="space-y-4">
-                <Badge className={controlPlaneStatus.tone === "primary" ? "bg-primary text-primary-foreground" : controlPlaneStatus.tone === "secondary" ? "bg-secondary text-secondary-foreground" : "bg-muted text-foreground"}>
-                  {controlPlaneStatus.label}
-                </Badge>
-                <div className="space-y-2">
-                  <h1 className="font-display text-4xl font-semibold tracking-tight md:text-5xl">Quiet control, visible protection.</h1>
-                  <p className="max-w-2xl text-sm text-muted-foreground md:text-base">
-                    The control plane now surfaces sources, device naming, and recent risky-query signals while the Rust backend keeps policy and rollback logic centralized.
-                  </p>
-                </div>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {dashboard.protection_status === "Paused" ? (
-                  <Button variant="secondary" onClick={() => void handleResumeRuntime()} disabled={busyAction === "resume-runtime"}>
-                    Resume protection
-                  </Button>
-                ) : (
-                  <Button variant="ghost" onClick={() => void handlePauseRuntime(10)} disabled={busyAction === "pause-runtime"}>
-                    Pause 10m
-                  </Button>
-                )}
-                <Button variant="secondary" onClick={() => void handleRefreshSources()} disabled={busyAction === "refresh-sources"}>
-                  <RefreshCw className="mr-2 size-4" />
-                  Refresh sources
-                </Button>
-                <Button variant="ghost" onClick={() => void handleRollbackRuleset()} disabled={busyAction === "rollback-ruleset"}>
-                  <Undo2 className="mr-2 size-4" />
-                  Roll back
-                </Button>
-              </div>
-            </div>
-            <div className="rounded-[28px] border border-border/70 bg-white/75 p-5">
-              <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-                <div className="space-y-2">
-                  <div className="text-sm font-medium text-foreground">Control-plane status</div>
-                  <div className="max-w-2xl text-sm text-muted-foreground">{controlPlaneStatus.detail}</div>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {controlPlaneStatus.action === "resume" ? (
-                    <Button variant="secondary" size="sm" onClick={() => void handleResumeRuntime()} disabled={busyAction === "resume-runtime"}>
-                      Resume protection
-                    </Button>
-                  ) : null}
-                  {controlPlaneStatus.action === "health-check" ? (
-                    <Button variant="secondary" size="sm" onClick={handleRuntimeHealthCheck} disabled={busyAction === "runtime-health-check"}>
-                      {busyAction === "runtime-health-check" ? "Checking..." : "Run health check"}
-                    </Button>
-                  ) : null}
-                  {controlPlaneStatus.action === "notifications" ? (
-                    <Button variant="secondary" size="sm" onClick={() => setAuditEventFilter("notifications")}>
-                      Review notifications
-                    </Button>
-                  ) : null}
-                  {controlPlaneStatus.action === "refresh" ? (
-                    <Button variant="secondary" size="sm" onClick={() => void handleRefreshSources()} disabled={busyAction === "refresh-sources"}>
-                      Refresh now
-                    </Button>
-                  ) : null}
-                </div>
-              </div>
-              <div className="mt-4 grid gap-3 sm:grid-cols-3">
-                <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
-                  <div className="text-muted-foreground">Protection state</div>
-                  <div className="mt-1 font-medium">{dashboard.protection_status}</div>
-                </div>
-                <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
-                  <div className="text-muted-foreground">Runtime notes</div>
-                  <div className="mt-1 font-medium">{dashboard.runtime_health.notes.length}</div>
-                </div>
-                <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
-                  <div className="text-muted-foreground">Delivery failures</div>
-                  <div className="mt-1 font-medium">{dashboard.notification_health.failed_count}</div>
-                </div>
-              </div>
-            </div>
+      <section className="grid gap-4">
+        <div className="flex flex-col gap-4 rounded-[28px] border border-border/60 bg-white px-5 py-5 shadow-sm md:flex-row md:items-center md:justify-between">
+          <div>
+            <h1 className="font-display text-3xl font-semibold tracking-tight">Dashboard</h1>
+            <div className="mt-1 text-sm text-muted-foreground">A clean snapshot of household filtering, blocked traffic, and active devices.</div>
           </div>
-        </Card>
+          <div className="flex flex-wrap gap-2">
+            {dashboard.protection_status === "Paused" ? (
+              <Button variant="secondary" onClick={() => void handleResumeRuntime()} disabled={busyAction === "resume-runtime"}>Resume protection</Button>
+            ) : (
+              <Button variant="ghost" onClick={() => void handlePauseRuntime(10)} disabled={busyAction === "pause-runtime"}>Pause 10m</Button>
+            )}
+            <Button variant="secondary" onClick={() => void handleRefreshSources()} disabled={busyAction === "refresh-sources"}>
+              <RefreshCw className="mr-2 size-4" />
+              Refresh statistics
+            </Button>
+            <Button variant="ghost" onClick={() => void handleRollbackRuleset()} disabled={busyAction === "rollback-ruleset"}>
+              <Undo2 className="mr-2 size-4" />
+              Roll back
+            </Button>
+          </div>
+        </div>
 
-        <Card id="quick-health">
-          <CardTitle>Quick health</CardTitle>
-          <CardDescription>Backend-facing summary for dashboard, recovery, and operator workflows.</CardDescription>
-          <div className="mt-5 grid gap-3 sm:grid-cols-2">
-            <Metric label="Sources" value={String(dashboard.source_count)} icon={<ListFilter className="size-4" />} />
-            <Metric label="Enabled" value={String(dashboard.enabled_source_count)} icon={<ShieldCheck className="size-4" />} />
-            <Metric label="Services" value={String(dashboard.service_toggle_count)} icon={<Sparkles className="size-4" />} />
-            <Metric label="Devices" value={String(dashboard.device_count)} icon={<Activity className="size-4" />} />
-          </div>
-          <div className="mt-5 flex flex-wrap gap-2">
-            {[
-              ["dashboard-summary", "Overview"],
-              ["guided-recovery", "Recovery"],
-              ["settings", "Alerts & settings"],
-              ["blocklists", "Blocklists"],
-              ["devices", "Devices"],
-            ].map(([target, label]) => (
-              <Button key={target} variant="ghost" size="sm" onClick={() => scrollToSection(target)}>
-                {label}
-              </Button>
-            ))}
-          </div>
-          <div className="mt-5 rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
-            <div className="font-medium">Node sync status</div>
-            <div className="mt-2 grid gap-2 text-muted-foreground">
-              <div>Profile: <span className="font-medium text-foreground">{syncStatus.profile}</span></div>
-              <div>Revision: <span className="font-medium text-foreground">{syncStatus.revision}</span></div>
-              <div>Transport: <span className="font-medium text-foreground">{syncStatus.transport_mode}{syncStatus.transport_token_configured ? " + token" : ""}</span></div>
-              <div>Replay cache entries: <span className="font-medium text-foreground">{syncStatus.replay_cache_entries}</span></div>
-              <div>Known peers: <span className="font-medium text-foreground">{syncStatus.peers.length}</span></div>
-            </div>
-            {syncStatus.peers.length > 0 ? (
-              <div className="mt-3 grid gap-2">
-                {syncStatus.peers.slice(0, 3).map((peer) => (
-                  <div key={peer.node_public_key} className="rounded-xl border border-border/70 bg-white/80 px-3 py-2 text-xs text-muted-foreground">
-                    <div className="font-medium text-foreground">{peer.node_public_key.slice(0, 12)}...</div>
-                    <div>Revision {peer.last_revision} via {peer.profile}</div>
-                  </div>
-                ))}
-              </div>
-            ) : null}
-            <div className="mt-4 grid gap-3 border-t border-border/70 pt-4">
-              <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
-                <select className="h-10 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={syncProfileDraft} onChange={(event) => setSyncProfileDraft(event.target.value)}>
-                  <option value="full">Full replication</option>
-                  <option value="settings-only">Settings only</option>
-                  <option value="read-only-follower">Read-only follower</option>
-                </select>
-                <Button variant="secondary" size="sm" onClick={() => void handleSyncProfileSave()} disabled={busyAction === "sync-profile-save"}>
-                  Save profile
-                </Button>
-              </div>
-              <div className="grid gap-3 sm:grid-cols-[180px_1fr_auto]">
-                <select className="h-10 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={syncTransportModeDraft} onChange={(event) => setSyncTransportModeDraft(event.target.value)}>
-                  <option value="opportunistic">Opportunistic</option>
-                  <option value="https-required">HTTPS required</option>
-                </select>
-                <Input value={syncTransportTokenDraft} onChange={(event) => setSyncTransportTokenDraft(event.target.value)} placeholder={syncStatus.transport_token_configured ? "Set new token or leave blank to clear" : "Optional bearer token"} />
-                <Button variant="secondary" size="sm" onClick={() => void handleSyncTransportSave()} disabled={busyAction === "sync-transport-save"}>
-                  Save transport
-                </Button>
-              </div>
-            </div>
-          </div>
-          <div className="mt-4 rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 font-medium">
-                <Network className="size-4" />
-                Tailscale status
-              </div>
-                {tailscaleStatus.installed && tailscaleStatus.daemon_running ? (
-                  <Badge className={tailscaleStatus.exit_node_active ? "bg-green-500 text-white" : "bg-secondary text-secondary-foreground"}>
-                    {tailscaleStatus.exit_node_active ? "Exit node active" : "Connected"}
-                  </Badge>
-                ) : (
-                  <Badge className="border border-input bg-transparent text-muted-foreground">Not connected</Badge>
-                )}
-              </div>
-              <div className="mt-2 grid gap-2 text-muted-foreground">
-                {tailscaleStatus.last_error ? (
-                  <div className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">
-                    {tailscaleStatus.last_error}
-                  </div>
-                ) : (
-                  <>
-                    <div>Host: <span className="font-medium text-foreground">{tailscaleStatus.hostname ?? "—"}</span></div>
-                    <div>Tailnet: <span className="font-medium text-foreground">{tailscaleStatus.tailnet_name ?? "—"}</span></div>
-                    <div>Version: <span className="font-medium text-foreground">{tailscaleStatus.version ?? "—"}</span></div>
-                    <div>Peers: <span className="font-medium text-foreground">{tailscaleStatus.peer_count}</span></div>
-                    <div>Daemon: <span className="font-medium text-foreground">{tailscaleStatus.backend_state ?? "unknown"}</span></div>
-                  </>
-                )}
-              </div>
-              {tailscaleStatus.health_warnings.length > 0 ? (
-                <div className="mt-3 rounded-lg bg-yellow-50 px-3 py-2 text-xs text-yellow-800">
-                  {tailscaleStatus.health_warnings.join(", ")}
-                </div>
-              ) : null}
-              {!tailscaleStatus.installed ? (
-                <div className="mt-3 text-xs text-muted-foreground">
-                  Tailscale is not installed. Install it to enable exit-node filtering.
-                </div>
-              ) : !tailscaleStatus.daemon_running ? (
-                <div className="mt-3 text-xs text-muted-foreground">
-                  Tailscale daemon is not running. Start it to enable exit-node filtering.
-                </div>
-              ) : (
-                <div className="mt-4 grid gap-3 border-t border-border/70 pt-4">
-                  <Button
-                    variant={tailscaleStatus.exit_node_active ? "ghost" : "secondary"}
-                    size="sm"
-                    onClick={() => void handleTailscaleExitNodeToggle()}
-                    disabled={busyAction === "tailscale-exit-node"}
-                  >
-                    {busyAction === "tailscale-exit-node"
-                      ? "Updating..."
-                      : tailscaleStatus.exit_node_active
-                        ? "Disable exit node"
-                        : "Enable exit node"}
-                  </Button>
-                  {!tailscaleStatus.exit_node_active && (
-                    <div className="text-xs text-muted-foreground">
-                      Exit-node mode routes all tailnet traffic through this node, enabling DNS filtering for connected clients.
-                    </div>
-                  )}
-                  {tailscaleDnsCheck.suggestions.length > 0 && (
-                    <div className="mt-3 rounded-lg bg-blue-50 px-3 py-2 text-xs text-blue-800">
-                      <div className="font-medium">DNS filtering status</div>
-                      <div className="mt-1">{tailscaleDnsCheck.message}</div>
-                      {tailscaleDnsCheck.local_dns_server && (
-                        <div className="mt-1">Local DNS: {tailscaleDnsCheck.local_dns_server}</div>
-                      )}
-                      <div className="mt-2 space-y-1">
-                        {tailscaleDnsCheck.suggestions.map((suggestion, idx) => (
-                          <div key={idx}>{suggestion}</div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => void handleTailscaleRollback()}
-                    disabled={busyAction === "tailscale-rollback"}
-                    className="mt-2"
-                  >
-                    {busyAction === "tailscale-rollback" ? "Rolling back..." : "Roll back to previous state"}
-                  </Button>
-                </div>
-              )}
-            </div>
-          </Card>
+        <section id="quick-health" className="grid gap-4 lg:grid-cols-3">
+          {overviewStats.map((item) => (
+            <Card key={item.label} className={`border ${item.accent}`}>
+              <div className="text-sm text-muted-foreground">{item.label}</div>
+              <div className="mt-3 font-display text-5xl font-semibold tracking-tight">{item.value}</div>
+              <div className="mt-2 text-sm text-muted-foreground">{item.detail}</div>
+            </Card>
+          ))}
         </section>
+      </section>
 
-        <section className="grid gap-6 lg:grid-cols-[0.9fr_1.1fr_1.1fr]">
-          <Card>
-            <CardTitle>Overview pulse</CardTitle>
-            <CardDescription>The at-a-glance numbers a household checks first.</CardDescription>
-            <div className="mt-5 grid gap-3">
-              {overviewStats.map((item) => (
-                <div key={item.label} className="rounded-[24px] border border-border/70 bg-white/80 p-4">
-                  <div className="text-sm text-muted-foreground">{item.label}</div>
-                  <div className="mt-2 font-display text-3xl font-semibold tracking-tight">{item.value}</div>
-                  <div className="mt-2 text-xs text-muted-foreground">{item.detail}</div>
-                </div>
-              ))}
-            </div>
-          </Card>
+        <section className="grid gap-6 lg:grid-cols-[1fr_1fr]">
 
           <Card>
             <CardTitle>Top queried domains</CardTitle>
@@ -1511,7 +1248,7 @@ export default function App() {
           </Card>
         </section>
 
-      <section className="grid gap-6 lg:grid-cols-[1fr_1fr]">
+      <section className="hidden grid gap-6 lg:grid-cols-[1fr_1fr]">
         <Card id="guided-recovery">
           <CardTitle>Guided recovery</CardTitle>
           <CardDescription>Plain-language next steps for the issues most likely to block protection or visibility.</CardDescription>
@@ -1558,50 +1295,17 @@ export default function App() {
         </Card>
 
         <Card id="setup-checklist">
-          <CardTitle>Setup checklist</CardTitle>
-          <CardDescription>Track the core steps that turn the current control plane into a ready-to-run deployment.</CardDescription>
-          <div className="mt-5 rounded-[24px] border border-border/70 bg-muted/40 p-4">
-            <div className="text-sm text-muted-foreground">Completed</div>
-            <div className="mt-1 font-display text-3xl font-semibold">{onboardingChecklist.completed}/{onboardingChecklist.total}</div>
-          </div>
-          <div className="mt-4 grid gap-3">
-            {onboardingChecklist.items.map((item) => (
-              <div key={item.title} className="rounded-[24px] border border-border/70 bg-white/80 p-4">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="font-medium">{item.title}</div>
-                  <Badge>{item.done ? "Done" : "Next"}</Badge>
-                </div>
-                <div className="mt-1 text-sm text-muted-foreground">{item.detail}</div>
-                {!item.done ? (
-                  <div className="mt-3">
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      onClick={() => {
-                        if (item.actionKey === "blocklists") {
-                          scrollToSection("blocklists");
-                          return;
-                        }
-                        if (item.actionKey === "devices") {
-                          scrollToSection("devices");
-                          return;
-                        }
-                        scrollToSection("settings");
-                      }}
-                    >
-                      {item.actionLabel}
-                    </Button>
-                  </div>
-                ) : null}
-              </div>
-            ))}
+          <CardTitle>Moved out of overview</CardTitle>
+          <CardDescription>Device setup, syncing, recovery, and operator controls now live in their dedicated pages to keep the dashboard light.</CardDescription>
+          <div className="mt-5 rounded-[24px] border border-border/70 bg-muted/40 p-4 text-sm text-muted-foreground">
+            Use the pill navigation above to jump directly into block profiles, devices, or settings when you want to make changes.
           </div>
         </Card>
       </section>
 
       {error ? <Card className="border-accent/30 bg-accent/10 text-accent-foreground">{error}</Card> : null}
 
-      <section className="grid gap-6 lg:grid-cols-[1.15fr_0.85fr]">
+      <section className="hidden grid gap-6 lg:grid-cols-[1.15fr_0.85fr]">
         <Card id="dashboard-summary">
           <CardTitle>Dashboard</CardTitle>
           <CardDescription>Current backend summary surfaced in a UI-first shape.</CardDescription>

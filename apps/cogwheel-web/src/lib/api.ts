@@ -5,6 +5,8 @@ export type RuntimeHealth = {
     cache_hits_total: number;
     cname_uncloaks_total: number;
     cname_blocks_total: number;
+    queries_total: number;
+    blocked_total: number;
   };
   degraded: boolean;
   notes: string[];
