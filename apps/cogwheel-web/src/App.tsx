@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Activity, ListFilter, RefreshCw, ShieldCheck, Sparkles, Undo2 } from "lucide-react";
-import { api, type AuditEvent, type DashboardSummary, type FederatedLearningSettings, type SettingsSummary, type SyncNodeStatus, type TailscaleDnsCheckResult, type TailscaleStatus, type ThreatIntelSettings } from "@/lib/api";
+import { api, type AuditEvent, type BlockProfileRecord, type DashboardSummary, type FederatedLearningSettings, type SettingsSummary, type SyncNodeStatus, type TailscaleDnsCheckResult, type TailscaleStatus, type ThreatIntelSettings } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
@@ -60,6 +60,7 @@ const emptyDashboard: DashboardSummary = {
 const emptySettings: SettingsSummary = {
   blocklists: [],
   blocklist_statuses: [],
+  block_profiles: [],
   devices: [],
   services: [],
   classifier: { mode: "Monitor", threshold: 0.92 },
@@ -115,6 +116,16 @@ const emptyFederatedLearningSettings: FederatedLearningSettings = {
   recommendations: [],
 };
 
+const emptyBlockProfileDraft: BlockProfileRecord = {
+  id: "",
+  emoji: "🧩",
+  name: "",
+  description: "",
+  blocklists: [],
+  allowlists: [],
+  updated_at: new Date(0).toISOString(),
+};
+
 export default function App() {
   const [dashboard, setDashboard] = useState<DashboardSummary>(emptyDashboard);
   const [settings, setSettings] = useState<SettingsSummary>(emptySettings);
@@ -168,6 +179,9 @@ export default function App() {
   const [deviceServiceOverrides, setDeviceServiceOverrides] = useState<Array<{ service_id: string; mode: "allow" | "block" }>>([]);
   const [deviceServiceOverrideId, setDeviceServiceOverrideId] = useState("");
   const [deviceServiceOverrideMode, setDeviceServiceOverrideMode] = useState<"allow" | "block">("allow");
+  const [selectedBlockProfileId, setSelectedBlockProfileId] = useState<string | null>(null);
+  const [blockProfileDraft, setBlockProfileDraft] = useState<BlockProfileRecord>(emptyBlockProfileDraft);
+  const [blockProfileAllowlistDraft, setBlockProfileAllowlistDraft] = useState("");
 
   const load = useCallback(async () => {
     setState("loading");
@@ -259,6 +273,28 @@ export default function App() {
     setNotificationTestDeviceName(preset.device_name);
     setNotificationDryRun(preset.dry_run);
   }, [selectedNotificationPreset, settings.notification_test_presets]);
+
+  useEffect(() => {
+    const selectedProfile = settings.block_profiles.find((profile) => profile.id === selectedBlockProfileId);
+    if (selectedProfile) {
+      setBlockProfileDraft(selectedProfile);
+      setBlockProfileAllowlistDraft(selectedProfile.allowlists.join(", "));
+      return;
+    }
+
+    if (settings.block_profiles.length > 0 && selectedBlockProfileId === null) {
+      const firstProfile = settings.block_profiles[0];
+      setSelectedBlockProfileId(firstProfile.id);
+      setBlockProfileDraft(firstProfile);
+      setBlockProfileAllowlistDraft(firstProfile.allowlists.join(", "));
+      return;
+    }
+
+    if (settings.block_profiles.length === 0) {
+      setBlockProfileDraft(emptyBlockProfileDraft);
+      setBlockProfileAllowlistDraft("");
+    }
+  }, [selectedBlockProfileId, settings.block_profiles]);
 
   function pushToast(title: string, detail: string | undefined, tone: Toast["tone"]) {
     const id = Date.now() + Math.floor(Math.random() * 1000);
@@ -851,6 +887,49 @@ export default function App() {
     } finally {
       setBusyAction(null);
     }
+  }
+
+  async function handleBlockProfileSave() {
+    if (!blockProfileDraft.name.trim()) {
+      pushToast("Name required", "Give the block profile a friendly name before saving.", "error");
+      return;
+    }
+
+    setBusyAction("block-profile-save");
+    try {
+      const updatedProfiles = await api.upsertBlockProfile({
+        id: blockProfileDraft.id || undefined,
+        emoji: blockProfileDraft.emoji,
+        name: blockProfileDraft.name,
+        description: blockProfileDraft.description,
+        blocklists: blockProfileDraft.blocklists,
+        allowlists: blockProfileAllowlistDraft
+          .split(",")
+          .map((entry) => entry.trim())
+          .filter(Boolean),
+      });
+      const nextSelectedId = (updatedProfiles.find((profile) => profile.name === blockProfileDraft.name)?.id) ?? blockProfileDraft.id;
+      setSettings((current) => ({ ...current, block_profiles: updatedProfiles }));
+      setSelectedBlockProfileId(nextSelectedId || null);
+      pushToast("Block profile saved", `${blockProfileDraft.name} is ready for device assignment.`, "success");
+      await load();
+    } catch (mutationError) {
+      pushToast("Block profile save failed", mutationError instanceof Error ? mutationError.message : "Unknown error", "error");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  function startNewBlockProfile() {
+    setSelectedBlockProfileId(null);
+    setBlockProfileDraft({ ...emptyBlockProfileDraft, updated_at: new Date().toISOString() });
+    setBlockProfileAllowlistDraft("");
+  }
+
+  function selectBlockProfile(profile: BlockProfileRecord) {
+    setSelectedBlockProfileId(profile.id);
+    setBlockProfileDraft(profile);
+    setBlockProfileAllowlistDraft(profile.allowlists.join(", "));
   }
 
   async function handleRefreshSources() {
@@ -2342,6 +2421,95 @@ export default function App() {
         </div>
       ) : null}
         </>
+      ) : activePage === "profiles" ? (
+        <section className="grid gap-6 lg:grid-cols-[0.9fr_1.1fr]">
+          <Card>
+            <CardTitle>Block profiles</CardTitle>
+            <CardDescription>Friendly presets for strict, relaxed, or purpose-built browsing moments.</CardDescription>
+            <div className="mt-5 flex items-center justify-between gap-3">
+              <div className="text-sm text-muted-foreground">Saved profiles can be assigned to devices without reopening the full settings wall.</div>
+              <Button variant="secondary" size="sm" onClick={startNewBlockProfile}>New profile</Button>
+            </div>
+            <div className="mt-5 grid gap-3">
+              {settings.block_profiles.length === 0 ? (
+                <div className="rounded-[24px] border border-dashed border-border/70 bg-muted/30 p-5 text-sm text-muted-foreground">
+                  No saved profiles yet. Start with a family-safe or focus profile and then assign it to devices.
+                </div>
+              ) : (
+                settings.block_profiles.map((profile) => (
+                  <button
+                    key={profile.id}
+                    type="button"
+                    onClick={() => selectBlockProfile(profile)}
+                    className={`rounded-[24px] border p-4 text-left transition ${selectedBlockProfileId === profile.id ? "border-foreground bg-foreground text-background" : "border-border/70 bg-white/80 hover:bg-muted/30"}`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="text-2xl">{profile.emoji}</div>
+                        <div className="mt-2 font-medium">{profile.name}</div>
+                        <div className={`mt-1 text-sm ${selectedBlockProfileId === profile.id ? "text-background/70" : "text-muted-foreground"}`}>{profile.description || "No summary yet."}</div>
+                      </div>
+                      <Badge className={selectedBlockProfileId === profile.id ? "bg-background text-foreground" : "bg-muted text-muted-foreground"}>{profile.blocklists.length} lists</Badge>
+                    </div>
+                    <div className={`mt-3 text-xs ${selectedBlockProfileId === profile.id ? "text-background/70" : "text-muted-foreground"}`}>
+                      Updated {new Date(profile.updated_at).toLocaleString()}
+                    </div>
+                  </button>
+                ))
+              )}
+            </div>
+          </Card>
+
+          <Card>
+            <CardTitle>{selectedBlockProfileId ? "Edit profile" : "Create profile"}</CardTitle>
+            <CardDescription>Pick an emoji, give it a clear name, and decide which list families and allowlist exceptions belong together.</CardDescription>
+            <div className="mt-5 grid gap-4">
+              <div className="grid gap-3 sm:grid-cols-[120px_1fr]">
+                <Input value={blockProfileDraft.emoji} onChange={(event) => setBlockProfileDraft((current) => ({ ...current, emoji: event.target.value || "🧩" }))} placeholder="🧩" />
+                <Input value={blockProfileDraft.name} onChange={(event) => setBlockProfileDraft((current) => ({ ...current, name: event.target.value }))} placeholder="Homework time" />
+              </div>
+              <Input value={blockProfileDraft.description} onChange={(event) => setBlockProfileDraft((current) => ({ ...current, description: event.target.value }))} placeholder="Short summary shown when assigning this profile to devices" />
+              <div className="grid gap-3 sm:grid-cols-3">
+                {[
+                  { id: "essential", label: "Essential" },
+                  { id: "balanced", label: "Balanced" },
+                  { id: "aggressive", label: "Aggressive" },
+                ].map((option) => {
+                  const enabled = blockProfileDraft.blocklists.includes(option.id);
+                  return (
+                    <label key={option.id} className={`rounded-[24px] border px-4 py-4 text-sm transition ${enabled ? "border-foreground bg-foreground text-background" : "border-border/70 bg-white/80"}`}>
+                      <input
+                        type="checkbox"
+                        className="sr-only"
+                        checked={enabled}
+                        onChange={(event) => {
+                          setBlockProfileDraft((current) => ({
+                            ...current,
+                            blocklists: event.target.checked
+                              ? [...current.blocklists, option.id].filter((value, index, items) => items.indexOf(value) === index)
+                              : current.blocklists.filter((value) => value !== option.id),
+                          }));
+                        }}
+                      />
+                      <div className="font-medium">{option.label}</div>
+                      <div className={`mt-1 text-xs ${enabled ? "text-background/70" : "text-muted-foreground"}`}>Include the {option.label.toLowerCase()} list family.</div>
+                    </label>
+                  );
+                })}
+              </div>
+              <Input value={blockProfileAllowlistDraft} onChange={(event) => setBlockProfileAllowlistDraft(event.target.value)} placeholder="school.example, video.example" />
+              <div className="rounded-[24px] border border-border/70 bg-muted/30 p-4 text-sm text-muted-foreground">
+                Device assignment uses the profile name as the runtime override today, so keeping names short and obvious makes the household UI easier to scan.
+              </div>
+              <div className="flex flex-wrap gap-3">
+                <Button onClick={() => void handleBlockProfileSave()} disabled={busyAction === "block-profile-save"}>
+                  {busyAction === "block-profile-save" ? "Saving..." : "Save profile"}
+                </Button>
+                <Button variant="ghost" onClick={startNewBlockProfile}>Clear editor</Button>
+              </div>
+            </div>
+          </Card>
+        </section>
       ) : (
         <section className="grid gap-6 lg:grid-cols-[0.95fr_1.05fr]">
           <Card>

@@ -343,7 +343,7 @@ Exit criteria:
 Goal: Make the control plane feel approachable for a household first, while keeping operator-grade controls available in a quieter settings surface.
 
 - [x] Add overview-first navigation with quick health and recent domain activity visuals.
-- [ ] Add block profiles page with emoji, friendly naming, list composition, and save/edit flows.
+- [x] Add block profiles page with emoji, friendly naming, list composition, and save/edit flows.
 - [ ] Add devices page with clear labeling and profile assignment.
 - [ ] Move advanced sync, recovery, and operator controls into a dedicated settings page.
 

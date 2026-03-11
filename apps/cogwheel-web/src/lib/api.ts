@@ -66,6 +66,16 @@ export type DeviceRecord = {
   service_overrides: DeviceServiceOverride[];
 };
 
+export type BlockProfileRecord = {
+  id: string;
+  emoji: string;
+  name: string;
+  description: string;
+  blocklists: string[];
+  allowlists: string[];
+  updated_at: string;
+};
+
 export type DeviceServiceOverride = {
   service_id: string;
   mode: "allow" | "block";
@@ -303,6 +313,7 @@ export type SyncTransportView = {
 export type SettingsSummary = {
   blocklists: SourceRecord[];
   blocklist_statuses: BlocklistStatus[];
+  block_profiles: BlockProfileRecord[];
   devices: DeviceRecord[];
   services: ServiceToggle[];
   classifier: {
@@ -407,6 +418,18 @@ export const api = {
     fetchJson<{ outcome: string; notes: string[] }>("/api/v1/settings/blocklists", {
       method: "POST",
       body: JSON.stringify({ ...input, refresh_now: true }),
+    }),
+  upsertBlockProfile: (input: {
+    id?: string;
+    emoji: string;
+    name: string;
+    description?: string;
+    blocklists: string[];
+    allowlists: string[];
+  }) =>
+    fetchJson<BlockProfileRecord[]>("/api/v1/settings/block-profiles", {
+      method: "POST",
+      body: JSON.stringify(input),
     }),
   setBlocklistEnabled: (id: string, enabled: boolean) =>
     fetchJson<{ outcome: string; notes: string[] }>("/api/v1/settings/blocklists/state", {

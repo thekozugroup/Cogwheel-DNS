@@ -294,6 +294,7 @@ struct DeviceSecuritySummary {
 struct SettingsSummary {
     blocklists: Vec<SourceRecord>,
     blocklist_statuses: Vec<BlocklistStatusView>,
+    block_profiles: Vec<BlockProfileRecord>,
     devices: Vec<DeviceRecord>,
     services: Vec<ServiceToggleView>,
     classifier: ClassifierSettings,
@@ -415,6 +416,27 @@ struct UpdateBlocklistStateRequest {
     id: Uuid,
     enabled: bool,
     refresh_now: Option<bool>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct BlockProfileRecord {
+    id: String,
+    emoji: String,
+    name: String,
+    description: String,
+    blocklists: Vec<String>,
+    allowlists: Vec<String>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct UpsertBlockProfileRequest {
+    id: Option<String>,
+    emoji: String,
+    name: String,
+    description: Option<String>,
+    blocklists: Vec<String>,
+    allowlists: Vec<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -728,6 +750,10 @@ fn admin_router() -> Router<ServerState> {
     Router::new()
         .route("/api/v1/dashboard", get(dashboard_summary))
         .route("/api/v1/settings", get(settings_summary))
+        .route(
+            "/api/v1/settings/block-profiles",
+            post(upsert_block_profile),
+        )
         .route("/api/v1/settings/blocklists", post(upsert_blocklist))
         .route(
             "/api/v1/settings/blocklists/state",
@@ -1537,6 +1563,9 @@ async fn settings_summary(
     let blocklist_statuses = build_blocklist_status_views(&state, &blocklists)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let block_profiles = load_block_profiles(&state.storage)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     let notifications = state
         .notification_settings
         .read()
@@ -1550,6 +1579,7 @@ async fn settings_summary(
         data: SettingsSummary {
             blocklists,
             blocklist_statuses,
+            block_profiles,
             devices,
             services,
             classifier: state.dns_runtime.classifier_settings(),
@@ -3739,6 +3769,215 @@ async fn load_notification_test_presets(storage: &Storage) -> Result<Vec<Notific
     Ok(normalize_notification_test_presets(
         serde_json::from_str(&value).unwrap_or_default(),
     ))
+}
+
+async fn load_block_profiles(storage: &Storage) -> Result<Vec<BlockProfileRecord>> {
+    let Some(value) = storage.get_setting("block_profiles").await? else {
+        return Ok(default_block_profiles());
+    };
+
+    let parsed = serde_json::from_str::<Vec<BlockProfileRecord>>(&value)
+        .unwrap_or_else(|_| default_block_profiles());
+    Ok(normalize_block_profiles(parsed))
+}
+
+async fn persist_block_profiles(storage: &Storage, profiles: &[BlockProfileRecord]) -> Result<()> {
+    storage
+        .upsert_setting("block_profiles", &serde_json::to_string(profiles)?)
+        .await?;
+    Ok(())
+}
+
+fn default_block_profiles() -> Vec<BlockProfileRecord> {
+    let now = chrono::Utc::now();
+    vec![
+        BlockProfileRecord {
+            id: "kids".to_string(),
+            emoji: "🛡️".to_string(),
+            name: "Kids".to_string(),
+            description: "Stricter defaults for younger browsers and shared family devices."
+                .to_string(),
+            blocklists: vec!["aggressive".to_string(), "balanced".to_string()],
+            allowlists: vec!["pbskids.org".to_string(), "khanacademy.org".to_string()],
+            updated_at: now,
+        },
+        BlockProfileRecord {
+            id: "focus".to_string(),
+            emoji: "🌿".to_string(),
+            name: "Focus".to_string(),
+            description:
+                "Balanced filtering with a short allowlist for essential work and school sites."
+                    .to_string(),
+            blocklists: vec!["balanced".to_string()],
+            allowlists: vec!["calendar.google.com".to_string(), "notion.so".to_string()],
+            updated_at: now,
+        },
+    ]
+}
+
+fn normalize_block_profile_id(value: &str) -> Option<String> {
+    let normalized = value
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|char| {
+            if char.is_ascii_alphanumeric() {
+                char
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn normalize_block_profile_name(value: &str) -> Option<String> {
+    let normalized = value.trim();
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized.to_string())
+    }
+}
+
+fn normalize_domain_list(entries: Vec<String>) -> Vec<String> {
+    let mut normalized = entries
+        .into_iter()
+        .flat_map(|entry| entry.split(',').map(str::to_string).collect::<Vec<_>>())
+        .filter_map(|entry| {
+            let trimmed = entry.trim().trim_matches('.').to_ascii_lowercase();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        })
+        .collect::<Vec<_>>();
+    normalized.sort();
+    normalized.dedup();
+    normalized
+}
+
+fn normalize_block_profile_lists(entries: Vec<String>) -> Vec<String> {
+    let mut normalized = entries
+        .into_iter()
+        .filter_map(|entry| normalize_profile_name(&entry))
+        .collect::<Vec<_>>();
+    normalized.sort();
+    normalized.dedup();
+    normalized
+}
+
+fn normalize_block_profiles(mut profiles: Vec<BlockProfileRecord>) -> Vec<BlockProfileRecord> {
+    for profile in &mut profiles {
+        profile.id = normalize_block_profile_id(&profile.id)
+            .or_else(|| normalize_block_profile_id(&profile.name))
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        profile.name = normalize_block_profile_name(&profile.name)
+            .unwrap_or_else(|| "Untitled profile".to_string());
+        profile.emoji = profile.emoji.trim().to_string();
+        if profile.emoji.is_empty() {
+            profile.emoji = "🧩".to_string();
+        }
+        profile.description = profile.description.trim().to_string();
+        profile.blocklists = normalize_block_profile_lists(profile.blocklists.clone());
+        profile.allowlists = normalize_domain_list(profile.allowlists.clone());
+    }
+
+    profiles.sort_by(|left, right| left.name.cmp(&right.name));
+    profiles.dedup_by(|left, right| left.id == right.id);
+    profiles
+}
+
+async fn upsert_block_profile(
+    State(state): State<ServerState>,
+    Json(request): Json<UpsertBlockProfileRequest>,
+) -> Result<Json<ApiEnvelope<Vec<BlockProfileRecord>>>, (axum::http::StatusCode, String)> {
+    let profile_id = request
+        .id
+        .as_deref()
+        .and_then(normalize_block_profile_id)
+        .or_else(|| normalize_block_profile_id(&request.name))
+        .ok_or((
+            axum::http::StatusCode::BAD_REQUEST,
+            "block profile requires a name".to_string(),
+        ))?;
+    let profile_name = normalize_block_profile_name(&request.name).ok_or((
+        axum::http::StatusCode::BAD_REQUEST,
+        "block profile requires a friendly name".to_string(),
+    ))?;
+
+    let mut profiles = load_block_profiles(&state.storage).await.map_err(|error| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            error.to_string(),
+        )
+    })?;
+
+    let next_profile = BlockProfileRecord {
+        id: profile_id.clone(),
+        emoji: if request.emoji.trim().is_empty() {
+            "🧩".to_string()
+        } else {
+            request.emoji.trim().to_string()
+        },
+        name: profile_name.clone(),
+        description: request.description.unwrap_or_default().trim().to_string(),
+        blocklists: normalize_block_profile_lists(request.blocklists),
+        allowlists: normalize_domain_list(request.allowlists),
+        updated_at: chrono::Utc::now(),
+    };
+
+    if let Some(existing) = profiles.iter_mut().find(|profile| profile.id == profile_id) {
+        *existing = next_profile;
+    } else {
+        profiles.push(next_profile);
+    }
+
+    let profiles = normalize_block_profiles(profiles);
+    persist_block_profiles(&state.storage, &profiles)
+        .await
+        .map_err(|error| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                error.to_string(),
+            )
+        })?;
+
+    state
+        .storage
+        .record_audit_event(&AuditEvent {
+            id: Uuid::new_v4(),
+            event_type: "block-profile.updated".to_string(),
+            payload: serde_json::to_string(&serde_json::json!({
+                "id": profile_id,
+                "name": profile_name,
+            }))
+            .map_err(|error| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    error.to_string(),
+                )
+            })?,
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .map_err(|error| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                error.to_string(),
+            )
+        })?;
+
+    Ok(Json(ApiEnvelope { data: profiles }))
 }
 
 async fn load_source_refresh_state(storage: &Storage) -> Result<SourceRefreshState> {
