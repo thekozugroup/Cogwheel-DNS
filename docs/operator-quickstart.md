@@ -25,7 +25,7 @@ Then open `http://localhost:30080`.
 Built-in deployment profiles:
 
 - `dev` - loopback-only, non-privileged local ports
-- `home` - default home-lab profile
+- `home` - default home-lab profile; pair it with host port `53` publishing for client devices
 - `smb` - small-business profile with DNS on port `53` and stricter guard thresholds
 
 ## Docker Run
@@ -38,12 +38,21 @@ docker build -t cogwheel:latest .
 docker run -d \
   --name cogwheel \
   --restart unless-stopped \
-  -p 53:53/udp \
-  -p 53:53/tcp \
-  -p 8080:8080 \
+  -p 53:30053/udp \
+  -p 53:30053/tcp \
+  -p 30080:30080 \
+  -e COGWHEEL_PROFILE=dev \
+  -e COGWHEEL_SERVER__HTTP_BIND_ADDR=0.0.0.0:30080 \
+  -e COGWHEEL_SERVER__DNS_UDP_BIND_ADDR=0.0.0.0:30053 \
+  -e COGWHEEL_SERVER__DNS_TCP_BIND_ADDR=0.0.0.0:30053 \
+  -e COGWHEEL_SERVER__ADVERTISED_DNS_PORT=53 \
   -v cogwheel_data:/app/data \
   cogwheel:latest
 ```
+
+This mirrors the way Pi-hole and AdGuard Home expose standard DNS on the host while letting the app keep a safe internal bind port.
+
+For a reusable installer-style command, use `scripts/install-home-docker.sh`.
 
 For Raspberry Pi deployment details, see `DEPLOY.md` and `DEPLOYMENT.md`.
 
@@ -61,15 +70,15 @@ For Raspberry Pi deployment details, see `DEPLOY.md` and `DEPLOYMENT.md`.
 After startup, verify:
 
 ```bash
-curl http://127.0.0.1:8080/api/v1/dashboard
-curl http://127.0.0.1:8080/api/v1/config/version
-curl http://127.0.0.1:8080/api/v1/false-positive-budget
+curl http://127.0.0.1:30080/api/v1/dashboard
+curl http://127.0.0.1:30080/api/v1/config/version
+curl http://127.0.0.1:30080/api/v1/false-positive-budget
 ```
 
 If Tailscale integration is enabled, also check:
 
 ```bash
-curl http://127.0.0.1:8080/api/v1/tailscale/status
+curl http://127.0.0.1:30080/api/v1/tailscale/status
 ```
 
 ## Day-2 Operations

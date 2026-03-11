@@ -48,6 +48,7 @@ The server reads settings from environment variables with the `COGWHEEL_` prefix
 - `COGWHEEL_SERVER__HTTP_BIND_ADDR`
 - `COGWHEEL_SERVER__DNS_UDP_BIND_ADDR`
 - `COGWHEEL_SERVER__DNS_TCP_BIND_ADDR`
+- `COGWHEEL_SERVER__ADVERTISED_DNS_PORT` (use when host port 53 maps to an internal safe port)
 - `COGWHEEL_STORAGE__DATABASE_URL`
 - `COGWHEEL_UPSTREAM__SERVERS`
 

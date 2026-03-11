@@ -60,6 +60,7 @@ struct ServerState {
     sync_seen_nonces: Arc<Mutex<HashMap<String, chrono::DateTime<chrono::Utc>>>>,
     rate_limiter: Arc<RateLimiter>,
     dns_udp_bind_addr: SocketAddr,
+    advertised_dns_port: u16,
 }
 
 #[derive(Clone)]
@@ -645,6 +646,10 @@ async fn main() -> Result<()> {
         sync_seen_nonces: Arc::new(Mutex::new(HashMap::new())),
         rate_limiter: Arc::new(RateLimiter::new(100, 60)),
         dns_udp_bind_addr: config.server.dns_udp_bind_addr,
+        advertised_dns_port: std::env::var("COGWHEEL_SERVER__ADVERTISED_DNS_PORT")
+            .ok()
+            .and_then(|value| value.parse::<u16>().ok())
+            .unwrap_or(config.server.dns_udp_bind_addr.port()),
     };
     if let Err(error) = warm_runtime_policy_catalog(&app_state).await {
         tracing::warn!(%error, "failed to warm runtime policy catalog on startup");
@@ -3131,16 +3136,21 @@ async fn resolver_access_status(
     State(state): State<ServerState>,
     headers: HeaderMap,
 ) -> Result<Json<ApiEnvelope<ResolverAccessStatus>>, axum::http::StatusCode> {
-    let dns_targets = discover_dns_targets(state.dns_udp_bind_addr, &headers);
+    let dns_targets =
+        discover_dns_targets(state.advertised_dns_port, state.dns_udp_bind_addr, &headers);
     let tailscale_ip = discover_tailscale_ipv4();
     let hostname = std::env::var("HOSTNAME")
         .ok()
         .or_else(|| read_command_output("hostname", &[]));
 
-    let mut notes = vec![format!(
-        "Point devices at port {} for DNS on this deployment.",
-        state.dns_udp_bind_addr.port()
-    )];
+    let mut notes = if state.advertised_dns_port == 53 {
+        vec!["Point devices at this hostname or IP directly in DNS settings; port 53 is already exposed.".to_string()]
+    } else {
+        vec![format!(
+            "Point devices at port {} for DNS on this deployment.",
+            state.advertised_dns_port
+        )]
+    };
     if tailscale_ip.is_some() {
         notes.push(
             "Tailscale is available, so tailnet devices can use the Tailscale address directly."
@@ -3158,8 +3168,11 @@ async fn resolver_access_status(
     }))
 }
 
-fn discover_dns_targets(bind_addr: SocketAddr, headers: &HeaderMap) -> Vec<String> {
-    let port = bind_addr.port();
+fn discover_dns_targets(
+    advertised_port: u16,
+    bind_addr: SocketAddr,
+    headers: &HeaderMap,
+) -> Vec<String> {
     let mut targets = Vec::new();
 
     if let Some(host) = headers
@@ -3168,26 +3181,37 @@ fn discover_dns_targets(bind_addr: SocketAddr, headers: &HeaderMap) -> Vec<Strin
         .map(|value| value.split(':').next().unwrap_or(value).trim())
         .filter(|value| !value.is_empty())
     {
-        targets.push(format!("{}:{}", host, port));
+        targets.push(format_dns_target(host, advertised_port));
     }
 
     if bind_addr.ip().is_unspecified() {
         for ip in discover_local_ipv4s() {
             if !ip.starts_with("172.") {
-                targets.push(format!("{}:{}", ip, port));
+                targets.push(format_dns_target(&ip, advertised_port));
             }
         }
     } else {
-        targets.push(format!("{}:{}", bind_addr.ip(), port));
+        targets.push(format_dns_target(
+            &bind_addr.ip().to_string(),
+            advertised_port,
+        ));
     }
 
     if targets.is_empty() {
-        targets.push(format!("127.0.0.1:{}", port));
+        targets.push(format_dns_target("127.0.0.1", advertised_port));
     }
 
     targets.sort();
     targets.dedup();
     targets
+}
+
+fn format_dns_target(host: &str, port: u16) -> String {
+    if port == 53 {
+        host.to_string()
+    } else {
+        format!("{}:{}", host, port)
+    }
 }
 
 fn discover_local_ipv4s() -> Vec<String> {
