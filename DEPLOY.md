@@ -152,6 +152,8 @@ sudo netstat -tulpn | grep :53
 sudo systemctl stop systemd-resolved
 ```
 
+The tracked installer script `scripts/install-home-docker.sh` automatically disables the `systemd-resolved` stub listener before publishing host port `53`.
+
 ### Web UI not accessible
 ```bash
 # Check if container is running
