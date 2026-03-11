@@ -346,7 +346,14 @@ export type SettingsSummary = {
   };
 };
 
-const API_BASE = import.meta.env.VITE_COGWHEEL_API_BASE ?? "http://127.0.0.1:8080";
+const API_BASE = import.meta.env.VITE_COGWHEEL_API_BASE ?? (typeof window !== "undefined" ? window.location.origin : "http://127.0.0.1:8080");
+
+export type ResolverAccessStatus = {
+  hostname: string | null;
+  dns_targets: string[];
+  tailscale_ip: string | null;
+  notes: string[];
+};
 
 async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
@@ -489,6 +496,7 @@ export const api = {
       method: "POST",
     }),
   tailscaleDnsCheck: () => fetchJson<TailscaleDnsCheckResult>("/api/v1/tailscale/dns-check"),
+  resolverAccess: () => fetchJson<ResolverAccessStatus>("/api/v1/resolver-access"),
   falsePositiveBudget: () =>
     fetchJson<FalsePositiveBudgetStatus>("/api/v1/false-positive-budget"),
   latencyBudget: () => fetchJson<LatencyBudgetStatus>("/api/v1/latency-budget"),

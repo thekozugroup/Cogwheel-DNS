@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { RefreshCw, Undo2 } from "lucide-react";
-import { api, type AuditEvent, type BlockProfileRecord, type DashboardSummary, type FederatedLearningSettings, type LatencyBudgetStatus, type SettingsSummary, type SyncNodeStatus, type TailscaleDnsCheckResult, type TailscaleStatus, type ThreatIntelSettings } from "@/lib/api";
+import { api, type AuditEvent, type BlockProfileRecord, type DashboardSummary, type FederatedLearningSettings, type LatencyBudgetStatus, type ResolverAccessStatus, type SettingsSummary, type SyncNodeStatus, type TailscaleDnsCheckResult, type TailscaleStatus, type ThreatIntelSettings } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
@@ -124,6 +123,13 @@ const emptyLatencyBudget: LatencyBudgetStatus = {
   recommendations: [],
 };
 
+const emptyResolverAccess: ResolverAccessStatus = {
+  hostname: null,
+  dns_targets: [],
+  tailscale_ip: null,
+  notes: [],
+};
+
 const emptyBlockProfileDraft: BlockProfileRecord = {
   id: "",
   emoji: "🧩",
@@ -143,6 +149,7 @@ export default function App() {
   const [threatIntelSettings, setThreatIntelSettings] = useState<ThreatIntelSettings>(emptyThreatIntelSettings);
   const [federatedLearningSettings, setFederatedLearningSettings] = useState<FederatedLearningSettings>(emptyFederatedLearningSettings);
   const [latencyBudget, setLatencyBudget] = useState<LatencyBudgetStatus>(emptyLatencyBudget);
+  const [resolverAccess, setResolverAccess] = useState<ResolverAccessStatus>(emptyResolverAccess);
   const [state, setState] = useState<LoadState>("idle");
   const [error, setError] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -190,7 +197,7 @@ export default function App() {
     setState("loading");
     setError(null);
     try {
-      const [dashboardData, settingsData, syncStatusData, tailscaleData, tailscaleDns, threatIntelData, federatedLearningData, latencyBudgetData] = await Promise.all([
+      const [dashboardData, settingsData, syncStatusData, tailscaleData, tailscaleDns, threatIntelData, federatedLearningData, latencyBudgetData, resolverAccessData] = await Promise.all([
         api.dashboard(notificationAnalyticsWindow, notificationHistoryWindow),
         api.settings(),
         api.syncStatus(),
@@ -199,6 +206,7 @@ export default function App() {
         api.threatIntelProviders(),
         api.federatedLearningStatus(),
         api.latencyBudget(),
+        api.resolverAccess(),
       ]);
       localStorage.setItem("cogwheel_dashboard_cache", JSON.stringify(dashboardData));
       localStorage.setItem("cogwheel_settings_cache", JSON.stringify(settingsData));
@@ -208,6 +216,7 @@ export default function App() {
       localStorage.setItem("cogwheel_threat_intel_cache", JSON.stringify(threatIntelData));
       localStorage.setItem("cogwheel_federated_learning_cache", JSON.stringify(federatedLearningData));
       localStorage.setItem("cogwheel_latency_budget_cache", JSON.stringify(latencyBudgetData));
+      localStorage.setItem("cogwheel_resolver_access_cache", JSON.stringify(resolverAccessData));
       setDashboard(dashboardData);
       setSettings(settingsData);
       setSyncStatus(syncStatusData);
@@ -216,6 +225,7 @@ export default function App() {
       setThreatIntelSettings(threatIntelData);
       setFederatedLearningSettings(federatedLearningData);
       setLatencyBudget(latencyBudgetData);
+      setResolverAccess(resolverAccessData);
       setState("ready");
     } catch (loadError) {
       const cachedDashboard = localStorage.getItem("cogwheel_dashboard_cache");
@@ -226,8 +236,9 @@ export default function App() {
       const cachedThreatIntel = localStorage.getItem("cogwheel_threat_intel_cache");
       const cachedFederatedLearning = localStorage.getItem("cogwheel_federated_learning_cache");
       const cachedLatencyBudget = localStorage.getItem("cogwheel_latency_budget_cache");
+      const cachedResolverAccess = localStorage.getItem("cogwheel_resolver_access_cache");
 
-      if (cachedDashboard && cachedSettings && cachedSyncStatus && cachedTailscale && cachedTailscaleDns && cachedThreatIntel && cachedFederatedLearning && cachedLatencyBudget) {
+      if (cachedDashboard && cachedSettings && cachedSyncStatus && cachedTailscale && cachedTailscaleDns && cachedThreatIntel && cachedFederatedLearning && cachedLatencyBudget && cachedResolverAccess) {
         try {
           setDashboard(JSON.parse(cachedDashboard) as DashboardSummary);
           setSettings(JSON.parse(cachedSettings) as SettingsSummary);
@@ -237,6 +248,7 @@ export default function App() {
           setThreatIntelSettings(JSON.parse(cachedThreatIntel) as ThreatIntelSettings);
           setFederatedLearningSettings(JSON.parse(cachedFederatedLearning) as FederatedLearningSettings);
           setLatencyBudget(JSON.parse(cachedLatencyBudget) as LatencyBudgetStatus);
+          setResolverAccess(JSON.parse(cachedResolverAccess) as ResolverAccessStatus);
           setState("ready");
           pushToast("Working offline", "Showing cached data while the server is unreachable.", "info");
           return;
@@ -1055,14 +1067,6 @@ export default function App() {
             ) : (
               <Button variant="ghost" onClick={() => void handlePauseRuntime(10)} disabled={busyAction === "pause-runtime"}>Pause 10m</Button>
             )}
-            <Button variant="secondary" onClick={() => void handleRefreshSources()} disabled={busyAction === "refresh-sources"}>
-              <RefreshCw className="mr-2 size-4" />
-              Refresh statistics
-            </Button>
-            <Button variant="ghost" onClick={() => void handleRollbackRuleset()} disabled={busyAction === "rollback-ruleset"}>
-              <Undo2 className="mr-2 size-4" />
-              Roll back
-            </Button>
           </div>
         </div>
 
@@ -1134,36 +1138,31 @@ export default function App() {
       {error ? <Card className="border-accent/30 bg-accent/10 text-accent-foreground">{error}</Card> : null}
 
       <section className="grid gap-6 lg:grid-cols-[1fr_1fr]">
-        <Card id="guided-recovery">
-          <CardTitle>Quick actions</CardTitle>
-          <CardDescription>Only the most relevant recovery and maintenance actions stay on the overview page.</CardDescription>
+        <Card id="resolver-access">
+          <CardTitle>How to connect devices</CardTitle>
+          <CardDescription>Use one of these DNS targets on phones, laptops, TVs, or routers that should use this Cogwheel instance.</CardDescription>
           <div className="mt-5 grid gap-3">
-            {recoveryActions.slice(0, 2).map((item) => (
-              <div key={item.title} className="rounded-[24px] border border-border/70 bg-white/80 p-4">
-                <div className="font-medium">{item.title}</div>
-                <div className="mt-1 text-sm text-muted-foreground">{item.detail}</div>
-                <div className="mt-3">
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => {
-                      if (item.actionKey === "runtime-health-check") {
-                        void handleRuntimeHealthCheck();
-                        return;
-                      }
-                      if (item.actionKey === "rollback-ruleset") {
-                        void handleRollbackRuleset();
-                        return;
-                      }
-                      void handleRefreshSources();
-                    }}
-                    disabled={item.disabled}
-                  >
-                    {item.actionLabel}
-                  </Button>
-                </div>
+            {resolverAccess.dns_targets.length === 0 ? (
+              <div className="rounded-2xl border border-dashed border-border/80 bg-muted/30 p-4 text-sm text-muted-foreground">
+                Resolver targets will appear here once the control plane reports reachable DNS addresses.
               </div>
-            ))}
+            ) : (
+              resolverAccess.dns_targets.map((target) => (
+                <div key={target} className="rounded-2xl border border-border/70 bg-white/80 p-4 text-sm">
+                  <div className="text-muted-foreground">DNS server</div>
+                  <div className="mt-1 font-mono text-base font-semibold text-foreground">{target}</div>
+                </div>
+              ))
+            )}
+            <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
+              <div className="text-muted-foreground">Tailscale</div>
+              <div className="mt-1 font-medium text-foreground">{resolverAccess.tailscale_ip ?? "Not available on this node"}</div>
+            </div>
+            {resolverAccess.notes.length > 0 ? (
+              <div className="rounded-2xl border border-dashed border-border/70 bg-background/80 p-4 text-sm text-muted-foreground">
+                {resolverAccess.notes.join(" ")}
+              </div>
+            ) : null}
           </div>
         </Card>
 
@@ -1206,17 +1205,19 @@ export default function App() {
         </Card>
 
         <Card>
-          <CardTitle>Notification health</CardTitle>
-          <CardDescription>Delivery status stays visible here while detailed controls live in Settings.</CardDescription>
-          <div className="mt-5 grid gap-3 sm:grid-cols-2">
-            <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
-              <div className="text-muted-foreground">Delivered</div>
-              <div className="mt-1 text-2xl font-semibold text-foreground">{dashboard.notification_health.delivered_count}</div>
-            </div>
-            <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
-              <div className="text-muted-foreground">Failed</div>
-              <div className="mt-1 text-2xl font-semibold text-foreground">{dashboard.notification_health.failed_count}</div>
-            </div>
+          <CardTitle>Latency budgets</CardTitle>
+          <CardDescription>Live hot-path budget checks after the latest traffic observed by this resolver.</CardDescription>
+          <div className="mt-5 grid gap-3 sm:grid-cols-3">
+            {latencyBudget.checks.map((check) => (
+              <div key={check.label} className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="font-medium text-foreground">{check.label}</div>
+                  <Badge>{check.status}</Badge>
+                </div>
+                <div className="mt-2 text-xl font-semibold text-foreground">{check.observed_ms.toFixed(3)} ms</div>
+                <div className="mt-1 text-xs text-muted-foreground">Target {check.target_p50_ms.toFixed(1)} ms • {check.sample_count} samples</div>
+              </div>
+            ))}
           </div>
         </Card>
       </section>

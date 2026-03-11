@@ -33,6 +33,7 @@ use prometheus_client::metrics::counter::Counter;
 use prometheus_client::registry::Registry;
 use reqwest::Client;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex, RwLock};
@@ -58,6 +59,7 @@ struct ServerState {
     runtime_guard: RuntimeGuardConfig,
     sync_seen_nonces: Arc<Mutex<HashMap<String, chrono::DateTime<chrono::Utc>>>>,
     rate_limiter: Arc<RateLimiter>,
+    dns_udp_bind_addr: SocketAddr,
 }
 
 #[derive(Clone)]
@@ -633,6 +635,7 @@ async fn main() -> Result<()> {
         runtime_guard: config.runtime_guard,
         sync_seen_nonces: Arc::new(Mutex::new(HashMap::new())),
         rate_limiter: Arc::new(RateLimiter::new(100, 60)),
+        dns_udp_bind_addr: config.server.dns_udp_bind_addr,
     };
     if let Err(error) = warm_runtime_policy_catalog(&app_state).await {
         tracing::warn!(%error, "failed to warm runtime policy catalog on startup");
@@ -791,6 +794,7 @@ fn admin_router() -> Router<ServerState> {
         )
         .route("/api/v1/runtime/pause", post(pause_runtime))
         .route("/api/v1/runtime/resume", post(resume_runtime))
+        .route("/api/v1/resolver-access", get(resolver_access_status))
         .route(
             "/api/v1/false-positive-budget",
             get(false_positive_budget_status),
@@ -2968,6 +2972,14 @@ struct LatencyBudgetStatus {
     recommendations: Vec<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+struct ResolverAccessStatus {
+    hostname: Option<String>,
+    dns_targets: Vec<String>,
+    tailscale_ip: Option<String>,
+    notes: Vec<String>,
+}
+
 async fn false_positive_budget_status(
     State(state): State<ServerState>,
 ) -> Result<Json<ApiEnvelope<FalsePositiveBudgetStatus>>, axum::http::StatusCode> {
@@ -3102,6 +3114,105 @@ fn latency_budget_check(
         sample_count,
         status: status.to_string(),
     }
+}
+
+async fn resolver_access_status(
+    State(state): State<ServerState>,
+) -> Result<Json<ApiEnvelope<ResolverAccessStatus>>, axum::http::StatusCode> {
+    let dns_targets = discover_dns_targets(state.dns_udp_bind_addr);
+    let tailscale_ip = discover_tailscale_ipv4();
+    let hostname = std::env::var("HOSTNAME")
+        .ok()
+        .or_else(|| read_command_output("hostname", &[]));
+
+    let mut notes = vec![format!(
+        "Point devices at port {} for DNS on this deployment.",
+        state.dns_udp_bind_addr.port()
+    )];
+    if tailscale_ip.is_some() {
+        notes.push(
+            "Tailscale is available, so tailnet devices can use the Tailscale address directly."
+                .to_string(),
+        );
+    }
+
+    Ok(Json(ApiEnvelope {
+        data: ResolverAccessStatus {
+            hostname,
+            dns_targets,
+            tailscale_ip,
+            notes,
+        },
+    }))
+}
+
+fn discover_dns_targets(bind_addr: SocketAddr) -> Vec<String> {
+    let port = bind_addr.port();
+    let mut targets = Vec::new();
+
+    if bind_addr.ip().is_unspecified() {
+        for ip in discover_local_ipv4s() {
+            targets.push(format!("{}:{}", ip, port));
+        }
+    } else {
+        targets.push(format!("{}:{}", bind_addr.ip(), port));
+    }
+
+    if targets.is_empty() {
+        targets.push(format!("127.0.0.1:{}", port));
+    }
+
+    targets.sort();
+    targets.dedup();
+    targets
+}
+
+fn discover_local_ipv4s() -> Vec<String> {
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(output) = read_command_output("hostname", &["-I"]) {
+            return output
+                .split_whitespace()
+                .filter(|value| value.parse::<std::net::Ipv4Addr>().is_ok())
+                .map(ToString::to_string)
+                .collect();
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut values = Vec::new();
+        for interface in ["en0", "en1"] {
+            if let Some(ip) = read_command_output("ipconfig", &["getifaddr", interface]) {
+                values.push(ip);
+            }
+        }
+        if !values.is_empty() {
+            return values;
+        }
+    }
+
+    Vec::new()
+}
+
+fn discover_tailscale_ipv4() -> Option<String> {
+    read_command_output("tailscale", &["ip", "-4"]).and_then(|output| {
+        output
+            .lines()
+            .map(str::trim)
+            .find(|line| line.parse::<std::net::Ipv4Addr>().is_ok())
+            .map(ToString::to_string)
+    })
+}
+
+fn read_command_output(command: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new(command).args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() { None } else { Some(value) }
 }
 
 async fn runtime_snapshot(
