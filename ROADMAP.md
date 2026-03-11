@@ -344,8 +344,8 @@ Goal: Make the control plane feel approachable for a household first, while keep
 
 - [x] Add overview-first navigation with quick health and recent domain activity visuals.
 - [x] Add block profiles page with emoji, friendly naming, list composition, and save/edit flows.
-- [ ] Add devices page with clear labeling and profile assignment.
-- [ ] Move advanced sync, recovery, and operator controls into a dedicated settings page.
+- [x] Add devices page with clear labeling and profile assignment.
+- [x] Move advanced sync, recovery, and operator controls into a dedicated settings page.
 
 ## Phase 10 - Android Companion App
 

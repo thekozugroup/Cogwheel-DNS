@@ -2510,24 +2510,467 @@ export default function App() {
             </div>
           </Card>
         </section>
+      ) : activePage === "devices" ? (
+        <section className="grid gap-6 lg:grid-cols-[1.05fr_0.95fr]">
+          <Card id="devices-page">
+            <CardTitle>Devices</CardTitle>
+            <CardDescription>Give each device a clear name, then decide whether it keeps the household default or receives a saved profile.</CardDescription>
+            <div className="mt-5 grid gap-4">
+              <div className="grid gap-3 md:grid-cols-2">
+                <Input value={deviceName} onChange={(event) => setDeviceName(event.target.value)} placeholder="Kitchen iPad" />
+                <Input value={deviceIpAddress} onChange={(event) => setDeviceIpAddress(event.target.value)} placeholder="192.168.1.42" />
+              </div>
+              <div className="grid gap-3 md:grid-cols-4">
+                <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={devicePolicyMode} onChange={(event) => setDevicePolicyMode(event.target.value as "global" | "custom")}>
+                  <option value="global">Household default</option>
+                  <option value="custom">Custom assignment</option>
+                </select>
+                <select
+                  className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm"
+                  value={deviceProfileOverride}
+                  onChange={(event) => setDeviceProfileOverride(event.target.value)}
+                  disabled={devicePolicyMode !== "custom"}
+                >
+                  <option value="">Choose a saved profile</option>
+                  {settings.block_profiles.map((profile) => (
+                    <option key={profile.id} value={profile.name}>{profile.emoji} {profile.name}</option>
+                  ))}
+                </select>
+                <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={deviceProtectionOverride} onChange={(event) => setDeviceProtectionOverride(event.target.value as "inherit" | "bypass")} disabled={devicePolicyMode !== "custom"}>
+                  <option value="inherit">Keep blocking on</option>
+                  <option value="bypass">Bypass blocking</option>
+                </select>
+                <Input
+                  value={deviceAllowedDomains}
+                  onChange={(event) => setDeviceAllowedDomains(event.target.value)}
+                  placeholder="school.site, printer.local"
+                  disabled={devicePolicyMode !== "custom"}
+                />
+              </div>
+              <div className="grid gap-3 md:grid-cols-[1fr_160px_auto]">
+                <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={deviceServiceOverrideId} onChange={(event) => setDeviceServiceOverrideId(event.target.value)} disabled={devicePolicyMode !== "custom"}>
+                  <option value="">Select service override</option>
+                  {settings.services.map((service) => (
+                    <option key={service.manifest.service_id} value={service.manifest.service_id}>
+                      {service.manifest.display_name}
+                    </option>
+                  ))}
+                </select>
+                <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={deviceServiceOverrideMode} onChange={(event) => setDeviceServiceOverrideMode(event.target.value as "allow" | "block")} disabled={devicePolicyMode !== "custom"}>
+                  <option value="allow">Allow service</option>
+                  <option value="block">Block service</option>
+                </select>
+                <Button variant="ghost" onClick={addDeviceServiceOverride} disabled={devicePolicyMode !== "custom" || !deviceServiceOverrideId || deviceServiceOverrideIsNoop}>
+                  Add service rule
+                </Button>
+              </div>
+              <div className="flex flex-wrap gap-3">
+                <Button onClick={() => void handleDeviceSubmit()} disabled={!deviceName || !deviceIpAddress || busyAction === "device-submit"}>
+                  {busyAction === "device-submit" ? "Saving..." : deviceId ? "Save device" : "Add device"}
+                </Button>
+                {deviceId ? <Button variant="ghost" onClick={resetDeviceForm}>Cancel</Button> : null}
+              </div>
+              {devicePolicyMode !== "custom" ? (
+                <div className="rounded-[24px] border border-dashed border-border/70 bg-muted/30 p-4 text-sm text-muted-foreground">
+                  This device will follow the household default until you switch it to a custom assignment.
+                </div>
+              ) : null}
+              {deviceServiceOverrideId && deviceServiceOverridePreview ? (
+                <div className="rounded-[24px] border border-border/70 bg-white/80 p-4 text-sm">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <div className="font-medium">{deviceServiceOverridePreview.displayName}</div>
+                      <div className="mt-1 text-muted-foreground">{deviceServiceOverridePreview.riskNotes}</div>
+                    </div>
+                    <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
+                      <Badge>{deviceServiceOverrideMode}</Badge>
+                      <Badge>{deviceServiceOverridePreview.category}</Badge>
+                      <Badge>{deviceServiceOverridePreview.domains.length} domains</Badge>
+                    </div>
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {deviceServiceOverridePreview.sampleDomains.map((domain) => (
+                      <Badge key={domain}>{domain}</Badge>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+              {deviceServiceOverrides.length > 0 ? (
+                <div className="flex flex-wrap gap-2">
+                  {deviceServiceOverrides.map((override) => (
+                    <button key={`${override.service_id}-${override.mode}`} type="button" title={describeDeviceServiceOverride(override.service_id)} className="rounded-full border border-border/70 bg-muted/40 px-3 py-1 text-xs text-muted-foreground" onClick={() => removeDeviceServiceOverride(override.service_id)}>
+                      {formatDeviceServiceOverride(override.service_id, override.mode)} x
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          </Card>
+
+          <div className="grid gap-6">
+            <Card>
+              <CardTitle>Saved devices</CardTitle>
+              <CardDescription>Detected and named devices stay easy to scan, edit, and reassign.</CardDescription>
+              <div className="mt-5 grid gap-3">
+                {settings.devices.length === 0 ? (
+                  <div className="rounded-[24px] border border-dashed border-border/70 bg-muted/30 p-5 text-sm text-muted-foreground">
+                    No devices have been named yet. Start with the devices the household will recognize fastest.
+                  </div>
+                ) : (
+                  settings.devices.map((device) => (
+                    <div key={device.id} className="rounded-[24px] border border-border/70 bg-white/80 p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <div className="font-medium">{device.name}</div>
+                          <div className="text-sm text-muted-foreground">{device.ip_address}</div>
+                        </div>
+                        <Badge>{device.policy_mode === "custom" ? "Custom" : "Default"}</Badge>
+                      </div>
+                      <div className="mt-3 flex flex-wrap gap-2 text-xs text-muted-foreground">
+                        <Badge>{device.blocklist_profile_override ?? "Household default"}</Badge>
+                        <Badge>{device.protection_override === "bypass" ? "Bypass enabled" : "Blocking on"}</Badge>
+                        <Badge>{device.allowed_domains.length} allowlisted</Badge>
+                        <Badge>{device.service_overrides.length} service rules</Badge>
+                      </div>
+                      <div className="mt-4">
+                        <Button variant="ghost" size="sm" onClick={() => startDeviceEdit(device)}>
+                          Edit device
+                        </Button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </Card>
+
+            <Card>
+              <CardTitle>Assignment help</CardTitle>
+              <CardDescription>Use friendly names from saved block profiles so the household can tell what each device is using at a glance.</CardDescription>
+              <div className="mt-5 grid gap-3 text-sm text-muted-foreground">
+                {settings.block_profiles.length === 0 ? (
+                  <div className="rounded-[24px] border border-dashed border-border/70 bg-muted/30 p-4">
+                    Create a block profile first, then come back here to assign it to a device.
+                  </div>
+                ) : (
+                  settings.block_profiles.map((profile) => (
+                    <div key={profile.id} className="rounded-[24px] border border-border/70 bg-muted/40 p-4">
+                      <div className="font-medium text-foreground">{profile.emoji} {profile.name}</div>
+                      <div className="mt-1">{profile.description}</div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </Card>
+          </div>
+        </section>
       ) : (
-        <section className="grid gap-6 lg:grid-cols-[0.95fr_1.05fr]">
+        <section className="grid gap-6">
           <Card>
-            <CardTitle>{navItems.find((item) => item.id === activePage)?.label}</CardTitle>
-            <CardDescription>{navItems.find((item) => item.id === activePage)?.detail}</CardDescription>
-            <div className="mt-5 rounded-[24px] border border-border/70 bg-white/80 p-5 text-sm text-muted-foreground">
-              This guided page is the next step in the refinement pass. The existing controls remain available under Overview while the dedicated flow is being carved out cleanly.
+            <CardTitle>Settings</CardTitle>
+            <CardDescription>Technical controls live here: syncing, Tailscale, alerts, blocklists, recovery, and operator visibility.</CardDescription>
+            <div className="mt-5 grid gap-4 lg:grid-cols-2">
+              <div className="rounded-[24px] border border-border/70 bg-muted/40 p-4 text-sm">
+                <div className="font-medium">Sync and replication</div>
+                <div className="mt-2 grid gap-2 text-muted-foreground">
+                  <div>Profile: <span className="font-medium text-foreground">{syncStatus.profile}</span></div>
+                  <div>Revision: <span className="font-medium text-foreground">{syncStatus.revision}</span></div>
+                  <div>Peers: <span className="font-medium text-foreground">{syncStatus.peers.length}</span></div>
+                </div>
+                <div className="mt-4 grid gap-3 sm:grid-cols-[1fr_auto]">
+                  <select className="h-10 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={syncProfileDraft} onChange={(event) => setSyncProfileDraft(event.target.value)}>
+                    <option value="full">Full replication</option>
+                    <option value="settings-only">Settings only</option>
+                    <option value="read-only-follower">Read-only follower</option>
+                  </select>
+                  <Button variant="secondary" size="sm" onClick={() => void handleSyncProfileSave()} disabled={busyAction === "sync-profile-save"}>Save profile</Button>
+                </div>
+                <div className="mt-3 grid gap-3 sm:grid-cols-[180px_1fr_auto]">
+                  <select className="h-10 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={syncTransportModeDraft} onChange={(event) => setSyncTransportModeDraft(event.target.value)}>
+                    <option value="opportunistic">Opportunistic</option>
+                    <option value="https-required">HTTPS required</option>
+                  </select>
+                  <Input value={syncTransportTokenDraft} onChange={(event) => setSyncTransportTokenDraft(event.target.value)} placeholder={syncStatus.transport_token_configured ? "Set new token or leave blank to clear" : "Optional bearer token"} />
+                  <Button variant="secondary" size="sm" onClick={() => void handleSyncTransportSave()} disabled={busyAction === "sync-transport-save"}>Save transport</Button>
+                </div>
+              </div>
+              <div className="rounded-[24px] border border-border/70 bg-muted/40 p-4 text-sm">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="font-medium">Tailscale</div>
+                  <Badge>{tailscaleStatus.exit_node_active ? "Exit node active" : tailscaleStatus.installed ? "Installed" : "Not installed"}</Badge>
+                </div>
+                <div className="mt-2 grid gap-2 text-muted-foreground">
+                  <div>Host: <span className="font-medium text-foreground">{tailscaleStatus.hostname ?? "-"}</span></div>
+                  <div>Tailnet: <span className="font-medium text-foreground">{tailscaleStatus.tailnet_name ?? "-"}</span></div>
+                  <div>Peers: <span className="font-medium text-foreground">{tailscaleStatus.peer_count}</span></div>
+                </div>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <Button variant={tailscaleStatus.exit_node_active ? "ghost" : "secondary"} size="sm" onClick={() => void handleTailscaleExitNodeToggle()} disabled={busyAction === "tailscale-exit-node"}>
+                    {busyAction === "tailscale-exit-node" ? "Updating..." : tailscaleStatus.exit_node_active ? "Disable exit node" : "Enable exit node"}
+                  </Button>
+                  <Button variant="ghost" size="sm" onClick={() => void handleTailscaleRollback()} disabled={busyAction === "tailscale-rollback"}>
+                    {busyAction === "tailscale-rollback" ? "Rolling back..." : "Roll back"}
+                  </Button>
+                </div>
+                {tailscaleDnsCheck.suggestions.length > 0 ? (
+                  <div className="mt-3 rounded-lg bg-blue-50 px-3 py-2 text-xs text-blue-800">{tailscaleDnsCheck.message}</div>
+                ) : null}
+              </div>
             </div>
           </Card>
-          <Card>
-            <CardTitle>What lands next</CardTitle>
-            <CardDescription>The follow-up iterations will replace the old control-wall with friendlier task-focused screens.</CardDescription>
-            <div className="mt-5 grid gap-3 text-sm text-muted-foreground">
-              <div className="rounded-[24px] border border-border/70 bg-muted/40 p-4">Block profiles will get emoji, name, list composition, and save/edit flows.</div>
-              <div className="rounded-[24px] border border-border/70 bg-muted/40 p-4">Devices will get naming, discovery, and profile assignment in one place.</div>
-              <div className="rounded-[24px] border border-border/70 bg-muted/40 p-4">Technical controls like sync, recovery, and operator feeds will move into Settings.</div>
+
+          <section className="grid gap-6 lg:grid-cols-[1.15fr_0.85fr]">
+            <Card id="settings-page-core">
+              <CardTitle>Policy and notifications</CardTitle>
+              <CardDescription>Core controls for classifier behavior, alerts, feeds, and imported lists.</CardDescription>
+              <div className="mt-6 space-y-5">
+                <section className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="font-medium">Classifier mode</div>
+                      <div className="text-sm text-muted-foreground">Persisted directly in the backend control plane.</div>
+                    </div>
+                    <Badge>{settings.classifier.mode}</Badge>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {(["Off", "Monitor", "Protect"] as const).map((mode) => (
+                      <Button key={mode} variant={settings.classifier.mode === mode ? "primary" : "secondary"} size="sm" onClick={() => void handleClassifierUpdate(mode)} disabled={busyAction === `classifier-mode-${mode}`}>
+                        {mode}
+                      </Button>
+                    ))}
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
+                    <Input value={classifierThreshold} onChange={(event) => setClassifierThreshold(event.target.value)} placeholder="0.92" />
+                    <Button variant="secondary" onClick={() => void handleClassifierThresholdSave()} disabled={busyAction === "classifier-threshold"}>Save threshold</Button>
+                  </div>
+                </section>
+
+                <Separator />
+
+                <section className="space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="font-medium">Alert delivery</div>
+                      <div className="text-sm text-muted-foreground">Send high-severity security alerts to an external webhook.</div>
+                    </div>
+                    <Badge>{notificationEnabled ? `Webhook ${notificationMinSeverity}+` : "Disabled"}</Badge>
+                  </div>
+                  <label className="flex items-center gap-3 rounded-2xl border border-border/70 bg-muted/40 px-4 py-3 text-sm">
+                    <input type="checkbox" checked={notificationEnabled} onChange={(event) => setNotificationEnabled(event.target.checked)} />
+                    Enable outbound alert notifications
+                  </label>
+                  <div className="grid gap-3 sm:grid-cols-[1fr_170px_auto]">
+                    <Input value={notificationWebhookUrl} onChange={(event) => setNotificationWebhookUrl(event.target.value)} placeholder="https://hooks.example.com/cogwheel" />
+                    <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={notificationMinSeverity} onChange={(event) => setNotificationMinSeverity(event.target.value as "medium" | "high" | "critical")}>
+                      <option value="medium">Medium+</option>
+                      <option value="high">High+</option>
+                      <option value="critical">Critical only</option>
+                    </select>
+                    <div className="flex gap-2">
+                      <Button variant="secondary" onClick={() => void handleNotificationSave()} disabled={busyAction === "notifications-save"}>Save alerts</Button>
+                      <Button variant="ghost" onClick={() => void handleNotificationTest()} disabled={busyAction === "notifications-test" || !notificationWebhookUrl}>Send test</Button>
+                    </div>
+                  </div>
+                </section>
+
+                <Separator />
+
+                <section className="space-y-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="font-medium">Optional intelligence feeds</div>
+                      <div className="text-sm text-muted-foreground">Keep enrichment providers off the DNS hot path and enable them only when needed.</div>
+                    </div>
+                    <Badge>{threatIntelSettings.providers.filter((provider) => provider.enabled).length} enabled</Badge>
+                  </div>
+                  <div className="grid gap-3">
+                    {threatIntelSettings.providers.map((provider) => (
+                      <div key={provider.id} className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <div className="font-medium">{provider.display_name}</div>
+                            <div className="mt-1 text-xs text-muted-foreground">{provider.capabilities.join(" • ")}</div>
+                          </div>
+                          <Badge className={provider.enabled ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground"}>{provider.enabled ? "Enabled" : "Disabled"}</Badge>
+                        </div>
+                        <div className="mt-3 grid gap-3 sm:grid-cols-[1fr_180px_auto]">
+                          <Input value={provider.feed_url ?? ""} onChange={(event) => setThreatIntelSettings((current) => ({ ...current, providers: current.providers.map((item) => item.id === provider.id ? { ...item, feed_url: event.target.value || null } : item) }))} placeholder="https://feed.example.invalid/dns" />
+                          <Input value={String(provider.update_interval_minutes)} onChange={(event) => {
+                            const nextValue = Number.parseInt(event.target.value, 10);
+                            setThreatIntelSettings((current) => ({
+                              ...current,
+                              providers: current.providers.map((item) => item.id === provider.id ? { ...item, update_interval_minutes: Number.isNaN(nextValue) ? item.update_interval_minutes : nextValue } : item),
+                            }));
+                          }} placeholder="60" />
+                          <Button variant="secondary" size="sm" onClick={() => void handleThreatIntelProviderSave(provider.id)} disabled={busyAction === `threat-intel-${provider.id}`}>{busyAction === `threat-intel-${provider.id}` ? "Saving..." : "Save"}</Button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+
+                <Separator />
+
+                <section className="space-y-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="font-medium">Federated learning</div>
+                      <div className="text-sm text-muted-foreground">Share model updates only. Raw logs stay local.</div>
+                    </div>
+                    <Badge>{federatedLearningSettings.enabled ? federatedLearningSettings.privacy_mode : "Disabled"}</Badge>
+                  </div>
+                  <label className="flex items-center gap-3 rounded-2xl border border-border/70 bg-muted/40 px-4 py-3 text-sm">
+                    <input type="checkbox" checked={federatedLearningSettings.enabled} onChange={(event) => setFederatedLearningSettings((current) => ({ ...current, enabled: event.target.checked }))} />
+                    Enable federated learning coordinator sync
+                  </label>
+                  <div className="grid gap-3 sm:grid-cols-[1fr_180px_auto]">
+                    <Input value={federatedLearningSettings.coordinator_url ?? ""} onChange={(event) => setFederatedLearningSettings((current) => ({ ...current, coordinator_url: event.target.value || null }))} placeholder="https://coordinator.example.invalid" />
+                    <Input value={String(federatedLearningSettings.round_interval_hours)} onChange={(event) => {
+                      const nextValue = Number.parseInt(event.target.value, 10);
+                      setFederatedLearningSettings((current) => ({ ...current, round_interval_hours: Number.isNaN(nextValue) ? current.round_interval_hours : nextValue }));
+                    }} placeholder="24" />
+                    <Button variant="secondary" onClick={() => void handleFederatedLearningSave()} disabled={busyAction === "federated-learning-save"}>{busyAction === "federated-learning-save" ? "Saving..." : "Save"}</Button>
+                  </div>
+                </section>
+              </div>
+            </Card>
+
+            <div className="grid gap-6">
+              <Card id="settings-page-blocklists">
+                <CardTitle>Sources and services</CardTitle>
+                <CardDescription>Manage imported blocklists and common-service toggles without crowding the overview.</CardDescription>
+                <div className="mt-5 grid gap-3">
+                  <div className="rounded-[24px] border border-border/70 bg-muted/40 p-4 text-sm">
+                    <div className="font-medium">Add blocklist</div>
+                    <div className="mt-3 grid gap-3">
+                      <Input value={blocklistName} onChange={(event) => setBlocklistName(event.target.value)} placeholder="Human-readable name" />
+                      <Input value={blocklistUrl} onChange={(event) => setBlocklistUrl(event.target.value)} placeholder="Source URL or data: URL" />
+                      <div className="grid gap-3 sm:grid-cols-3">
+                        <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={blocklistProfile} onChange={(event) => setBlocklistProfile(event.target.value)}>
+                          <option value="custom">Custom</option>
+                          <option value="essential">Essential</option>
+                          <option value="balanced">Balanced</option>
+                          <option value="aggressive">Aggressive</option>
+                        </select>
+                        <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={blocklistStrictness} onChange={(event) => setBlocklistStrictness(event.target.value as "strict" | "balanced" | "relaxed")}>
+                          <option value="strict">Strict</option>
+                          <option value="balanced">Balanced</option>
+                          <option value="relaxed">Relaxed</option>
+                        </select>
+                        <Input value={blocklistInterval} onChange={(event) => setBlocklistInterval(event.target.value)} placeholder="Refresh minutes" />
+                      </div>
+                      <Button onClick={() => void handleBlocklistCreate()} disabled={!blocklistName || !blocklistUrl || busyAction === "create-blocklist"}>Add blocklist</Button>
+                    </div>
+                  </div>
+                  {settings.blocklists.map((source) => (
+                    <div key={source.id} className="rounded-[24px] border border-border/70 bg-white/80 p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <div className="font-medium">{source.name}</div>
+                          <div className="text-sm text-muted-foreground">{source.profile} • {source.refresh_interval_minutes}m</div>
+                        </div>
+                        <div className="flex gap-2">
+                          <Button variant="secondary" size="sm" onClick={() => void handleBlocklistToggle(source.id, !source.enabled)} disabled={busyAction === `blocklist-toggle-${source.id}`}>{source.enabled ? "Disable" : "Enable"}</Button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                  <Card id="services" className="p-5">
+                    <CardTitle>Services</CardTitle>
+                    <CardDescription className="mt-1">Optional curated allow/block toggles for common apps.</CardDescription>
+                    <div className="mt-4 grid gap-3">
+                      {filteredServices.slice(0, showServicesView ? filteredServices.length : 3).map((service) => (
+                        <div key={service.manifest.service_id} className="rounded-[24px] border border-border/70 bg-muted/40 p-4">
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <div className="font-medium">{service.manifest.display_name}</div>
+                              <div className="text-sm text-muted-foreground">{service.manifest.risk_notes}</div>
+                            </div>
+                            <Badge>{service.mode}</Badge>
+                          </div>
+                          <div className="mt-3 flex gap-2">
+                            {(["Inherit", "Allow", "Block"] as const).map((mode) => (
+                              <Button key={mode} variant={service.mode === mode ? "primary" : "secondary"} size="sm" onClick={() => void handleServiceUpdate(service.manifest.service_id, mode)} disabled={busyAction === `service-${service.manifest.service_id}`}>
+                                {mode}
+                              </Button>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                      {!showServicesView ? <Button variant="ghost" onClick={() => setShowServicesView(true)}>Show all services</Button> : null}
+                    </div>
+                  </Card>
+                </div>
+              </Card>
+
+              <Card>
+                <CardTitle>Recovery and operator feed</CardTitle>
+                <CardDescription>Use guided recovery, audit history, and runtime notes without cluttering the household overview.</CardDescription>
+                <div className="mt-5 space-y-5">
+                  <section className="space-y-3">
+                    <div className="font-medium">Guided recovery</div>
+                    <div className="grid gap-3">
+                      {recoveryActions.map((item) => (
+                        <div key={item.title} className="rounded-[24px] border border-border/70 bg-muted/40 p-4 text-sm">
+                          <div className="font-medium">{item.title}</div>
+                          <div className="mt-1 text-muted-foreground">{item.detail}</div>
+                          <div className="mt-3">
+                            <Button variant="secondary" size="sm" onClick={() => {
+                              if (item.actionKey === "runtime-health-check") {
+                                void handleRuntimeHealthCheck();
+                                return;
+                              }
+                              if (item.actionKey === "notifications") {
+                                setAuditEventFilter("notifications");
+                                return;
+                              }
+                              if (item.actionKey === "rollback-ruleset") {
+                                void handleRollbackRuleset();
+                                return;
+                              }
+                              void handleRefreshSources();
+                            }} disabled={item.disabled}>
+                              {item.actionLabel}
+                            </Button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                  <Separator />
+                  <section className="space-y-3">
+                    <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                      <div>
+                        <div className="font-medium">Recent audit events</div>
+                        <div className="text-sm text-muted-foreground">Filter the operator feed to focus on the control-plane changes you are investigating.</div>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {[["all", "All events"], ["runtime", "Runtime"], ["notifications", "Notifications"], ["devices", "Devices"], ["rulesets", "Rulesets"]].map(([value, label]) => (
+                          <Button key={value} variant={auditEventFilter === value ? "primary" : "ghost"} size="sm" onClick={() => setAuditEventFilter(value as "all" | "runtime" | "notifications" | "devices" | "rulesets")}>{label}</Button>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="grid gap-3">
+                      {filteredAuditEvents.slice(0, 8).map((event) => {
+                        const summary = summarizeAuditEvent(event);
+                        return (
+                          <div key={event.id} className="rounded-2xl border border-border/70 bg-muted/60 p-3 text-sm">
+                            <div className="flex items-start justify-between gap-3">
+                              <div>
+                                <div className="font-medium">{summary.title}</div>
+                                <div className="mt-1 text-xs text-muted-foreground">{event.event_type}</div>
+                              </div>
+                              <Badge>{summary.category}</Badge>
+                            </div>
+                            <div className="mt-2 text-muted-foreground">{summary.detail}</div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </section>
+                </div>
+              </Card>
             </div>
-          </Card>
+          </section>
         </section>
       )}
     </main>
