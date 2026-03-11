@@ -1360,54 +1360,12 @@ export default function App() {
                 <Input value={blockProfileDraft.name} onChange={(event) => setBlockProfileDraft((current) => ({ ...current, name: event.target.value }))} placeholder="Homework time" />
               </div>
               <Input value={blockProfileDraft.description} onChange={(event) => setBlockProfileDraft((current) => ({ ...current, description: event.target.value }))} placeholder="Short summary shown when assigning this profile to devices" />
-              <div className="rounded-[26px] border border-border/70 bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,246,243,0.9))] p-4">
-                <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
-                  <div>
-                    <div className="font-medium text-foreground">OISD presets</div>
-                    <div className="text-sm text-muted-foreground">Pick any combination except the overlapping small/full pair in the same family.</div>
-                  </div>
-                  <div className="text-xs text-muted-foreground">Core and NSFW families are kept mutually exclusive automatically.</div>
-                </div>
-                <div className="mt-4 grid gap-3 lg:grid-cols-2">
-                  {oisdProfileOptions.map((option) => {
-                    const enabled = blockProfileDraft.blocklists.some((entry) => entry.id === option.id);
-                    return (
-                    <label key={option.id} className={`rounded-[24px] border px-4 py-4 text-sm transition ${enabled ? "border-foreground bg-foreground text-background shadow-sm" : "border-border/70 bg-white/80 hover:bg-muted/30"}`}>
-                      <input
-                        type="checkbox"
-                        className="sr-only"
-                        checked={enabled}
-                        onChange={() => togglePresetBlocklist(option)}
-                      />
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <div className="font-medium">{option.name}</div>
-                          <div className={`mt-1 text-xs ${enabled ? "text-background/70" : "text-muted-foreground"}`}>{option.id.includes("nsfw") ? "Adult-content focused OISD feed." : "General-purpose OISD protection feed."}</div>
-                        </div>
-                        <Badge className={enabled ? "bg-background text-foreground" : "bg-muted text-muted-foreground"}>{option.id.includes("small") ? "small" : "full"}</Badge>
-                      </div>
-                    </label>
-                  );
-                })}
-                </div>
-              </div>
-
-              <div className="rounded-[26px] border border-border/70 bg-white/85 p-4">
-                <div className="font-medium text-foreground">Manual GitHub list</div>
-                <div className="mt-1 text-sm text-muted-foreground">Add a named list from GitHub or raw GitHub and keep it bundled with this profile.</div>
-                <div className="mt-4 grid gap-3 lg:grid-cols-[0.85fr_1.15fr_auto]">
-                  <Input value={customProfileListName} onChange={(event) => setCustomProfileListName(event.target.value)} placeholder="My family allowlist companion" />
-                  <Input value={customProfileListUrl} onChange={(event) => setCustomProfileListUrl(event.target.value)} placeholder="https://raw.githubusercontent.com/.../domains.txt" />
-                  <Button variant="secondary" onClick={addCustomBlocklistToProfile}>Add list</Button>
-                </div>
-              </div>
-
               <div className="rounded-[26px] border border-border/70 bg-muted/30 p-4">
                 <div className="font-medium text-foreground">Blocklist sources</div>
-                <div className="mt-1 text-sm text-muted-foreground">These upstream lists define what the profile blocks before device-specific exceptions are applied.</div>
+                <div className="mt-1 text-sm text-muted-foreground">These upstream lists define what the profile blocks before device-specific exceptions are applied. Add or change them from the blocklist settings card in the Settings tab.</div>
                 <div className="mt-4 grid gap-3">
                   {blockProfileDraft.blocklists.length === 0 ? (
-                    <div className="rounded-2xl border border-dashed border-border/70 bg-white/70 p-4 text-sm text-muted-foreground">Choose at least one OISD preset or add a custom GitHub list.</div>
+                    <div className="rounded-2xl border border-dashed border-border/70 bg-white/70 p-4 text-sm text-muted-foreground">Choose at least one OISD preset or add a custom GitHub list from Settings.</div>
                   ) : (
                     blockProfileDraft.blocklists.map((list) => (
                       <div key={list.id} className="flex flex-col gap-3 rounded-2xl border border-border/70 bg-white/85 p-4 sm:flex-row sm:items-center sm:justify-between">
@@ -1931,6 +1889,55 @@ export default function App() {
                       </div>
                     </div>
                   ))}
+                  <div className="rounded-[24px] border border-border/70 bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,246,243,0.9))] p-4 text-sm">
+                    <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
+                      <div>
+                        <div className="font-medium text-foreground">Profile blocklist sources</div>
+                        <div className="text-muted-foreground">These OISD and GitHub-managed lists belong to the selected block profile, not the whole node.</div>
+                      </div>
+                      <div className="text-xs text-muted-foreground">Editing profile: <span className="font-medium text-foreground">{blockProfileDraft.name || "New profile"}</span></div>
+                    </div>
+                    <div className="mt-4 rounded-2xl border border-border/70 bg-white/80 p-4">
+                      <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
+                        <div>
+                          <div className="font-medium text-foreground">OISD presets</div>
+                          <div className="text-sm text-muted-foreground">Pick any combination except the overlapping small/full pair in the same family.</div>
+                        </div>
+                        <div className="text-xs text-muted-foreground">Core and NSFW families are kept mutually exclusive automatically.</div>
+                      </div>
+                      <div className="mt-4 grid gap-3 lg:grid-cols-2">
+                        {oisdProfileOptions.map((option) => {
+                          const enabled = blockProfileDraft.blocklists.some((entry) => entry.id === option.id);
+                          return (
+                            <label key={option.id} className={`rounded-[24px] border px-4 py-4 text-sm transition ${enabled ? "border-foreground bg-foreground text-background shadow-sm" : "border-border/70 bg-white/80 hover:bg-muted/30"}`}>
+                              <input
+                                type="checkbox"
+                                className="sr-only"
+                                checked={enabled}
+                                onChange={() => togglePresetBlocklist(option)}
+                              />
+                              <div className="flex items-start justify-between gap-3">
+                                <div>
+                                  <div className="font-medium">{option.name}</div>
+                                  <div className={`mt-1 text-xs ${enabled ? "text-background/70" : "text-muted-foreground"}`}>{option.id.includes("nsfw") ? "Adult-content focused OISD feed." : "General-purpose OISD protection feed."}</div>
+                                </div>
+                                <Badge className={enabled ? "bg-background text-foreground" : "bg-muted text-muted-foreground"}>{option.id.includes("small") ? "small" : "full"}</Badge>
+                              </div>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+                    <div className="mt-4 rounded-2xl border border-border/70 bg-white/80 p-4">
+                      <div className="font-medium text-foreground">Manual GitHub list</div>
+                      <div className="mt-1 text-sm text-muted-foreground">Add a named list from GitHub or raw GitHub and bundle it into the selected profile.</div>
+                      <div className="mt-4 grid gap-3 lg:grid-cols-[0.85fr_1.15fr_auto]">
+                        <Input value={customProfileListName} onChange={(event) => setCustomProfileListName(event.target.value)} placeholder="My family blocklist companion" />
+                        <Input value={customProfileListUrl} onChange={(event) => setCustomProfileListUrl(event.target.value)} placeholder="https://raw.githubusercontent.com/.../domains.txt" />
+                        <Button variant="secondary" onClick={addCustomBlocklistToProfile}>Add list</Button>
+                      </div>
+                    </div>
+                  </div>
                   <Card id="services" className="p-5">
                     <CardTitle>Services</CardTitle>
                     <CardDescription className="mt-1">Optional curated allow/block toggles for common apps.</CardDescription>

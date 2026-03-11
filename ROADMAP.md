@@ -349,6 +349,7 @@ Goal: Make the control plane feel approachable for a household first, while keep
 - [x] Polish navigation and overview layout into a simpler dashboard-first household view.
 - [x] Refresh the responsive shell and redesign block profiles around OISD list selection plus manual GitHub lists.
 - [x] Move classifier visuals and stats into a dedicated Grease-AI surface.
+- [x] Nest profile source selection under blocklist settings so OISD and manual GitHub lists read as blocklist controls.
 
 ## Phase 10 - Android Companion App
 
