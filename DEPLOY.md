@@ -21,21 +21,26 @@ Since SSH password authentication is currently failing, follow these manual step
    docker run -d \
      --name cogwheel \
      --restart unless-stopped \
-     -p 53:53/udp \
-     -p 53:53/tcp \
-     -p 8080:8080 \
-     -v cogwheel_data:/app/data \
+     -p 30053:30053/udp \
+     -p 30053:30053/tcp \
+     -p 30080:30080 \
+     -e COGWHEEL_PROFILE=dev \
+     -e COGWHEEL_SERVER__HTTP_BIND_ADDR=0.0.0.0:30080 \
+     -e COGWHEEL_SERVER__DNS_UDP_BIND_ADDR=0.0.0.0:30053 \
+     -e COGWHEEL_SERVER__DNS_TCP_BIND_ADDR=0.0.0.0:30053 \
+     -e COGWHEEL_STORAGE__DATABASE_URL=sqlite:///app/data/cogwheel.db \
+     -v /home/michaelwong/cogwheel-data:/app/data \
      cogwheel:arm64
    ```
 
 3. **Verify deployment:**
    ```bash
    docker ps | grep cogwheel
-   curl http://localhost:8080/api/v1/dashboard
+   curl http://localhost:30080/api/v1/dashboard
    ```
 
 4. **Access Web UI:**
-   Open browser to: http://fractal.local:8080
+   Open browser to: http://fractal.local:30080
 
 ### Option 2: Fix SSH Authentication
 
@@ -86,17 +91,47 @@ Since SSH password authentication is currently failing, follow these manual step
    ```
 
 3. **Access Web UI:**
-   - Navigate to http://fractal.local:8080
+   - Navigate to http://fractal.local:30080
    - Verify dashboard loads
    - Check Tailscale status card
    - Test load testing endpoint
 
 4. **Test API endpoints:**
    ```bash
-   curl http://fractal.local:8080/api/v1/dashboard
-   curl http://fractal.local:8080/api/v1/tailscale/status
-   curl http://fractal.local:8080/api/v1/false-positive-budget
+   curl http://fractal.local:30080/api/v1/dashboard
+   curl http://fractal.local:30080/api/v1/tailscale/status
+   curl http://fractal.local:30080/api/v1/false-positive-budget
    ```
+
+## Rollback
+
+If a deployment update regresses DNS or the Web UI, roll back to the previous image immediately:
+
+```bash
+docker ps -a --format '{{.Image}} {{.Names}}'
+docker rm -f cogwheel
+docker run -d \
+  --name cogwheel \
+  --restart unless-stopped \
+  -p 30053:30053/udp \
+  -p 30053:30053/tcp \
+  -p 30080:30080 \
+  -e COGWHEEL_PROFILE=dev \
+  -e COGWHEEL_SERVER__HTTP_BIND_ADDR=0.0.0.0:30080 \
+  -e COGWHEEL_SERVER__DNS_UDP_BIND_ADDR=0.0.0.0:30053 \
+  -e COGWHEEL_SERVER__DNS_TCP_BIND_ADDR=0.0.0.0:30053 \
+  -e COGWHEEL_STORAGE__DATABASE_URL=sqlite:///app/data/cogwheel.db \
+  -v /home/michaelwong/cogwheel-data:/app/data \
+  <previous-image-tag>
+```
+
+Keep `/home/michaelwong/cogwheel-data` mounted so rollback preserves state. Verify rollback with:
+
+```bash
+curl http://fractal.local:30080/api/v1/dashboard
+curl -I http://fractal.local:30080/
+dig @fractal.local -p 30053 example.com +short
+```
 
 ## Troubleshooting
 
@@ -121,8 +156,8 @@ sudo systemctl stop systemd-resolved
 docker ps | grep cogwheel
 # Check firewall rules
 sudo ufw status
-# Allow port 8080 if needed
-sudo ufw allow 8080/tcp
+# Allow port 30080 if needed
+sudo ufw allow 30080/tcp
 ```
 
 ## Deployment Script (when SSH works)

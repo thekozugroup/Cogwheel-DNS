@@ -32,10 +32,12 @@ use prometheus_client::metrics::counter::Counter;
 use prometheus_client::registry::Registry;
 use reqwest::Client;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::time::interval;
+use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 use url::Url;
@@ -610,10 +612,7 @@ async fn main() -> Result<()> {
             }
         }
     });
-    let app = router(app_state.clone())
-        .merge(admin_router())
-        .with_state(app_state)
-        .layer(TraceLayer::new_for_http());
+    let app = build_http_app(app_state);
     let listener = tokio::net::TcpListener::bind(config.server.http_bind_addr)
         .await
         .context("bind http listener")?;
@@ -658,6 +657,42 @@ fn build_resolver(servers: &[String]) -> Result<TokioResolver> {
             .with_options(ResolverOpts::default())
             .build(),
     )
+}
+
+fn build_http_app(app_state: ServerState) -> Router {
+    let api_app = router(app_state.clone()).merge(admin_router());
+
+    let app = if let Some(web_dist_dir) = resolve_web_dist_dir() {
+        tracing::info!(path = %web_dist_dir.display(), "serving bundled web assets");
+        let index_path = web_dist_dir.join("index.html");
+        api_app.fallback_service(
+            ServeDir::new(web_dist_dir).not_found_service(ServeFile::new(index_path)),
+        )
+    } else {
+        tracing::warn!("web assets not found; serving API routes only");
+        api_app
+    };
+
+    app.with_state(app_state).layer(TraceLayer::new_for_http())
+}
+
+fn resolve_web_dist_dir() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Ok(path) = std::env::var("COGWHEEL_WEB_DIST_DIR") {
+        candidates.push(PathBuf::from(path));
+    }
+
+    if let Ok(current_dir) = std::env::current_dir() {
+        candidates.push(current_dir.join("apps/cogwheel-web/dist"));
+        candidates.push(current_dir.join("dist"));
+    }
+
+    candidates.push(PathBuf::from("/app/web"));
+
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.join("index.html").is_file())
 }
 
 fn admin_router() -> Router<ServerState> {
