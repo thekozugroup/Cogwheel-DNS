@@ -861,6 +861,32 @@ export default function App() {
     }
   }
 
+  async function handleBlockProfileDelete() {
+    if (!selectedBlockProfileId) {
+      pushToast("Profile required", "Choose a saved profile before deleting it.", "error");
+      return;
+    }
+
+    const profileName = blockProfileDraft.name || "This profile";
+    setBusyAction("block-profile-delete");
+    try {
+      const updatedProfiles = await api.deleteBlockProfile(selectedBlockProfileId);
+      setSettings((current) => ({ ...current, block_profiles: updatedProfiles }));
+      setCreatingNewBlockProfile(updatedProfiles.length === 0);
+      setSelectedBlockProfileId(updatedProfiles[0]?.id ?? null);
+      if (updatedProfiles.length === 0) {
+        setBlockProfileDraft({ ...emptyBlockProfileDraft, updated_at: new Date().toISOString() });
+        setBlockProfileAllowlistDraft("");
+      }
+      pushToast("Block profile deleted", `${profileName} was removed.`, "success");
+      await load();
+    } catch (mutationError) {
+      pushToast("Block profile delete failed", mutationError instanceof Error ? mutationError.message : "Unknown error", "error");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
   function startNewBlockProfile() {
     setCreatingNewBlockProfile(true);
     setSelectedBlockProfileId(null);
@@ -1486,6 +1512,11 @@ export default function App() {
                 <Button onClick={() => void handleBlockProfileSave()} disabled={busyAction === "block-profile-save"}>
                   {busyAction === "block-profile-save" ? "Saving..." : "Save profile"}
                 </Button>
+                {selectedBlockProfileId ? (
+                  <Button variant="ghost" onClick={() => void handleBlockProfileDelete()} disabled={busyAction === "block-profile-delete"}>
+                    {busyAction === "block-profile-delete" ? "Deleting..." : "Delete profile"}
+                  </Button>
+                ) : null}
                 <Button variant="ghost" onClick={startNewBlockProfile}>Clear editor</Button>
               </div>
             </div>

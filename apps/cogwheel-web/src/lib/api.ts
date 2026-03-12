@@ -463,6 +463,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify(input),
     }),
+  deleteBlockProfile: (id: string) =>
+    fetchJson<BlockProfileRecord[]>("/api/v1/settings/block-profiles/delete", {
+      method: "POST",
+      body: JSON.stringify({ id }),
+    }),
   setBlocklistEnabled: (id: string, enabled: boolean) =>
     fetchJson<{ outcome: string; notes: string[] }>("/api/v1/settings/blocklists/state", {
       method: "POST",

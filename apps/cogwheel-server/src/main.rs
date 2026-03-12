@@ -452,6 +452,11 @@ struct UpsertBlockProfileRequest {
     allowlists: Vec<String>,
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+struct DeleteBlockProfileRequest {
+    id: String,
+}
+
 #[derive(serde::Deserialize)]
 struct DeleteBlocklistRequest {
     id: Uuid,
@@ -784,6 +789,10 @@ fn admin_router() -> Router<ServerState> {
         .route(
             "/api/v1/settings/block-profiles",
             post(upsert_block_profile),
+        )
+        .route(
+            "/api/v1/settings/block-profiles/delete",
+            post(delete_block_profile),
         )
         .route("/api/v1/settings/blocklists", post(upsert_blocklist))
         .route(
@@ -4522,6 +4531,70 @@ async fn upsert_block_profile(
             payload: serde_json::to_string(&serde_json::json!({
                 "id": profile_id,
                 "name": profile_name,
+            }))
+            .map_err(|error| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    error.to_string(),
+                )
+            })?,
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .map_err(|error| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                error.to_string(),
+            )
+        })?;
+
+    Ok(Json(ApiEnvelope { data: profiles }))
+}
+
+async fn delete_block_profile(
+    State(state): State<ServerState>,
+    Json(request): Json<DeleteBlockProfileRequest>,
+) -> Result<Json<ApiEnvelope<Vec<BlockProfileRecord>>>, (axum::http::StatusCode, String)> {
+    let profile_id = normalize_block_profile_id(&request.id).ok_or((
+        axum::http::StatusCode::BAD_REQUEST,
+        "block profile requires an id".to_string(),
+    ))?;
+
+    let mut profiles = load_block_profiles(&state.storage).await.map_err(|error| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            error.to_string(),
+        )
+    })?;
+
+    let removed_profile = profiles
+        .iter()
+        .find(|profile| profile.id == profile_id)
+        .cloned()
+        .ok_or((
+            axum::http::StatusCode::NOT_FOUND,
+            "block profile not found".to_string(),
+        ))?;
+
+    profiles.retain(|profile| profile.id != profile_id);
+
+    persist_block_profiles(&state.storage, &profiles)
+        .await
+        .map_err(|error| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                error.to_string(),
+            )
+        })?;
+
+    state
+        .storage
+        .record_audit_event(&AuditEvent {
+            id: Uuid::new_v4(),
+            event_type: "block-profile.deleted".to_string(),
+            payload: serde_json::to_string(&serde_json::json!({
+                "id": removed_profile.id,
+                "name": removed_profile.name,
             }))
             .map_err(|error| {
                 (
