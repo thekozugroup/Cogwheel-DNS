@@ -194,3 +194,9 @@ sudo INSTALL_TAILSCALE=1 TAILSCALE_AUTH_KEY=tskey-example scripts/install-home-d
 ```
 
 If you prefer to authenticate interactively, omit `TAILSCALE_AUTH_KEY` and complete `tailscale up --advertise-exit-node --accept-dns=false` after the package install finishes.
+
+If the node is already authenticated and you just need the DNS interception policy for exit-node traffic, run:
+
+```bash
+sudo DNS_HOST_PORT=53 scripts/apply-tailscale-dns-intercept.sh
+```

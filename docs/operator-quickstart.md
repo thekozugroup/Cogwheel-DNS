@@ -55,6 +55,12 @@ This mirrors the way Pi-hole and AdGuard Home expose standard DNS on the host wh
 
 For a reusable installer-style command, use `scripts/install-home-docker.sh`.
 
+If you want Tailscale exit-node traffic to be filtered too, install the host redirect rule so `tailscale0` DNS requests are forced into Cogwheel:
+
+```bash
+sudo DNS_HOST_PORT=53 scripts/apply-tailscale-dns-intercept.sh
+```
+
 Optional Tailscale bootstrap:
 
 ```bash

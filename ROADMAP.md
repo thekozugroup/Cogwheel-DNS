@@ -291,6 +291,7 @@ Goal: Make Cogwheel the DNS enforcement layer for tailnet exit-node traffic.
 - [x] Add safe rollback flow that restores prior Tailscale DNS/exit-node settings.
 - [x] Add GUI status card: `Exit Node Active`, `Tailnet Clients`, `Filtered Queries`, `Bypass Alerts`.
 - [x] Add test harness for tailnet scenarios (client -> exit node -> filtered DNS).
+- [x] Persist host-level `tailscale0` DNS redirect rules so exit-node clients cannot bypass Cogwheel with public resolvers.
 
 Exit criteria:
 

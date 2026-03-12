@@ -14,6 +14,7 @@ WEB_HOST_PORT="${WEB_HOST_PORT:-30080}"
 INSTALL_TAILSCALE="${INSTALL_TAILSCALE:-0}"
 TAILSCALE_AUTH_KEY="${TAILSCALE_AUTH_KEY:-}"
 ADVERTISED_DNS_TARGETS="${COGWHEEL_SERVER__ADVERTISED_DNS_TARGETS:-}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [[ -z "$ADVERTISED_DNS_TARGETS" ]]; then
   HOST_SHORTNAME="$(hostname)"
@@ -53,6 +54,8 @@ if [[ "$INSTALL_TAILSCALE" == "1" ]]; then
   else
     echo "Tailscale installed. Complete 'tailscale up --advertise-exit-node --accept-dns=false' after authenticating the node." >&2
   fi
+
+  DNS_HOST_PORT="$DNS_HOST_PORT" "$SCRIPT_DIR/apply-tailscale-dns-intercept.sh"
 fi
 
 mkdir -p "$DATA_DIR"
@@ -81,4 +84,5 @@ echo "- DNS targets: ${ADVERTISED_DNS_TARGETS}"
 echo "- Web UI: http://$(hostname):${WEB_HOST_PORT}"
 if [[ "$INSTALL_TAILSCALE" == "1" ]]; then
   echo "- Tailscale exit-node advertising prepared. Toggle it in Settings once the node is authenticated."
+  echo "- Tailscale DNS interception is pinned to tailscale0 so exit-node DNS traffic reaches Cogwheel."
 fi
