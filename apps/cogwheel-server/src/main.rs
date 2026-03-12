@@ -2078,7 +2078,7 @@ fn configure_tailscale_exit_node(enabled: bool) -> Result<(), String> {
 
 fn read_tailscale_exit_node_pref() -> Option<bool> {
     let output = Command::new("tailscale")
-        .args(["debug", "prefs", "--json"])
+        .args(["debug", "prefs"])
         .output()
         .ok()?;
     if !output.status.success() {
