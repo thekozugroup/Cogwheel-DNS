@@ -354,6 +354,7 @@ Goal: Make the control plane feel approachable for a household first, while keep
 - [x] Add Tailscale installer/bootstrap support for exit-node-only traffic through Cogwheel when enabled in settings.
 - [x] Restore profile-local source editing and add platform-specific connection guidance on the dashboard.
 - [x] Fix new-profile drafting flow and advertise Android-friendly DNS targets alongside hostname guidance.
+- [x] Advertise IPv6 DNS targets and dual-stack guidance so clients do not bypass IPv4-only filtering.
 
 ## Phase 10 - Android Companion App
 
