@@ -9,6 +9,7 @@ import { Separator } from "@/components/ui/separator";
 type LoadState = "idle" | "loading" | "ready" | "error";
 type Toast = { id: number; title: string; detail?: string; tone: "success" | "error" | "info" };
 type NavPage = "overview" | "profiles" | "devices" | "grease-ai" | "settings";
+type SettingsView = "basic" | "advanced";
 
 const emptyDashboard: DashboardSummary = {
   protection_status: "Loading",
@@ -162,6 +163,7 @@ export default function App() {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [activePage, setActivePage] = useState<NavPage>("overview");
+  const [settingsView, setSettingsView] = useState<SettingsView>("basic");
 
   const [blocklistName, setBlocklistName] = useState("");
   const [blocklistUrl, setBlocklistUrl] = useState("");
@@ -1737,8 +1739,13 @@ export default function App() {
         <section className="grid gap-6">
           <Card>
             <CardTitle>Settings</CardTitle>
-            <CardDescription>Technical controls live here: syncing, Tailscale, alerts, blocklists, recovery, and operator visibility.</CardDescription>
-            <div className="mt-5 grid gap-4 lg:grid-cols-2">
+            <CardDescription>Start with the few settings most homes actually change, then open advanced controls only when you need them.</CardDescription>
+            <div className="mt-5 flex flex-wrap gap-2">
+              <Button variant={settingsView === "basic" ? "primary" : "secondary"} size="sm" onClick={() => setSettingsView("basic")}>Everyday</Button>
+              <Button variant={settingsView === "advanced" ? "primary" : "secondary"} size="sm" onClick={() => setSettingsView("advanced")}>Advanced</Button>
+            </div>
+            {settingsView === "advanced" ? <div className="mt-3 text-sm text-muted-foreground">Advanced mode includes sync, Tailscale, classifier tuning, operator feeds, and audit history.</div> : <div className="mt-3 text-sm text-muted-foreground">Everyday mode keeps the page focused on alerts, blocklists, and common services.</div>}
+            {settingsView === "advanced" ? <div className="mt-5 grid gap-4 lg:grid-cols-2">
               <div className="rounded-[24px] border border-border/70 bg-muted/40 p-4 text-sm">
                 <div className="font-medium">Sync and replication</div>
                 <div className="mt-2 grid gap-2 text-muted-foreground">
@@ -1786,8 +1793,8 @@ export default function App() {
                 ) : null}
                 <div className="mt-3 text-xs text-muted-foreground">When enabled, Cogwheel advertises this machine as a Tailscale exit node and keeps DNS on the local filter path for exit-node traffic only.</div>
               </div>
-            </div>
-            <div className="mt-4 rounded-[24px] border border-border/70 bg-muted/30 p-4">
+            </div> : null}
+            {settingsView === "advanced" ? <div className="mt-4 rounded-[24px] border border-border/70 bg-muted/30 p-4">
               <div className="flex items-center justify-between gap-3">
                 <div>
                   <div className="font-medium">Latency budgets</div>
@@ -1820,14 +1827,16 @@ export default function App() {
                   {latencyBudget.recommendations.join(" ")}
                 </div>
               ) : null}
-            </div>
+            </div> : null}
           </Card>
 
           <section className="grid gap-6 lg:grid-cols-[1.15fr_0.85fr]">
             <Card id="settings-page-core">
               <CardTitle>Policy and notifications</CardTitle>
-              <CardDescription>Core controls for classifier behavior, alerts, feeds, and imported lists.</CardDescription>
+              <CardDescription>{settingsView === "advanced" ? "Core controls for alerts, classifier behavior, and optional intelligence features." : "Simple household controls for alerts and the few behaviors you are likely to change often."}</CardDescription>
               <div className="mt-6 space-y-5">
+                {settingsView === "advanced" ? (
+                <>
                 <section className="space-y-3">
                   <div className="flex items-center justify-between">
                     <div>
@@ -1850,6 +1859,8 @@ export default function App() {
                 </section>
 
                 <Separator />
+                </>
+                ) : null}
 
                 <section className="space-y-3">
                   <div className="flex items-center justify-between gap-3">
@@ -1877,8 +1888,10 @@ export default function App() {
                   </div>
                 </section>
 
-                <Separator />
+                {settingsView === "advanced" ? <Separator /> : null}
 
+                {settingsView === "advanced" ? (
+                <>
                 <section className="space-y-4">
                   <div className="flex items-center justify-between gap-3">
                     <div>
@@ -1914,7 +1927,10 @@ export default function App() {
                 </section>
 
                 <Separator />
+                </>
+                ) : null}
 
+                {settingsView === "advanced" ? (
                 <section className="space-y-4">
                   <div className="flex items-center justify-between gap-3">
                     <div>
@@ -1936,13 +1952,14 @@ export default function App() {
                     <Button variant="secondary" onClick={() => void handleFederatedLearningSave()} disabled={busyAction === "federated-learning-save"}>{busyAction === "federated-learning-save" ? "Saving..." : "Save"}</Button>
                   </div>
                 </section>
+                ) : null}
               </div>
             </Card>
 
             <div className="grid gap-6">
               <Card id="settings-page-blocklists">
                 <CardTitle>Sources and services</CardTitle>
-                <CardDescription>Manage imported blocklists and common-service toggles without crowding the overview.</CardDescription>
+                <CardDescription>{settingsView === "advanced" ? "Manage imported blocklists and common-service toggles without crowding the overview." : "The core household settings live here: list sources, profile sources, and a few service toggles."}</CardDescription>
                 <div className="mt-5 grid gap-3">
                   <div className="rounded-[24px] border border-border/70 bg-muted/40 p-4 text-sm">
                     <div className="font-medium">Add blocklist</div>
@@ -2007,7 +2024,7 @@ export default function App() {
                 </div>
               </Card>
 
-              <Card>
+              {settingsView === "advanced" ? <Card>
                 <CardTitle>Recovery and operator feed</CardTitle>
                 <CardDescription>Use guided recovery, audit history, and runtime notes without cluttering the household overview.</CardDescription>
                 <div className="mt-5 space-y-5">
@@ -2073,7 +2090,7 @@ export default function App() {
                     </div>
                   </section>
                 </div>
-              </Card>
+              </Card> : null}
             </div>
           </section>
         </section>

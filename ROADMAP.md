@@ -355,6 +355,7 @@ Goal: Make the control plane feel approachable for a household first, while keep
 - [x] Restore profile-local source editing and add platform-specific connection guidance on the dashboard.
 - [x] Fix new-profile drafting flow and advertise Android-friendly DNS targets alongside hostname guidance.
 - [x] Advertise IPv6 DNS targets and dual-stack guidance so clients do not bypass IPv4-only filtering.
+- [x] Keep the default Settings view focused on everyday household controls, with advanced operator features gated behind an explicit advanced mode.
 
 ## Phase 10 - Android Companion App
 
