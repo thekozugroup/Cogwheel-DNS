@@ -764,6 +764,7 @@ fn build_ip_response(request: &Message, ipv4: Option<Ipv4Addr>, ipv6: Option<Ipv
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn runtime_snapshot_starts_at_zero() {
@@ -901,5 +902,39 @@ mod tests {
         assert!(domain_matches_override("ads.example.com", "example.com"));
         assert!(domain_matches_override("example.com", "example.com"));
         assert!(!domain_matches_override("badexample.com", "example.com"));
+    }
+
+    #[test]
+    fn hot_path_crates_remain_llm_and_network_independent() {
+        let dns_core_manifest =
+            fs::read_to_string(format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR")))
+                .expect("read dns core manifest");
+        let classifier_manifest = fs::read_to_string(format!(
+            "{}/../cogwheel-classifier/Cargo.toml",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("read classifier manifest");
+
+        let forbidden_dependencies = [
+            "reqwest",
+            "ureq",
+            "surf",
+            "async-openai",
+            "openai-api-rs",
+            "ollama-rs",
+            "rig-core",
+            "langchain-rust",
+        ];
+
+        for dependency in forbidden_dependencies {
+            assert!(
+                !dns_core_manifest.contains(&format!("{dependency} =")),
+                "cogwheel-dns-core should not depend on {dependency}; the DNS hot path must stay deterministic and LLM-independent"
+            );
+            assert!(
+                !classifier_manifest.contains(&format!("{dependency} =")),
+                "cogwheel-classifier should not depend on {dependency}; classifier inference must remain local and deterministic"
+            );
+        }
     }
 }
