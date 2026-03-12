@@ -352,6 +352,7 @@ Goal: Make the control plane feel approachable for a household first, while keep
 - [x] Add a standard-DNS install path that exposes host port 53 while keeping safe internal binds.
 - [x] Nest profile source selection under blocklist settings so OISD and manual GitHub lists read as blocklist controls.
 - [x] Add Tailscale installer/bootstrap support for exit-node-only traffic through Cogwheel when enabled in settings.
+- [x] Restore profile-local source editing and add platform-specific connection guidance on the dashboard.
 
 ## Phase 10 - Android Companion App
 
