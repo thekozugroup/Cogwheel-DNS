@@ -568,6 +568,9 @@ export default function App() {
 
   const primaryDnsTarget = resolverAccess.dns_targets[0] ?? "fractal.local";
   const androidDnsTarget = resolverAccess.dns_targets.find((target) => /^\d{1,3}(\.\d{1,3}){3}$/.test(target)) ?? primaryDnsTarget;
+  const ipv6DnsTarget = resolverAccess.dns_targets.find(
+    (target) => target.includes(":") && !target.includes("."),
+  );
 
   const serviceLabelMap = useMemo(
     () =>
@@ -1278,7 +1281,9 @@ export default function App() {
               {[
                 {
                   title: "Android",
-                  detail: "Use the Wi-Fi network DNS server setting with this LAN IP. Do not use Android Private DNS unless Cogwheel is serving DNS-over-TLS.",
+                  detail: ipv6DnsTarget
+                    ? "Use the Wi-Fi network DNS server setting with this LAN IPv4 and also add the IPv6 resolver shown below on dual-stack networks. Do not use Android Private DNS unless Cogwheel is serving DNS-over-TLS."
+                    : "Use the Wi-Fi network DNS server setting with this LAN IP. Do not use Android Private DNS unless Cogwheel is serving DNS-over-TLS.",
                   target: androidDnsTarget,
                 },
                 {
@@ -1304,6 +1309,13 @@ export default function App() {
                 </div>
               ))}
             </div>
+            {ipv6DnsTarget ? (
+              <div className="rounded-2xl border border-border/70 bg-white/80 p-4 text-sm">
+                <div className="font-medium text-foreground">IPv6 DNS target</div>
+                <div className="mt-1 text-muted-foreground">If your router or clients use IPv6 DNS, point them here too so traffic does not bypass the IPv4 filter path.</div>
+                <div className="mt-3 break-all font-mono text-sm font-semibold text-foreground">{ipv6DnsTarget}</div>
+              </div>
+            ) : null}
           </div>
         </Card>
 

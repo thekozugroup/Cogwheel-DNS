@@ -26,12 +26,13 @@ Since SSH password authentication is currently failing, follow these manual step
      -p 30080:30080 \
      -e COGWHEEL_PROFILE=dev \
      -e COGWHEEL_SERVER__HTTP_BIND_ADDR=0.0.0.0:30080 \
-     -e COGWHEEL_SERVER__DNS_UDP_BIND_ADDR=0.0.0.0:30053 \
-     -e COGWHEEL_SERVER__DNS_TCP_BIND_ADDR=0.0.0.0:30053 \
-     -e COGWHEEL_SERVER__ADVERTISED_DNS_PORT=53 \
-     -e COGWHEEL_STORAGE__DATABASE_URL=sqlite:///app/data/cogwheel.db \
-     -v /home/michaelwong/cogwheel-data:/app/data \
-     cogwheel:arm64
+      -e COGWHEEL_SERVER__DNS_UDP_BIND_ADDR=0.0.0.0:30053 \
+      -e COGWHEEL_SERVER__DNS_TCP_BIND_ADDR=0.0.0.0:30053 \
+      -e COGWHEEL_SERVER__ADVERTISED_DNS_PORT=53 \
+      -e COGWHEEL_SERVER__ADVERTISED_DNS_TARGETS="fractal.local,192.168.86.249,2601:189:8480:2101:2ecf:67ff:fe12:c24a" \
+      -e COGWHEEL_STORAGE__DATABASE_URL=sqlite:///app/data/cogwheel.db \
+      -v /home/michaelwong/cogwheel-data:/app/data \
+      cogwheel:arm64
    ```
 
 3. **Verify deployment:**

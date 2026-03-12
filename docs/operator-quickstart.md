@@ -46,6 +46,7 @@ docker run -d \
   -e COGWHEEL_SERVER__DNS_UDP_BIND_ADDR=0.0.0.0:30053 \
   -e COGWHEEL_SERVER__DNS_TCP_BIND_ADDR=0.0.0.0:30053 \
   -e COGWHEEL_SERVER__ADVERTISED_DNS_PORT=53 \
+  -e COGWHEEL_SERVER__ADVERTISED_DNS_TARGETS="fractal.local,192.168.86.249,2601:189:8480:2101:2ecf:67ff:fe12:c24a" \
   -v cogwheel_data:/app/data \
   cogwheel:latest
 ```
@@ -69,9 +70,13 @@ For Raspberry Pi deployment details, see `DEPLOY.md` and `DEPLOYMENT.md`.
 - `COGWHEEL_SERVER__HTTP_BIND_ADDR`
 - `COGWHEEL_SERVER__DNS_UDP_BIND_ADDR`
 - `COGWHEEL_SERVER__DNS_TCP_BIND_ADDR`
+- `COGWHEEL_SERVER__ADVERTISED_DNS_PORT`
+- `COGWHEEL_SERVER__ADVERTISED_DNS_TARGETS`
 - `COGWHEEL_PROFILE`
 - `COGWHEEL_STORAGE__DATABASE_URL`
 - `COGWHEEL_UPSTREAM__SERVERS`
+
+On dual-stack networks, advertise Cogwheel's IPv6 address too; otherwise clients can keep using IPv6 DNS paths that bypass an IPv4-only DNS setting.
 
 ## Smoke Test Checklist
 

@@ -3162,6 +3162,10 @@ async fn resolver_access_status(
             "Android tablets and phones should use the Wi-Fi network DNS setting with the LAN IP shown here; Android Private DNS expects DNS-over-TLS and is not the right mode for this deployment."
                 .to_string(),
         );
+        notes.push(
+            "On dual-stack networks, also point clients or your router at Cogwheel's IPv6 DNS target; otherwise IPv6 lookups can bypass the IPv4-only filter path."
+                .to_string(),
+        );
     }
 
     Ok(Json(ApiEnvelope {
@@ -3200,6 +3204,9 @@ fn discover_dns_targets(
             if !ip.starts_with("172.") {
                 targets.push(format_dns_target(&ip, advertised_port));
             }
+        }
+        for ip in discover_local_ipv6s() {
+            targets.push(format_dns_target(&ip, advertised_port));
         }
     } else {
         targets.push(format_dns_target(
@@ -3250,6 +3257,28 @@ fn discover_local_ipv4s() -> Vec<String> {
         }
         if !values.is_empty() {
             return values;
+        }
+    }
+
+    Vec::new()
+}
+
+fn discover_local_ipv6s() -> Vec<String> {
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(output) = read_command_output(
+            "sh",
+            &[
+                "-c",
+                "ip -6 -o addr show scope global | awk '{print $4}' | cut -d/ -f1",
+            ],
+        ) {
+            return output
+                .split_whitespace()
+                .filter(|value| value.parse::<std::net::Ipv6Addr>().is_ok())
+                .filter(|value| !value.starts_with("fe80:") && *value != "::1")
+                .map(ToString::to_string)
+                .collect();
         }
     }
 
