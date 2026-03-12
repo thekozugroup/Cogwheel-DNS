@@ -1787,6 +1787,7 @@ struct TailscaleExitNodeResult {
 }
 
 async fn tailscale_exit_node(
+    State(state): State<ServerState>,
     Json(request): Json<TailscaleExitNodeRequest>,
 ) -> Result<Json<ApiEnvelope<TailscaleExitNodeResult>>, (axum::http::StatusCode, String)> {
     let status = load_tailscale_status();
@@ -1830,6 +1831,27 @@ async fn tailscale_exit_node(
         .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?;
 
     let _ = save_tailscale_state(current_exit_node, &hostname);
+
+    state
+        .storage
+        .record_audit_event(&AuditEvent {
+            id: Uuid::new_v4(),
+            event_type: "tailscale.exit_node_updated".to_string(),
+            payload: serde_json::json!({
+                "enabled": request.enabled,
+                "hostname": hostname,
+                "previous_enabled": current_exit_node,
+            })
+            .to_string(),
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .map_err(|error| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                error.to_string(),
+            )
+        })?;
 
     Ok(Json(ApiEnvelope {
         data: TailscaleExitNodeResult {
@@ -1878,8 +1900,9 @@ struct TailscaleRollbackResult {
     previous_state: Option<bool>,
 }
 
-async fn tailscale_rollback()
--> Result<Json<ApiEnvelope<TailscaleRollbackResult>>, (axum::http::StatusCode, String)> {
+async fn tailscale_rollback(
+    State(state): State<ServerState>,
+) -> Result<Json<ApiEnvelope<TailscaleRollbackResult>>, (axum::http::StatusCode, String)> {
     let saved_state = load_tailscale_state().ok_or_else(|| {
         (
             axum::http::StatusCode::NOT_FOUND,
@@ -1907,6 +1930,27 @@ async fn tailscale_rollback()
         .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?;
 
     let _ = std::fs::remove_file(get_tailscale_state_path());
+
+    state
+        .storage
+        .record_audit_event(&AuditEvent {
+            id: Uuid::new_v4(),
+            event_type: "tailscale.rollback_completed".to_string(),
+            payload: serde_json::json!({
+                "restored_exit_node_enabled": saved_state.exit_node_enabled,
+                "hostname": saved_state.hostname,
+                "saved_at": saved_state.saved_at,
+            })
+            .to_string(),
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .map_err(|error| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                error.to_string(),
+            )
+        })?;
 
     Ok(Json(ApiEnvelope {
         data: TailscaleRollbackResult {
@@ -2230,6 +2274,19 @@ async fn update_sync_profile(
     persist_sync_profile(&state.storage, &profile)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    state
+        .storage
+        .record_audit_event(&AuditEvent {
+            id: Uuid::new_v4(),
+            event_type: "sync.profile_updated".to_string(),
+            payload: serde_json::json!({
+                "profile": profile.as_str(),
+            })
+            .to_string(),
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(ApiEnvelope {
         data: SyncProfileView {
             profile: profile.as_str().to_string(),
@@ -2271,6 +2328,21 @@ async fn update_sync_transport(
     let token = request.token.as_deref().map(str::trim);
     let token = token.filter(|value| !value.is_empty());
     persist_sync_transport_token(&state.storage, token)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    state
+        .storage
+        .record_audit_event(&AuditEvent {
+            id: Uuid::new_v4(),
+            event_type: "sync.transport_updated".to_string(),
+            payload: serde_json::json!({
+                "mode": mode,
+                "token_configured": token.is_some(),
+            })
+            .to_string(),
+            created_at: chrono::Utc::now(),
+        })
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -2790,6 +2862,23 @@ async fn restore_data(
         let mut notifications = state.notification_settings.write().unwrap();
         *notifications = data.notifications;
     }
+
+    state
+        .storage
+        .record_audit_event(&AuditEvent {
+            id: Uuid::new_v4(),
+            event_type: "backup.restore_completed".to_string(),
+            payload: serde_json::json!({
+                "version": data.version,
+                "source_count": source_count,
+                "device_count": device_count,
+                "size_bytes": size_bytes,
+            })
+            .to_string(),
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let message = format!(
         "Restored {} sources, {} devices, classifier and notification settings",
