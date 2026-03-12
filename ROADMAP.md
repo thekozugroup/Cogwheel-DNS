@@ -333,7 +333,7 @@ Exit criteria:
 
 - [ ] Keep DNS hot path deterministic and LLM-independent.
 - [x] Track latency budgets for cache hit/miss and classifier processing.
-- [ ] Enforce audit logging on every policy-changing action.
+- [x] Enforce audit logging on every policy-changing action.
 - [x] Require rollback path for every deployment-affecting feature.
 - [ ] Keep default user-facing settings minimal and understandable.
 - [ ] Preserve modular crate boundaries; avoid cross-crate coupling drift.
