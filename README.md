@@ -17,6 +17,7 @@ Cogwheel DNS is a Rust-native DNS adblock platform with a Docker server backend,
 - User quick start: `docs/user-quickstart.md`
 - Reliability budgets: `docs/reliability-budgets.md`
 - Hot-path guardrails: `docs/hot-path-guardrails.md`
+- Crate boundary guardrails: `docs/crate-boundary-guardrails.md`
 - Architecture decisions: `docs/adr/README.md`
 - Release policy: `docs/release-policy.md`
 - Deployment notes: `DEPLOY.md`
