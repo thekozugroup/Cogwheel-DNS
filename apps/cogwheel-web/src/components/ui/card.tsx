@@ -2,11 +2,11 @@ import type { HTMLAttributes } from "react";
 import { cn } from "@/lib/utils";
 
 export function Card({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn("rounded-[28px] border border-border/70 bg-card/90 p-6 shadow-halo backdrop-blur", className)} {...props} />;
+  return <div className={cn("rounded-2xl border border-border bg-card text-card-foreground p-6 shadow-sm", className)} {...props} />;
 }
 
 export function CardTitle({ className, ...props }: HTMLAttributes<HTMLHeadingElement>) {
-  return <h3 className={cn("font-display text-xl font-semibold", className)} {...props} />;
+  return <h3 className={cn("font-display text-lg font-semibold tracking-tight", className)} {...props} />;
 }
 
 export function CardDescription({ className, ...props }: HTMLAttributes<HTMLParagraphElement>) {
