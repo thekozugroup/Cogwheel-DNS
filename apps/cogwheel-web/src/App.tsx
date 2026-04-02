@@ -1610,22 +1610,24 @@ export default function App() {
           </Card>
         </section>
       ) : activePage === "devices" ? (
-        <section className="grid gap-6 lg:grid-cols-[1.05fr_0.95fr]">
-          <Card id="devices-page">
-            <CardTitle>Devices</CardTitle>
-            <CardDescription>Give each device a clear name, then decide whether it keeps the household default or receives a saved profile.</CardDescription>
-            <div className="mt-5 grid gap-4">
-              <div className="grid gap-3 md:grid-cols-2">
+        <section className="grid gap-6 xl:grid-cols-[1.05fr_0.95fr]">
+          <Card id="devices-page" className="p-0 overflow-hidden">
+            <div className="border-b border-border px-6 py-5">
+              <CardTitle>Devices</CardTitle>
+              <CardDescription className="mt-1">Give each device a clear name, then decide whether it keeps the household default or receives a saved profile.</CardDescription>
+            </div>
+            <div className="grid gap-5 px-6 py-6">
+              <div className="grid gap-3 lg:grid-cols-2">
                 <Input value={deviceName} onChange={(event) => setDeviceName(event.target.value)} placeholder="Kitchen iPad" />
                 <Input value={deviceIpAddress} onChange={(event) => setDeviceIpAddress(event.target.value)} placeholder="192.168.1.42" />
               </div>
-              <div className="grid gap-3 md:grid-cols-4">
-                <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={devicePolicyMode} onChange={(event) => setDevicePolicyMode(event.target.value as "global" | "custom")}>
+              <div className="grid gap-3 lg:grid-cols-2 xl:grid-cols-4">
+                <select className="h-11 rounded-xl border border-input bg-background px-4 text-sm" value={devicePolicyMode} onChange={(event) => setDevicePolicyMode(event.target.value as "global" | "custom")}>
                   <option value="global">Household default</option>
                   <option value="custom">Custom assignment</option>
                 </select>
                 <select
-                  className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm"
+                  className="h-11 rounded-xl border border-input bg-background px-4 text-sm"
                   value={deviceProfileOverride}
                   onChange={(event) => setDeviceProfileOverride(event.target.value)}
                   disabled={devicePolicyMode !== "custom"}
@@ -1635,7 +1637,7 @@ export default function App() {
                     <option key={profile.id} value={profile.name}>{profile.emoji} {profile.name}</option>
                   ))}
                 </select>
-                <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={deviceProtectionOverride} onChange={(event) => setDeviceProtectionOverride(event.target.value as "inherit" | "bypass")} disabled={devicePolicyMode !== "custom"}>
+                <select className="h-11 rounded-xl border border-input bg-background px-4 text-sm" value={deviceProtectionOverride} onChange={(event) => setDeviceProtectionOverride(event.target.value as "inherit" | "bypass")} disabled={devicePolicyMode !== "custom"}>
                   <option value="inherit">Keep blocking on</option>
                   <option value="bypass">Bypass blocking</option>
                 </select>
@@ -1646,8 +1648,13 @@ export default function App() {
                   disabled={devicePolicyMode !== "custom"}
                 />
               </div>
-              <div className="grid gap-3 md:grid-cols-[1fr_160px_auto]">
-                <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={deviceServiceOverrideId} onChange={(event) => setDeviceServiceOverrideId(event.target.value)} disabled={devicePolicyMode !== "custom"}>
+              <div className="rounded-2xl border border-border bg-muted/20 p-4">
+                <div className="flex flex-col gap-1">
+                  <div className="text-sm font-medium text-foreground">Service override</div>
+                  <div className="text-sm text-muted-foreground">Add a focused allow or block rule for a known service when this device needs a small exception.</div>
+                </div>
+                <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(0,1fr)_180px_auto]">
+                <select className="h-11 rounded-xl border border-input bg-background px-4 text-sm" value={deviceServiceOverrideId} onChange={(event) => setDeviceServiceOverrideId(event.target.value)} disabled={devicePolicyMode !== "custom"}>
                   <option value="">Select service override</option>
                   {settings.services.map((service) => (
                     <option key={service.manifest.service_id} value={service.manifest.service_id}>
@@ -1655,27 +1662,28 @@ export default function App() {
                     </option>
                   ))}
                 </select>
-                <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={deviceServiceOverrideMode} onChange={(event) => setDeviceServiceOverrideMode(event.target.value as "allow" | "block")} disabled={devicePolicyMode !== "custom"}>
+                <select className="h-11 rounded-xl border border-input bg-background px-4 text-sm" value={deviceServiceOverrideMode} onChange={(event) => setDeviceServiceOverrideMode(event.target.value as "allow" | "block")} disabled={devicePolicyMode !== "custom"}>
                   <option value="allow">Allow service</option>
                   <option value="block">Block service</option>
                 </select>
-                <Button variant="ghost" onClick={addDeviceServiceOverride} disabled={devicePolicyMode !== "custom" || !deviceServiceOverrideId || deviceServiceOverrideIsNoop}>
+                <Button variant="outline" onClick={addDeviceServiceOverride} disabled={devicePolicyMode !== "custom" || !deviceServiceOverrideId || deviceServiceOverrideIsNoop}>
                   Add service rule
                 </Button>
+                </div>
               </div>
-              <div className="flex flex-wrap gap-3">
+              <div className="flex flex-wrap justify-end gap-3">
+                {deviceId ? <Button variant="ghost" onClick={resetDeviceForm}>Cancel</Button> : null}
                 <Button onClick={() => void handleDeviceSubmit()} disabled={!deviceName || !deviceIpAddress || busyAction === "device-submit"}>
                   {busyAction === "device-submit" ? "Saving..." : deviceId ? "Save device" : "Add device"}
                 </Button>
-                {deviceId ? <Button variant="ghost" onClick={resetDeviceForm}>Cancel</Button> : null}
               </div>
               {devicePolicyMode !== "custom" ? (
-                <div className="rounded-[24px] border border-dashed border-border/70 bg-muted/30 p-4 text-sm text-muted-foreground">
+                <div className="rounded-2xl border border-dashed border-border bg-muted/20 p-4 text-sm text-muted-foreground">
                   This device will follow the household default until you switch it to a custom assignment.
                 </div>
               ) : null}
               {deviceServiceOverrideId && deviceServiceOverridePreview ? (
-                <div className="rounded-[24px] border border-border/70 bg-white/80 p-4 text-sm">
+                <div className="rounded-2xl border border-border bg-background p-4 text-sm">
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div>
                       <div className="font-medium">{deviceServiceOverridePreview.displayName}</div>
@@ -1697,7 +1705,7 @@ export default function App() {
               {deviceServiceOverrides.length > 0 ? (
                 <div className="flex flex-wrap gap-2">
                   {deviceServiceOverrides.map((override) => (
-                    <button key={`${override.service_id}-${override.mode}`} type="button" title={describeDeviceServiceOverride(override.service_id)} className="rounded-full border border-border/70 bg-muted/40 px-3 py-1 text-xs text-muted-foreground" onClick={() => removeDeviceServiceOverride(override.service_id)}>
+                    <button key={`${override.service_id}-${override.mode}`} type="button" title={describeDeviceServiceOverride(override.service_id)} className="rounded-full border border-border bg-background px-3 py-1 text-xs text-muted-foreground transition hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => removeDeviceServiceOverride(override.service_id)}>
                       {formatDeviceServiceOverride(override.service_id, override.mode)} x
                     </button>
                   ))}
@@ -1707,18 +1715,20 @@ export default function App() {
           </Card>
 
           <div className="grid gap-6">
-            <Card>
+            <Card className="p-0 overflow-hidden">
+              <div className="border-b border-border px-6 py-5">
               <CardTitle>Saved devices</CardTitle>
-              <CardDescription>Detected and named devices stay easy to scan, edit, and reassign.</CardDescription>
-              <div className="mt-5 grid gap-3">
+              <CardDescription className="mt-1">Detected and named devices stay easy to scan, edit, and reassign.</CardDescription>
+              </div>
+              <div className="grid gap-3 px-6 py-6">
                 {settings.devices.length === 0 ? (
-                  <div className="rounded-[24px] border border-dashed border-border/70 bg-muted/30 p-5 text-sm text-muted-foreground">
+                  <div className="rounded-2xl border border-dashed border-border bg-muted/20 p-5 text-sm text-muted-foreground">
                     No devices have been named yet. Start with the devices the household will recognize fastest.
                   </div>
                 ) : (
                   settings.devices.map((device) => (
-                    <div key={device.id} className="rounded-[24px] border border-border/70 bg-white/80 p-4">
-                      <div className="flex items-start justify-between gap-3">
+                    <div key={device.id} className="rounded-2xl border border-border bg-background p-4">
+                      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                         <div>
                           <div className="font-medium">{device.name}</div>
                           <div className="text-sm text-muted-foreground">{device.ip_address}</div>
@@ -1731,7 +1741,7 @@ export default function App() {
                         <Badge>{device.allowed_domains.length} allowlisted</Badge>
                         <Badge>{device.service_overrides.length} service rules</Badge>
                       </div>
-                      <div className="mt-4">
+                      <div className="mt-4 flex justify-end">
                         <Button variant="ghost" size="sm" onClick={() => startDeviceEdit(device)}>
                           Edit device
                         </Button>
@@ -1742,17 +1752,19 @@ export default function App() {
               </div>
             </Card>
 
-            <Card>
+            <Card className="p-0 overflow-hidden">
+              <div className="border-b border-border px-6 py-5">
               <CardTitle>Assignment help</CardTitle>
-              <CardDescription>Use friendly names from saved block profiles so the household can tell what each device is using at a glance.</CardDescription>
-              <div className="mt-5 grid gap-3 text-sm text-muted-foreground">
+              <CardDescription className="mt-1">Use friendly names from saved block profiles so the household can tell what each device is using at a glance.</CardDescription>
+              </div>
+              <div className="grid gap-3 px-6 py-6 text-sm text-muted-foreground">
                 {settings.block_profiles.length === 0 ? (
-                  <div className="rounded-[24px] border border-dashed border-border/70 bg-muted/30 p-4">
+                  <div className="rounded-2xl border border-dashed border-border bg-muted/20 p-4">
                     Create a block profile first, then come back here to assign it to a device.
                   </div>
                 ) : (
                   settings.block_profiles.map((profile) => (
-                    <div key={profile.id} className="rounded-[24px] border border-border/70 bg-muted/40 p-4">
+                    <div key={profile.id} className="rounded-2xl border border-border bg-muted/20 p-4">
                       <div className="font-medium text-foreground">{profile.emoji} {profile.name}</div>
                       <div className="mt-1">{profile.description}</div>
                     </div>
@@ -1764,16 +1776,17 @@ export default function App() {
         </section>
       ) : activePage === "grease-ai" ? (
         <section className="grid gap-6 xl:grid-cols-[1.05fr_0.95fr]">
-          <Card>
+          <Card className="p-0 overflow-hidden">
+            <div className="border-b border-border px-6 py-5">
             <CardTitle>Grease-AI</CardTitle>
-            <CardDescription>A placeholder home for the AI classifier while we shape how the learning loop should feel in the household control plane.</CardDescription>
-            <div className="mt-5 rounded-[28px] border border-border/70 bg-[radial-gradient(circle_at_top_left,rgba(115,196,255,0.2),transparent_35%),radial-gradient(circle_at_bottom_right,rgba(129,224,170,0.22),transparent_38%),linear-gradient(180deg,rgba(255,255,255,0.96),rgba(246,244,240,0.94))] p-5">
-              <div className="grid gap-4 lg:grid-cols-[0.9fr_1.1fr]">
+            <CardDescription className="mt-1">A calm classifier workspace that shows live learning signals without overwhelming the rest of the control plane.</CardDescription>
+            </div>
+            <div className="grid gap-4 px-6 py-6 lg:grid-cols-[0.92fr_1.08fr]">
                 <div className="space-y-3">
                   <div className="text-sm font-medium text-foreground">Learning pulse</div>
                   <div className="space-y-3">
                     {greaseAiSignals.map((signal) => (
-                      <div key={signal.label} className="rounded-2xl border border-border/60 bg-white/75 p-4">
+                      <div key={signal.label} className="rounded-2xl border border-border bg-muted/20 p-4">
                         <div className="flex items-center justify-between gap-3 text-sm">
                           <span className="font-medium text-foreground">{signal.label}</span>
                           <span className="text-muted-foreground">{Math.round(signal.value * 100)}%</span>
@@ -1785,62 +1798,65 @@ export default function App() {
                     ))}
                   </div>
                 </div>
-                <div className="rounded-[26px] border border-border/70 bg-slate-950 p-5 text-slate-100 shadow-inner">
-                  <div className="text-xs uppercase tracking-[0.24em] text-slate-400">Classifier animation</div>
+                <div className="rounded-2xl border border-border bg-muted/20 p-5">
+                  <div className="text-xs uppercase tracking-[0.24em] text-muted-foreground">Classifier animation</div>
                   <div className="mt-4 grid gap-3">
                     {[0, 1, 2, 3, 4].map((row) => (
                       <div key={row} className="grid grid-cols-8 gap-2">
                         {greaseAiSignals.map((signal, index) => (
                           <div
                             key={`${row}-${signal.label}-${index}`}
-                            className="h-5 rounded-full bg-gradient-to-r from-sky-400/20 via-cyan-300/80 to-emerald-300/30"
+                            className="h-5 rounded-full bg-gradient-to-r from-primary/15 via-primary/60 to-secondary/40"
                             style={{ opacity: Math.max(0.2, signal.value - row * 0.12 + index * 0.04) }}
                           />
                         ))}
-                        <div className="h-5 rounded-full bg-white/10" />
-                        <div className="h-5 rounded-full bg-white/5" />
-                        <div className="h-5 rounded-full bg-white/10" />
-                        <div className="h-5 rounded-full bg-white/5" />
-                        <div className="h-5 rounded-full bg-white/10" />
+                        <div className="h-5 rounded-full bg-background/80" />
+                        <div className="h-5 rounded-full bg-background/60" />
+                        <div className="h-5 rounded-full bg-background/80" />
+                        <div className="h-5 rounded-full bg-background/60" />
+                        <div className="h-5 rounded-full bg-background/80" />
                       </div>
                     ))}
                   </div>
-                  <div className="mt-4 text-sm text-slate-300">The bars brighten as more DNS activity arrives, blocked decisions climb, and the runtime stays inside latency budget.</div>
+                  <div className="mt-4 text-sm text-muted-foreground">The bars brighten as more DNS activity arrives, blocked decisions climb, and the runtime stays inside latency budget.</div>
                 </div>
-              </div>
             </div>
           </Card>
 
           <div className="grid gap-6">
-            <Card>
+            <Card className="p-0 overflow-hidden">
+              <div className="border-b border-border px-6 py-5">
               <CardTitle>Classifier stats</CardTitle>
-              <CardDescription>Operational numbers behind the current learning pulse.</CardDescription>
-              <div className="mt-5 grid gap-3 sm:grid-cols-2">
-                <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
+              <CardDescription className="mt-1">Operational numbers behind the current learning pulse.</CardDescription>
+              </div>
+              <div className="grid gap-3 px-6 py-6 sm:grid-cols-2">
+                <div className="rounded-2xl border border-border bg-muted/20 p-4 text-sm">
                   <div className="text-muted-foreground">Mode</div>
                   <div className="mt-1 text-xl font-semibold text-foreground">{settings.classifier.mode}</div>
                 </div>
-                <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
+                <div className="rounded-2xl border border-border bg-muted/20 p-4 text-sm">
                   <div className="text-muted-foreground">Threshold</div>
                   <div className="mt-1 text-xl font-semibold text-foreground">{settings.classifier.threshold.toFixed(2)}</div>
                 </div>
-                <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
+                <div className="rounded-2xl border border-border bg-muted/20 p-4 text-sm">
                   <div className="text-muted-foreground">Queries observed</div>
                   <div className="mt-1 text-xl font-semibold text-foreground">{dashboard.runtime_health.snapshot.queries_total.toLocaleString()}</div>
                 </div>
-                <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
+                <div className="rounded-2xl border border-border bg-muted/20 p-4 text-sm">
                   <div className="text-muted-foreground">Blocked queries</div>
                   <div className="mt-1 text-xl font-semibold text-foreground">{dashboard.runtime_health.snapshot.blocked_total.toLocaleString()}</div>
                 </div>
               </div>
             </Card>
 
-            <Card>
+            <Card className="p-0 overflow-hidden">
+              <div className="border-b border-border px-6 py-5">
               <CardTitle>Latency budgets</CardTitle>
-              <CardDescription>Live hot-path budget checks after the latest traffic observed by this resolver.</CardDescription>
-              <div className="mt-5 grid gap-3 sm:grid-cols-3">
+              <CardDescription className="mt-1">Live hot-path budget checks after the latest traffic observed by this resolver.</CardDescription>
+              </div>
+              <div className="grid gap-3 px-6 py-6 lg:grid-cols-3">
                 {latencyBudget.checks.map((check) => (
-                  <div key={check.label} className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
+                  <div key={check.label} className="rounded-2xl border border-border bg-muted/20 p-4 text-sm">
                     <div className="flex items-center justify-between gap-2">
                       <div className="font-medium text-foreground">{check.label}</div>
                       <Badge>{check.status}</Badge>
@@ -1865,7 +1881,7 @@ export default function App() {
               </div>
               <div className="mt-3 text-sm text-muted-foreground">{settingsView === "advanced" ? "Advanced mode includes sync, Tailscale, classifier tuning, operator feeds, and audit history." : "Everyday mode keeps the page focused on alerts, blocklists, and common services."}</div>
             </div>
-            {settingsView === "advanced" ? <div className="mt-5 grid gap-4 lg:grid-cols-2">
+            {settingsView === "advanced" ? <div className="mt-5 grid gap-4 px-6 pb-6 lg:grid-cols-2">
               <div className="rounded-2xl border border-border bg-muted/20 p-4 text-sm">
                 <div className="font-medium">Sync and replication</div>
                 <div className="mt-2 grid gap-2 text-muted-foreground">
@@ -1873,16 +1889,16 @@ export default function App() {
                   <div>Revision: <span className="font-medium text-foreground">{syncStatus.revision}</span></div>
                   <div>Peers: <span className="font-medium text-foreground">{syncStatus.peers.length}</span></div>
                 </div>
-                <div className="mt-4 grid gap-3 sm:grid-cols-[1fr_auto]">
-                  <select className="h-10 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={syncProfileDraft} onChange={(event) => setSyncProfileDraft(event.target.value)}>
+                <div className="mt-4 grid gap-3 xl:grid-cols-[1fr_auto]">
+                  <select className="h-10 rounded-xl border border-input bg-background px-4 text-sm" value={syncProfileDraft} onChange={(event) => setSyncProfileDraft(event.target.value)}>
                     <option value="full">Full replication</option>
                     <option value="settings-only">Settings only</option>
                     <option value="read-only-follower">Read-only follower</option>
                   </select>
                   <Button variant="secondary" size="sm" onClick={() => void handleSyncProfileSave()} disabled={busyAction === "sync-profile-save"}>Save profile</Button>
                 </div>
-                <div className="mt-3 grid gap-3 sm:grid-cols-[180px_1fr_auto]">
-                  <select className="h-10 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={syncTransportModeDraft} onChange={(event) => setSyncTransportModeDraft(event.target.value)}>
+                <div className="mt-3 grid gap-3 xl:grid-cols-[180px_minmax(0,1fr)_auto]">
+                  <select className="h-10 rounded-xl border border-input bg-background px-4 text-sm" value={syncTransportModeDraft} onChange={(event) => setSyncTransportModeDraft(event.target.value)}>
                     <option value="opportunistic">Opportunistic</option>
                     <option value="https-required">HTTPS required</option>
                   </select>
@@ -1914,7 +1930,7 @@ export default function App() {
                 <div className="mt-3 text-xs text-muted-foreground">When enabled, Cogwheel advertises this machine as a Tailscale exit node and keeps DNS on the local filter path for exit-node traffic only.</div>
               </div>
             </div> : null}
-            {settingsView === "advanced" ? <div className="mt-4 rounded-2xl border border-border bg-muted/20 p-4">
+            {settingsView === "advanced" ? <div className="mx-6 mb-6 rounded-2xl border border-border bg-muted/20 p-4">
               <div className="flex items-center justify-between gap-3">
                 <div>
                   <div className="font-medium">Latency budgets</div>
@@ -1992,13 +2008,13 @@ export default function App() {
                     </div>
                     <Badge>{notificationEnabled ? `Webhook ${notificationMinSeverity}+` : "Disabled"}</Badge>
                   </div>
-                  <label className="flex items-center gap-3 rounded-2xl border border-border/70 bg-muted/40 px-4 py-3 text-sm">
+                  <label className="flex items-center gap-3 rounded-2xl border border-border bg-muted/20 px-4 py-3 text-sm">
                     <input type="checkbox" checked={notificationEnabled} onChange={(event) => setNotificationEnabled(event.target.checked)} />
                     Enable outbound alert notifications
                   </label>
-                  <div className="grid gap-3 sm:grid-cols-[1fr_170px_auto]">
+                  <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_170px_auto]">
                     <Input value={notificationWebhookUrl} onChange={(event) => setNotificationWebhookUrl(event.target.value)} placeholder="https://hooks.example.com/cogwheel" />
-                    <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={notificationMinSeverity} onChange={(event) => setNotificationMinSeverity(event.target.value as "medium" | "high" | "critical")}>
+                    <select className="h-11 rounded-xl border border-input bg-background px-4 text-sm" value={notificationMinSeverity} onChange={(event) => setNotificationMinSeverity(event.target.value as "medium" | "high" | "critical")}>
                       <option value="medium">Medium+</option>
                       <option value="high">High+</option>
                       <option value="critical">Critical only</option>
@@ -2024,7 +2040,7 @@ export default function App() {
                   </div>
                   <div className="grid gap-3">
                     {threatIntelSettings.providers.map((provider) => (
-                      <div key={provider.id} className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
+                      <div key={provider.id} className="rounded-2xl border border-border bg-muted/20 p-4 text-sm">
                         <div className="flex items-start justify-between gap-3">
                           <div>
                             <div className="font-medium">{provider.display_name}</div>
@@ -2032,7 +2048,7 @@ export default function App() {
                           </div>
                           <Badge className={provider.enabled ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground"}>{provider.enabled ? "Enabled" : "Disabled"}</Badge>
                         </div>
-                        <div className="mt-3 grid gap-3 sm:grid-cols-[1fr_180px_auto]">
+                        <div className="mt-3 grid gap-3 xl:grid-cols-[minmax(0,1fr)_180px_auto]">
                           <Input value={provider.feed_url ?? ""} onChange={(event) => setThreatIntelSettings((current) => ({ ...current, providers: current.providers.map((item) => item.id === provider.id ? { ...item, feed_url: event.target.value || null } : item) }))} placeholder="https://feed.example.invalid/dns" />
                           <Input value={String(provider.update_interval_minutes)} onChange={(event) => {
                             const nextValue = Number.parseInt(event.target.value, 10);
@@ -2061,11 +2077,11 @@ export default function App() {
                     </div>
                     <Badge>{federatedLearningSettings.enabled ? federatedLearningSettings.privacy_mode : "Disabled"}</Badge>
                   </div>
-                  <label className="flex items-center gap-3 rounded-2xl border border-border/70 bg-muted/40 px-4 py-3 text-sm">
+                  <label className="flex items-center gap-3 rounded-2xl border border-border bg-muted/20 px-4 py-3 text-sm">
                     <input type="checkbox" checked={federatedLearningSettings.enabled} onChange={(event) => setFederatedLearningSettings((current) => ({ ...current, enabled: event.target.checked }))} />
                     Enable federated learning coordinator sync
                   </label>
-                  <div className="grid gap-3 sm:grid-cols-[1fr_180px_auto]">
+                  <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_180px_auto]">
                     <Input value={federatedLearningSettings.coordinator_url ?? ""} onChange={(event) => setFederatedLearningSettings((current) => ({ ...current, coordinator_url: event.target.value || null }))} placeholder="https://coordinator.example.invalid" />
                     <Input value={String(federatedLearningSettings.round_interval_hours)} onChange={(event) => {
                       const nextValue = Number.parseInt(event.target.value, 10);
@@ -2091,13 +2107,13 @@ export default function App() {
                       <Input value={blocklistName} onChange={(event) => setBlocklistName(event.target.value)} placeholder="Human-readable name" />
                       <Input value={blocklistUrl} onChange={(event) => setBlocklistUrl(event.target.value)} placeholder="Source URL or data: URL" />
                       <div className="grid gap-3 sm:grid-cols-3">
-                        <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={blocklistProfile} onChange={(event) => setBlocklistProfile(event.target.value)}>
+                        <select className="h-11 rounded-xl border border-input bg-background px-4 text-sm" value={blocklistProfile} onChange={(event) => setBlocklistProfile(event.target.value)}>
                           <option value="custom">Custom</option>
                           <option value="essential">Essential</option>
                           <option value="balanced">Balanced</option>
                           <option value="aggressive">Aggressive</option>
                         </select>
-                        <select className="h-11 rounded-2xl border border-input bg-white/80 px-4 text-sm" value={blocklistStrictness} onChange={(event) => setBlocklistStrictness(event.target.value as "strict" | "balanced" | "relaxed")}>
+                        <select className="h-11 rounded-xl border border-input bg-background px-4 text-sm" value={blocklistStrictness} onChange={(event) => setBlocklistStrictness(event.target.value as "strict" | "balanced" | "relaxed")}>
                           <option value="strict">Strict</option>
                           <option value="balanced">Balanced</option>
                           <option value="relaxed">Relaxed</option>
