@@ -1253,38 +1253,44 @@ export default function App() {
       {activePage === "overview" ? (
         <>
 
-      <section className="space-y-6">
-        <Card className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-          <div>
-            <h1 className="font-display text-3xl font-semibold tracking-tight">Dashboard</h1>
-            <div className="mt-1 text-sm text-muted-foreground">A clean snapshot of household filtering, blocked traffic, and active devices.</div>
+        <section className="space-y-6">
+        <Card className="p-0 overflow-hidden">
+          <div className="flex flex-col gap-4 border-b border-border px-6 py-5 md:flex-row md:items-center md:justify-between">
+            <div>
+              <h1 className="font-display text-3xl font-semibold tracking-tight">Dashboard</h1>
+              <div className="mt-1 text-sm text-muted-foreground">A clean snapshot of household filtering, blocked traffic, and active devices.</div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {dashboard.protection_status === "Paused" ? (
+                <Button variant="secondary" onClick={() => void handleResumeRuntime()} disabled={busyAction === "resume-runtime"}>Resume protection</Button>
+              ) : (
+                <Button variant="outline" onClick={() => void handlePauseRuntime(10)} disabled={busyAction === "pause-runtime"}>Pause 10m</Button>
+              )}
+            </div>
           </div>
-          <div className="flex flex-wrap gap-2">
-            {dashboard.protection_status === "Paused" ? (
-              <Button variant="secondary" onClick={() => void handleResumeRuntime()} disabled={busyAction === "resume-runtime"}>Resume protection</Button>
-            ) : (
-              <Button variant="outline" onClick={() => void handlePauseRuntime(10)} disabled={busyAction === "pause-runtime"}>Pause 10m</Button>
-            )}
+
+          <div className="px-6 py-6">
+            <section id="quick-health" className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {overviewStats.map((item) => (
+                <Card key={item.label} className={`p-5 ${item.accent}`}>
+                  <div className="text-sm text-muted-foreground">{item.label}</div>
+                  <div className="mt-3 font-display text-4xl font-semibold tracking-tight sm:text-5xl">{item.value}</div>
+                  <div className="mt-2 text-sm text-muted-foreground">{item.detail}</div>
+                </Card>
+              ))}
+            </section>
           </div>
         </Card>
-
-        <section id="quick-health" className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {overviewStats.map((item) => (
-            <Card key={item.label} className={`p-5 ${item.accent}`}>
-              <div className="text-sm text-muted-foreground">{item.label}</div>
-              <div className="mt-3 font-display text-4xl font-semibold tracking-tight sm:text-5xl">{item.value}</div>
-              <div className="mt-2 text-sm text-muted-foreground">{item.detail}</div>
-            </Card>
-          ))}
-        </section>
       </section>
 
         <section className="grid gap-6 xl:grid-cols-2">
 
-          <Card>
-            <CardTitle>Top queried domains</CardTitle>
-            <CardDescription>Recent destinations seen by the resolver over the last day.</CardDescription>
-            <div className="mt-5 grid gap-3">
+          <Card className="p-0 overflow-hidden">
+            <div className="border-b border-border px-6 py-5">
+              <CardTitle>Top queried domains</CardTitle>
+              <CardDescription className="mt-1">Recent destinations seen by the resolver over the last day.</CardDescription>
+            </div>
+            <div className="grid gap-3 px-6 py-6">
               {dashboard.domain_insights.top_queried_domains.length === 0 ? (
                 <EmptyState>
                   Query activity will appear here once devices begin sending traffic through Cogwheel.
@@ -1308,10 +1314,12 @@ export default function App() {
             </div>
           </Card>
 
-          <Card>
-            <CardTitle>Top blocked domains</CardTitle>
-            <CardDescription>Where protection is actively stepping in right now.</CardDescription>
-            <div className="mt-5 grid gap-3">
+          <Card className="p-0 overflow-hidden">
+            <div className="border-b border-border px-6 py-5">
+              <CardTitle>Top blocked domains</CardTitle>
+              <CardDescription className="mt-1">Where protection is actively stepping in right now.</CardDescription>
+            </div>
+            <div className="grid gap-3 px-6 py-6">
               {dashboard.domain_insights.top_blocked_domains.length === 0 ? (
                 <EmptyState>
                   No blocked domains yet. When filtering engages, the busiest blocked destinations will appear here.
@@ -1334,10 +1342,12 @@ export default function App() {
       {error ? <Card className="border-accent/30 bg-accent/10 text-accent-foreground">{error}</Card> : null}
 
       <section className="grid gap-6 lg:grid-cols-[1fr_1fr]">
-        <Card id="resolver-access">
-          <CardTitle>How to connect devices</CardTitle>
-          <CardDescription>Use one of these DNS targets on phones, laptops, TVs, or routers that should use this Cogwheel instance.</CardDescription>
-          <div className="mt-5 grid gap-3">
+        <Card id="resolver-access" className="p-0 overflow-hidden">
+          <div className="border-b border-border px-6 py-5">
+            <CardTitle>How to connect devices</CardTitle>
+            <CardDescription className="mt-1">Use one of these DNS targets on phones, laptops, TVs, or routers that should use this Cogwheel instance.</CardDescription>
+          </div>
+          <div className="grid gap-3 px-6 py-6">
             {resolverAccess.dns_targets.length === 0 ? (
                 <EmptyState>
                   Resolver targets will appear here once the control plane reports reachable DNS addresses.
@@ -1387,10 +1397,12 @@ export default function App() {
           </div>
         </Card>
 
-        <Card>
-          <CardTitle>Resolver summary</CardTitle>
-          <CardDescription>Small operational details that are still useful on the main dashboard.</CardDescription>
-          <div className="mt-5 grid gap-3 text-sm">
+        <Card className="p-0 overflow-hidden">
+          <div className="border-b border-border px-6 py-5">
+            <CardTitle>Resolver summary</CardTitle>
+            <CardDescription className="mt-1">Small operational details that are still useful on the main dashboard.</CardDescription>
+          </div>
+          <div className="grid gap-3 px-6 py-6 text-sm">
             <Row label="Protection" value={dashboard.protection_status} />
             <Row label="Active ruleset" value={dashboard.active_ruleset?.hash.slice(0, 12) ?? "None"} />
             <Row label="Cache hits" value={String(dashboard.runtime_health.snapshot.cache_hits_total)} />
@@ -1401,10 +1413,12 @@ export default function App() {
       </section>
 
       <section className="grid gap-6 lg:grid-cols-[1fr_1fr]">
-        <Card>
-          <CardTitle>Recent risky events</CardTitle>
-          <CardDescription>Newest high-signal security events without pulling in device management controls.</CardDescription>
-          <div className="mt-5 grid gap-3">
+        <Card className="p-0 overflow-hidden">
+          <div className="border-b border-border px-6 py-5">
+            <CardTitle>Recent risky events</CardTitle>
+            <CardDescription className="mt-1">Newest high-signal security events without pulling in device management controls.</CardDescription>
+          </div>
+          <div className="grid gap-3 px-6 py-6">
             {dashboard.recent_security_events.length === 0 ? (
                 <EmptyState>
                   No risky DNS events recorded yet.
@@ -1776,7 +1790,7 @@ export default function App() {
                     ))}
                   </div>
                 </div>
-                <div className="rounded-2xl border border-border bg-muted/20 p-5">
+                <div className="rounded-2xl border border-border bg-background p-5">
                   <div className="text-xs uppercase tracking-[0.24em] text-muted-foreground">Classifier animation</div>
                   <div className="mt-4 grid gap-3">
                     {[0, 1, 2, 3, 4].map((row) => (
@@ -1784,7 +1798,7 @@ export default function App() {
                         {greaseAiSignals.map((signal, index) => (
                           <div
                             key={`${row}-${signal.label}-${index}`}
-                            className="h-5 rounded-full bg-gradient-to-r from-primary/15 via-primary/60 to-secondary/40"
+                            className="h-5 rounded-full bg-gradient-to-r from-primary/10 via-primary/40 to-secondary/30"
                             style={{ opacity: Math.max(0.2, signal.value - row * 0.12 + index * 0.04) }}
                           />
                         ))}
@@ -2014,7 +2028,9 @@ export default function App() {
                               providers: current.providers.map((item) => item.id === provider.id ? { ...item, update_interval_minutes: Number.isNaN(nextValue) ? item.update_interval_minutes : nextValue } : item),
                             }));
                           }} placeholder="60" />
-                          <Button variant="secondary" size="sm" onClick={() => void handleThreatIntelProviderSave(provider.id)} disabled={busyAction === `threat-intel-${provider.id}`}>{busyAction === `threat-intel-${provider.id}` ? "Saving..." : "Save"}</Button>
+                          <div className="flex justify-end">
+                            <Button variant="secondary" size="sm" onClick={() => void handleThreatIntelProviderSave(provider.id)} disabled={busyAction === `threat-intel-${provider.id}`}>{busyAction === `threat-intel-${provider.id}` ? "Saving..." : "Save"}</Button>
+                          </div>
                         </div>}
                       />
                     ))}
@@ -2063,7 +2079,7 @@ export default function App() {
                     <div className="mt-3 grid gap-3">
                       <Input value={blocklistName} onChange={(event) => setBlocklistName(event.target.value)} placeholder="Human-readable name" />
                       <Input value={blocklistUrl} onChange={(event) => setBlocklistUrl(event.target.value)} placeholder="Source URL or data: URL" />
-                      <div className="grid gap-3 sm:grid-cols-3">
+                      <div className="grid gap-3 xl:grid-cols-3">
                         <select className="h-11 rounded-xl border border-input bg-background px-4 text-sm" value={blocklistProfile} onChange={(event) => setBlocklistProfile(event.target.value)}>
                           <option value="custom">Custom</option>
                           <option value="essential">Essential</option>
@@ -2077,7 +2093,9 @@ export default function App() {
                         </select>
                         <Input value={blocklistInterval} onChange={(event) => setBlocklistInterval(event.target.value)} placeholder="Refresh minutes" />
                       </div>
-                      <Button onClick={() => void handleBlocklistCreate()} disabled={!blocklistName || !blocklistUrl || busyAction === "create-blocklist"}>Add blocklist</Button>
+                      <div className="flex justify-end">
+                        <Button onClick={() => void handleBlocklistCreate()} disabled={!blocklistName || !blocklistUrl || busyAction === "create-blocklist"}>Add blocklist</Button>
+                      </div>
                     </div>
                   </div>
                   {settings.blocklists.map((source) => (
@@ -2096,7 +2114,7 @@ export default function App() {
                             ))}
                           </div>} />
                       ))}
-                      {!showServicesView ? <Button variant="ghost" onClick={() => setShowServicesView(true)}>Show all services</Button> : null}
+                      {!showServicesView ? <div className="flex justify-end"><Button variant="ghost" onClick={() => setShowServicesView(true)}>Show all services</Button></div> : null}
                     </div>
                   </Card>
                 </div>

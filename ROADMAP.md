@@ -363,6 +363,7 @@ Goal: Make the control plane feel approachable for a household first, while keep
 - [x] Refine profiles and settings into calmer shadcn-style workspace panels.
 - [x] Normalize responsive layouts and interaction states across devices, Grease-AI, and settings surfaces.
 - [x] Normalize repeated data rows and empty states into one calmer shadcn-style list language.
+- [x] Tighten card header rhythm, action density, and final analytics-panel polish for the shadcn redesign pass.
 
 ## Phase 10 - Android Companion App
 
