@@ -361,6 +361,7 @@ Goal: Make the control plane feel approachable for a household first, while keep
 - [x] Allow saved block profiles to be deleted from the profile editor.
 - [x] Normalize the shell, navigation, and overview hierarchy around a shadcn-style dashboard base.
 - [x] Refine profiles and settings into calmer shadcn-style workspace panels.
+- [x] Normalize responsive layouts and interaction states across devices, Grease-AI, and settings surfaces.
 
 ## Phase 10 - Android Companion App
 
