@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import { api, type AuditEvent, type BlockProfileListRecord, type BlockProfileRecord, type DashboardSummary, type FederatedLearningSettings, type LatencyBudgetStatus, type ResolverAccessStatus, type SettingsSummary, type SyncNodeStatus, type TailscaleDnsCheckResult, type TailscaleStatus, type ThreatIntelSettings } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -1286,23 +1286,23 @@ export default function App() {
             <CardDescription>Recent destinations seen by the resolver over the last day.</CardDescription>
             <div className="mt-5 grid gap-3">
               {dashboard.domain_insights.top_queried_domains.length === 0 ? (
-                <div className="rounded-2xl border border-dashed border-border bg-muted/30 p-5 text-sm text-muted-foreground">
+                <EmptyState>
                   Query activity will appear here once devices begin sending traffic through Cogwheel.
-                </div>
+                </EmptyState>
               ) : (
                 dashboard.domain_insights.top_queried_domains.map((entry, index) => (
-                  <div key={entry.domain} className="rounded-2xl border border-border bg-muted/20 p-4">
-                    <div className="flex items-center justify-between gap-4">
-                      <div>
-                        <div className="text-xs uppercase tracking-[0.24em] text-muted-foreground">{String(index + 1).padStart(2, "0")}</div>
-                        <div className="mt-1 font-medium text-foreground">{entry.domain}</div>
-                      </div>
+                  <ListRow
+                    key={entry.domain}
+                    tone="muted"
+                    title={entry.domain}
+                    detail={`#${String(index + 1).padStart(2, "0")} most active domain in the recent resolver window.`}
+                    right={
                       <div className="text-right">
                         <div className="font-display text-2xl font-semibold">{entry.count}</div>
                         <div className="text-xs text-muted-foreground">queries</div>
                       </div>
-                    </div>
-                  </div>
+                    }
+                  />
                 ))
               )}
             </div>
@@ -1313,20 +1313,18 @@ export default function App() {
             <CardDescription>Where protection is actively stepping in right now.</CardDescription>
             <div className="mt-5 grid gap-3">
               {dashboard.domain_insights.top_blocked_domains.length === 0 ? (
-                <div className="rounded-2xl border border-dashed border-border bg-muted/30 p-5 text-sm text-muted-foreground">
+                <EmptyState>
                   No blocked domains yet. When filtering engages, the busiest blocked destinations will appear here.
-                </div>
+                </EmptyState>
               ) : (
                 dashboard.domain_insights.top_blocked_domains.map((entry) => (
-                  <div key={entry.domain} className="rounded-2xl border border-border bg-muted/20 p-4">
-                    <div className="flex items-center justify-between gap-4">
-                      <div>
-                        <div className="font-medium text-foreground">{entry.domain}</div>
-                        <div className="mt-1 text-xs text-muted-foreground">Blocked before the query could complete.</div>
-                      </div>
-                      <Badge className="bg-foreground text-background">{entry.count} blocked</Badge>
-                    </div>
-                  </div>
+                  <ListRow
+                    key={entry.domain}
+                    tone="muted"
+                    title={entry.domain}
+                    detail="Blocked before the query could complete."
+                    right={<Badge className="bg-foreground text-background">{entry.count} blocked</Badge>}
+                  />
                 ))
               )}
             </div>
@@ -1341,25 +1339,19 @@ export default function App() {
           <CardDescription>Use one of these DNS targets on phones, laptops, TVs, or routers that should use this Cogwheel instance.</CardDescription>
           <div className="mt-5 grid gap-3">
             {resolverAccess.dns_targets.length === 0 ? (
-              <div className="rounded-2xl border border-dashed border-border/80 bg-muted/30 p-4 text-sm text-muted-foreground">
-                Resolver targets will appear here once the control plane reports reachable DNS addresses.
-              </div>
-            ) : (
-              resolverAccess.dns_targets.map((target) => (
-                <div key={target} className="rounded-2xl border border-border/70 bg-white/80 p-4 text-sm">
-                  <div className="text-muted-foreground">DNS server</div>
-                  <div className="mt-1 font-mono text-base font-semibold text-foreground">{target}</div>
-                </div>
-              ))
-            )}
-            <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 text-sm">
-              <div className="text-muted-foreground">Tailscale</div>
-              <div className="mt-1 font-medium text-foreground">{resolverAccess.tailscale_ip ?? "Not available on this node"}</div>
-            </div>
+                <EmptyState>
+                  Resolver targets will appear here once the control plane reports reachable DNS addresses.
+                </EmptyState>
+              ) : (
+                resolverAccess.dns_targets.map((target) => (
+                  <ListRow key={target} title="DNS server" detail={target} detailClassName="mt-1 font-mono text-base font-semibold text-foreground" />
+                ))
+              )}
+            <ListRow title="Tailscale" detail={resolverAccess.tailscale_ip ?? "Not available on this node"} tone="muted" />
             {resolverAccess.notes.length > 0 ? (
-              <div className="rounded-2xl border border-dashed border-border/70 bg-background/80 p-4 text-sm text-muted-foreground">
+              <EmptyState>
                 {resolverAccess.notes.join(" ")}
-              </div>
+              </EmptyState>
             ) : null}
             <div className="grid gap-3 md:grid-cols-2">
               {[
@@ -1386,19 +1378,11 @@ export default function App() {
                   target: primaryDnsTarget,
                 },
               ].map((platform) => (
-                <div key={platform.title} className="rounded-2xl border border-border/70 bg-white/80 p-4 text-sm">
-                  <div className="font-medium text-foreground">{platform.title}</div>
-                  <div className="mt-1 text-muted-foreground">{platform.detail}</div>
-                  <div className="mt-3 font-mono text-sm font-semibold text-foreground">{platform.target}</div>
-                </div>
+                <ListRow key={platform.title} title={platform.title} detail={platform.detail} right={<div className="font-mono text-sm font-semibold text-foreground">{platform.target}</div>} />
               ))}
             </div>
             {ipv6DnsTarget ? (
-              <div className="rounded-2xl border border-border/70 bg-white/80 p-4 text-sm">
-                <div className="font-medium text-foreground">IPv6 DNS target</div>
-                <div className="mt-1 text-muted-foreground">If your router or clients use IPv6 DNS, point them here too so traffic does not bypass the IPv4 filter path.</div>
-                <div className="mt-3 break-all font-mono text-sm font-semibold text-foreground">{ipv6DnsTarget}</div>
-              </div>
+              <ListRow title="IPv6 DNS target" detail="If your router or clients use IPv6 DNS, point them here too so traffic does not bypass the IPv4 filter path." right={<div className="break-all font-mono text-sm font-semibold text-foreground">{ipv6DnsTarget}</div>} />
             ) : null}
           </div>
         </Card>
@@ -1422,22 +1406,14 @@ export default function App() {
           <CardDescription>Newest high-signal security events without pulling in device management controls.</CardDescription>
           <div className="mt-5 grid gap-3">
             {dashboard.recent_security_events.length === 0 ? (
-              <div className="rounded-2xl border border-dashed border-border/80 bg-muted/30 p-4 text-sm text-muted-foreground">
-                No risky DNS events recorded yet.
-              </div>
-            ) : (
-              dashboard.recent_security_events.slice(0, 4).map((event) => (
-                <div key={event.id} className="rounded-2xl border border-border/70 bg-muted/60 p-3 text-sm">
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="font-medium">{event.domain}</div>
-                    <Badge>{event.severity}</Badge>
-                  </div>
-                  <div className="mt-1 text-muted-foreground">
-                    {(event.device_name ?? "Unassigned device")} on {event.client_ip}
-                  </div>
-                </div>
-              ))
-            )}
+                <EmptyState>
+                  No risky DNS events recorded yet.
+                </EmptyState>
+              ) : (
+                dashboard.recent_security_events.slice(0, 4).map((event) => (
+                  <ListRow key={event.id} tone="muted" title={event.domain} detail={`${event.device_name ?? "Unassigned device"} on ${event.client_ip}`} right={<Badge>{event.severity}</Badge>} />
+                ))
+              )}
           </div>
         </Card>
 
@@ -1465,9 +1441,9 @@ export default function App() {
             <div className="px-4 py-4">
             <div className="grid gap-3">
               {settings.block_profiles.length === 0 ? (
-                <div className="rounded-2xl border border-dashed border-border bg-muted/30 p-5 text-sm text-muted-foreground">
-                  No saved profiles yet. Start with a family-safe or focus profile and then assign it to devices.
-                </div>
+                  <EmptyState>
+                    No saved profiles yet. Start with a family-safe or focus profile and then assign it to devices.
+                  </EmptyState>
               ) : (
                 settings.block_profiles.map((profile) => (
                   <button
@@ -1722,33 +1698,35 @@ export default function App() {
               </div>
               <div className="grid gap-3 px-6 py-6">
                 {settings.devices.length === 0 ? (
-                  <div className="rounded-2xl border border-dashed border-border bg-muted/20 p-5 text-sm text-muted-foreground">
-                    No devices have been named yet. Start with the devices the household will recognize fastest.
-                  </div>
-                ) : (
-                  settings.devices.map((device) => (
-                    <div key={device.id} className="rounded-2xl border border-border bg-background p-4">
-                      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                        <div>
-                          <div className="font-medium">{device.name}</div>
-                          <div className="text-sm text-muted-foreground">{device.ip_address}</div>
-                        </div>
-                        <Badge>{device.policy_mode === "custom" ? "Custom" : "Default"}</Badge>
-                      </div>
-                      <div className="mt-3 flex flex-wrap gap-2 text-xs text-muted-foreground">
-                        <Badge>{device.blocklist_profile_override ?? "Household default"}</Badge>
-                        <Badge>{device.protection_override === "bypass" ? "Bypass enabled" : "Blocking on"}</Badge>
-                        <Badge>{device.allowed_domains.length} allowlisted</Badge>
-                        <Badge>{device.service_overrides.length} service rules</Badge>
-                      </div>
-                      <div className="mt-4 flex justify-end">
-                        <Button variant="ghost" size="sm" onClick={() => startDeviceEdit(device)}>
-                          Edit device
-                        </Button>
-                      </div>
-                    </div>
-                  ))
-                )}
+                    <EmptyState>
+                      No devices have been named yet. Start with the devices the household will recognize fastest.
+                    </EmptyState>
+                  ) : (
+                    settings.devices.map((device) => (
+                      <ListRow
+                        key={device.id}
+                        title={device.name}
+                        detail={device.ip_address}
+                        right={<Badge>{device.policy_mode === "custom" ? "Custom" : "Default"}</Badge>}
+                        footer={
+                          <>
+                            <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
+                              <Badge>{device.blocklist_profile_override ?? "Household default"}</Badge>
+                              <Badge>{device.protection_override === "bypass" ? "Bypass enabled" : "Blocking on"}</Badge>
+                              <Badge>{device.allowed_domains.length} allowlisted</Badge>
+                              <Badge>{device.service_overrides.length} service rules</Badge>
+                            </div>
+                            <div className="mt-4 flex justify-end">
+                              <Button variant="ghost" size="sm" onClick={() => startDeviceEdit(device)}>
+                                Edit device
+                              </Button>
+                            </div>
+                          </>
+                        }
+                      >
+                      </ListRow>
+                    ))
+                  )}
               </div>
             </Card>
 
@@ -1759,15 +1737,12 @@ export default function App() {
               </div>
               <div className="grid gap-3 px-6 py-6 text-sm text-muted-foreground">
                 {settings.block_profiles.length === 0 ? (
-                  <div className="rounded-2xl border border-dashed border-border bg-muted/20 p-4">
+                  <EmptyState>
                     Create a block profile first, then come back here to assign it to a device.
-                  </div>
+                  </EmptyState>
                 ) : (
                   settings.block_profiles.map((profile) => (
-                    <div key={profile.id} className="rounded-2xl border border-border bg-muted/20 p-4">
-                      <div className="font-medium text-foreground">{profile.emoji} {profile.name}</div>
-                      <div className="mt-1">{profile.description}</div>
-                    </div>
+                    <ListRow key={profile.id} tone="muted" title={`${profile.emoji || "◌"} ${profile.name}`} detail={profile.description} />
                   ))
                 )}
               </div>
@@ -1786,15 +1761,18 @@ export default function App() {
                   <div className="text-sm font-medium text-foreground">Learning pulse</div>
                   <div className="space-y-3">
                     {greaseAiSignals.map((signal) => (
-                      <div key={signal.label} className="rounded-2xl border border-border bg-muted/20 p-4">
-                        <div className="flex items-center justify-between gap-3 text-sm">
-                          <span className="font-medium text-foreground">{signal.label}</span>
-                          <span className="text-muted-foreground">{Math.round(signal.value * 100)}%</span>
-                        </div>
-                        <div className="mt-3 h-3 overflow-hidden rounded-full bg-muted/60">
-                          <div className={`h-full rounded-full bg-gradient-to-r ${signal.tint}`} style={{ width: `${Math.max(signal.value * 100, 6)}%` }} />
-                        </div>
-                      </div>
+                      <ListRow
+                        key={signal.label}
+                        tone="muted"
+                        title={signal.label}
+                        right={<span className="text-muted-foreground">{Math.round(signal.value * 100)}%</span>}
+                        footer={
+                          <div className="mt-3 h-3 overflow-hidden rounded-full bg-muted/60">
+                            <div className={`h-full rounded-full bg-gradient-to-r ${signal.tint}`} style={{ width: `${Math.max(signal.value * 100, 6)}%` }} />
+                          </div>
+                        }
+                      >
+                      </ListRow>
                     ))}
                   </div>
                 </div>
@@ -1830,23 +1808,11 @@ export default function App() {
               <CardDescription className="mt-1">Operational numbers behind the current learning pulse.</CardDescription>
               </div>
               <div className="grid gap-3 px-6 py-6 sm:grid-cols-2">
-                <div className="rounded-2xl border border-border bg-muted/20 p-4 text-sm">
-                  <div className="text-muted-foreground">Mode</div>
-                  <div className="mt-1 text-xl font-semibold text-foreground">{settings.classifier.mode}</div>
+                  <CompactStat label="Mode" value={settings.classifier.mode} />
+                  <CompactStat label="Threshold" value={settings.classifier.threshold.toFixed(2)} />
+                  <CompactStat label="Queries observed" value={dashboard.runtime_health.snapshot.queries_total.toLocaleString()} />
+                  <CompactStat label="Blocked queries" value={dashboard.runtime_health.snapshot.blocked_total.toLocaleString()} />
                 </div>
-                <div className="rounded-2xl border border-border bg-muted/20 p-4 text-sm">
-                  <div className="text-muted-foreground">Threshold</div>
-                  <div className="mt-1 text-xl font-semibold text-foreground">{settings.classifier.threshold.toFixed(2)}</div>
-                </div>
-                <div className="rounded-2xl border border-border bg-muted/20 p-4 text-sm">
-                  <div className="text-muted-foreground">Queries observed</div>
-                  <div className="mt-1 text-xl font-semibold text-foreground">{dashboard.runtime_health.snapshot.queries_total.toLocaleString()}</div>
-                </div>
-                <div className="rounded-2xl border border-border bg-muted/20 p-4 text-sm">
-                  <div className="text-muted-foreground">Blocked queries</div>
-                  <div className="mt-1 text-xl font-semibold text-foreground">{dashboard.runtime_health.snapshot.blocked_total.toLocaleString()}</div>
-                </div>
-              </div>
             </Card>
 
             <Card className="p-0 overflow-hidden">
@@ -1855,18 +1821,11 @@ export default function App() {
               <CardDescription className="mt-1">Live hot-path budget checks after the latest traffic observed by this resolver.</CardDescription>
               </div>
               <div className="grid gap-3 px-6 py-6 lg:grid-cols-3">
-                {latencyBudget.checks.map((check) => (
-                  <div key={check.label} className="rounded-2xl border border-border bg-muted/20 p-4 text-sm">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="font-medium text-foreground">{check.label}</div>
-                      <Badge>{check.status}</Badge>
-                    </div>
-                    <div className="mt-2 text-xl font-semibold text-foreground">{check.observed_ms.toFixed(3)} ms</div>
-                    <div className="mt-1 text-xs text-muted-foreground">Target {check.target_p50_ms.toFixed(1)} ms • {check.sample_count} samples</div>
-                  </div>
-                ))}
-              </div>
-            </Card>
+                  {latencyBudget.checks.map((check) => (
+                    <ListRow key={check.label} tone="muted" title={check.label} detail={`Target ${check.target_p50_ms.toFixed(1)} ms • ${check.sample_count} samples`} right={<><Badge>{check.status}</Badge><div className="mt-2 text-xl font-semibold text-foreground">{check.observed_ms.toFixed(3)} ms</div></>} rightClassName="text-right" />
+                  ))}
+                </div>
+              </Card>
           </div>
         </section>
       ) : (
@@ -2040,15 +1999,13 @@ export default function App() {
                   </div>
                   <div className="grid gap-3">
                     {threatIntelSettings.providers.map((provider) => (
-                      <div key={provider.id} className="rounded-2xl border border-border bg-muted/20 p-4 text-sm">
-                        <div className="flex items-start justify-between gap-3">
-                          <div>
-                            <div className="font-medium">{provider.display_name}</div>
-                            <div className="mt-1 text-xs text-muted-foreground">{provider.capabilities.join(" • ")}</div>
-                          </div>
-                          <Badge className={provider.enabled ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground"}>{provider.enabled ? "Enabled" : "Disabled"}</Badge>
-                        </div>
-                        <div className="mt-3 grid gap-3 xl:grid-cols-[minmax(0,1fr)_180px_auto]">
+                      <ListRow
+                        key={provider.id}
+                        tone="muted"
+                        title={provider.display_name}
+                        detail={provider.capabilities.join(" • ")}
+                        right={<Badge className={provider.enabled ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground"}>{provider.enabled ? "Enabled" : "Disabled"}</Badge>}
+                        footer={<div className="mt-3 grid gap-3 xl:grid-cols-[minmax(0,1fr)_180px_auto]">
                           <Input value={provider.feed_url ?? ""} onChange={(event) => setThreatIntelSettings((current) => ({ ...current, providers: current.providers.map((item) => item.id === provider.id ? { ...item, feed_url: event.target.value || null } : item) }))} placeholder="https://feed.example.invalid/dns" />
                           <Input value={String(provider.update_interval_minutes)} onChange={(event) => {
                             const nextValue = Number.parseInt(event.target.value, 10);
@@ -2058,8 +2015,8 @@ export default function App() {
                             }));
                           }} placeholder="60" />
                           <Button variant="secondary" size="sm" onClick={() => void handleThreatIntelProviderSave(provider.id)} disabled={busyAction === `threat-intel-${provider.id}`}>{busyAction === `threat-intel-${provider.id}` ? "Saving..." : "Save"}</Button>
-                        </div>
-                      </div>
+                        </div>}
+                      />
                     ))}
                   </div>
                 </section>
@@ -2124,39 +2081,20 @@ export default function App() {
                     </div>
                   </div>
                   {settings.blocklists.map((source) => (
-                    <div key={source.id} className="rounded-2xl border border-border bg-background p-4">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <div className="font-medium">{source.name}</div>
-                          <div className="text-sm text-muted-foreground">{source.profile} • {source.refresh_interval_minutes}m</div>
-                        </div>
-                        <div className="flex gap-2">
-                          <Button variant="secondary" size="sm" onClick={() => void handleBlocklistToggle(source.id, !source.enabled)} disabled={busyAction === `blocklist-toggle-${source.id}`}>{source.enabled ? "Disable" : "Enable"}</Button>
-                        </div>
-                      </div>
-                    </div>
+                    <ListRow key={source.id} title={source.name} detail={`${source.profile} • ${source.refresh_interval_minutes}m`} right={<Button variant="secondary" size="sm" onClick={() => void handleBlocklistToggle(source.id, !source.enabled)} disabled={busyAction === `blocklist-toggle-${source.id}`}>{source.enabled ? "Disable" : "Enable"}</Button>} />
                   ))}
                   <Card id="services" className="border border-border bg-muted/20 p-5 shadow-none">
                     <CardTitle>Services</CardTitle>
                     <CardDescription className="mt-1">Optional curated allow/block toggles for common apps.</CardDescription>
                     <div className="mt-4 grid gap-3">
                       {filteredServices.slice(0, showServicesView ? filteredServices.length : 3).map((service) => (
-                        <div key={service.manifest.service_id} className="rounded-2xl border border-border bg-background p-4">
-                          <div className="flex items-center justify-between gap-3">
-                            <div>
-                              <div className="font-medium">{service.manifest.display_name}</div>
-                              <div className="text-sm text-muted-foreground">{service.manifest.risk_notes}</div>
-                            </div>
-                            <Badge>{service.mode}</Badge>
-                          </div>
-                          <div className="mt-3 flex gap-2">
+                        <ListRow key={service.manifest.service_id} title={service.manifest.display_name} detail={service.manifest.risk_notes} right={<Badge>{service.mode}</Badge>} footer={<div className="mt-3 flex flex-wrap gap-2">
                             {(["Inherit", "Allow", "Block"] as const).map((mode) => (
                               <Button key={mode} variant={service.mode === mode ? "primary" : "secondary"} size="sm" onClick={() => void handleServiceUpdate(service.manifest.service_id, mode)} disabled={busyAction === `service-${service.manifest.service_id}`}>
                                 {mode}
                               </Button>
                             ))}
-                          </div>
-                        </div>
+                          </div>} />
                       ))}
                       {!showServicesView ? <Button variant="ghost" onClick={() => setShowServicesView(true)}>Show all services</Button> : null}
                     </div>
@@ -2174,10 +2112,7 @@ export default function App() {
                     <div className="font-medium">Guided recovery</div>
                     <div className="grid gap-3">
                       {recoveryActions.map((item) => (
-                        <div key={item.title} className="rounded-2xl border border-border bg-muted/20 p-4 text-sm">
-                          <div className="font-medium">{item.title}</div>
-                          <div className="mt-1 text-muted-foreground">{item.detail}</div>
-                          <div className="mt-3">
+                        <ListRow key={item.title} tone="muted" title={item.title} detail={item.detail} footer={<div className="mt-3">
                             <Button variant="secondary" size="sm" onClick={() => {
                               if (item.actionKey === "runtime-health-check") {
                                 void handleRuntimeHealthCheck();
@@ -2195,8 +2130,7 @@ export default function App() {
                             }} disabled={item.disabled}>
                               {item.actionLabel}
                             </Button>
-                          </div>
-                        </div>
+                          </div>} />
                       ))}
                     </div>
                   </section>
@@ -2217,16 +2151,7 @@ export default function App() {
                       {filteredAuditEvents.slice(0, 8).map((event) => {
                         const summary = summarizeAuditEvent(event);
                         return (
-                          <div key={event.id} className="rounded-2xl border border-border/70 bg-muted/60 p-3 text-sm">
-                            <div className="flex items-start justify-between gap-3">
-                              <div>
-                                <div className="font-medium">{summary.title}</div>
-                                <div className="mt-1 text-xs text-muted-foreground">{event.event_type}</div>
-                              </div>
-                              <Badge>{summary.category}</Badge>
-                            </div>
-                            <div className="mt-2 text-muted-foreground">{summary.detail}</div>
-                          </div>
+                          <ListRow key={event.id} tone="muted" title={summary.title} detail={summary.detail} meta={<div className="mt-1 text-xs text-muted-foreground">{event.event_type}</div>} right={<Badge>{summary.category}</Badge>} />
                         );
                       })}
                     </div>
@@ -2244,9 +2169,58 @@ export default function App() {
 
 function Row({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex items-center justify-between gap-4 text-sm">
-      <span className="text-muted-foreground">{label}</span>
-      <span className="font-medium">{value}</span>
+    <ListRow title={label} right={<span className="font-medium">{value}</span>} compact />
+  );
+}
+
+function EmptyState({ children }: { children: ReactNode }) {
+  return <div className="rounded-2xl border border-dashed border-border bg-muted/20 p-4 text-sm text-muted-foreground">{children}</div>;
+}
+
+function CompactStat({ label, value }: { label: string; value: string }) {
+  return (
+    <ListRow
+      title={label}
+      tone="muted"
+      compact
+      right={<div className="text-xl font-semibold text-foreground">{value}</div>}
+      rightClassName="text-right"
+    />
+  );
+}
+
+function ListRow({
+  title,
+  detail,
+  meta,
+  right,
+  footer,
+  tone = "default",
+  compact = false,
+  detailClassName,
+  rightClassName,
+}: {
+  title: ReactNode;
+  detail?: ReactNode;
+  meta?: ReactNode;
+  right?: ReactNode;
+  footer?: ReactNode;
+  tone?: "default" | "muted";
+  compact?: boolean;
+  detailClassName?: string;
+  rightClassName?: string;
+}) {
+  return (
+    <div className={`rounded-2xl border border-border ${tone === "muted" ? "bg-muted/20" : "bg-background"} ${compact ? "p-3" : "p-4"}`}>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <div className="font-medium text-foreground">{title}</div>
+          {meta ? meta : null}
+          {detail ? <div className={detailClassName ?? "mt-1 text-sm text-muted-foreground"}>{detail}</div> : null}
+        </div>
+        {right ? <div className={`shrink-0 ${rightClassName ?? ""}`}>{right}</div> : null}
+      </div>
+      {footer ? footer : null}
     </div>
   );
 }

@@ -336,7 +336,7 @@ Exit criteria:
 - [x] Track latency budgets for cache hit/miss and classifier processing.
 - [x] Enforce audit logging on every policy-changing action.
 - [x] Require rollback path for every deployment-affecting feature.
-- [ ] Keep default user-facing settings minimal and understandable.
+- [x] Keep default user-facing settings minimal and understandable.
 - [ ] Preserve modular crate boundaries; avoid cross-crate coupling drift.
 
 ## UX Refinement Follow-Up
@@ -362,6 +362,7 @@ Goal: Make the control plane feel approachable for a household first, while keep
 - [x] Normalize the shell, navigation, and overview hierarchy around a shadcn-style dashboard base.
 - [x] Refine profiles and settings into calmer shadcn-style workspace panels.
 - [x] Normalize responsive layouts and interaction states across devices, Grease-AI, and settings surfaces.
+- [x] Normalize repeated data rows and empty states into one calmer shadcn-style list language.
 
 ## Phase 10 - Android Companion App
 
