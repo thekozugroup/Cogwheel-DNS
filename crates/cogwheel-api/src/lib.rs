@@ -313,6 +313,7 @@ async fn metrics(State(state): State<ApiState>) -> Result<Response, ApiError> {
 mod tests {
     use super::{AppConfig, DeploymentProfile};
     use std::collections::HashMap;
+    use std::fs;
 
     #[test]
     fn defaults_to_home_profile() {
@@ -358,5 +359,62 @@ mod tests {
         let error = AppConfig::load_from_env(|key| env.get(key).cloned())
             .expect_err("invalid profile should fail");
         assert_eq!(error.to_string(), "invalid environment value: invalid");
+    }
+
+    #[test]
+    fn crate_path_dependencies_match_the_adr_boundaries() {
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates dir")
+            .parent()
+            .expect("workspace root");
+
+        let expected = [
+            (
+                "crates/cogwheel-dns-core/Cargo.toml",
+                &["cogwheel-classifier", "cogwheel-policy"][..],
+            ),
+            ("crates/cogwheel-classifier/Cargo.toml", &[][..]),
+            (
+                "crates/cogwheel-lists/Cargo.toml",
+                &["cogwheel-policy", "cogwheel-services"][..],
+            ),
+            (
+                "crates/cogwheel-services/Cargo.toml",
+                &["cogwheel-policy"][..],
+            ),
+            (
+                "crates/cogwheel-storage/Cargo.toml",
+                &["cogwheel-policy"][..],
+            ),
+            ("crates/cogwheel-sync/Cargo.toml", &[][..]),
+            ("crates/cogwheel-api/Cargo.toml", &[][..]),
+        ];
+
+        for (relative_path, allowed) in expected {
+            let manifest = fs::read_to_string(workspace_root.join(relative_path))
+                .unwrap_or_else(|error| panic!("failed to read {relative_path}: {error}"));
+            let actual = path_dependencies(&manifest);
+            assert_eq!(
+                actual, allowed,
+                "{relative_path} drifted from ADR 0001 crate boundaries; update the ADR first if this coupling is intentional"
+            );
+        }
+    }
+
+    fn path_dependencies(manifest: &str) -> Vec<&str> {
+        let mut dependencies = manifest
+            .lines()
+            .filter_map(|line| {
+                let trimmed = line.trim();
+                if trimmed.contains("path =") {
+                    trimmed.split('=').next().map(str::trim)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        dependencies.sort_unstable();
+        dependencies
     }
 }

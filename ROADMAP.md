@@ -337,7 +337,7 @@ Exit criteria:
 - [x] Enforce audit logging on every policy-changing action.
 - [x] Require rollback path for every deployment-affecting feature.
 - [x] Keep default user-facing settings minimal and understandable.
-- [ ] Preserve modular crate boundaries; avoid cross-crate coupling drift.
+- [x] Preserve modular crate boundaries; avoid cross-crate coupling drift.
 
 ## UX Refinement Follow-Up
 
