@@ -1208,7 +1208,7 @@ export default function App() {
   }
 
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-[1540px] flex-col gap-4 px-3 py-3 sm:px-4 sm:py-4 lg:px-5 lg:py-5">
+    <main className="mx-auto flex min-h-screen w-full max-w-7xl flex-col gap-4 px-4 py-4 sm:px-6 sm:py-6 lg:px-8">
       <div className="pointer-events-none fixed right-4 top-4 z-50 flex w-full max-w-sm flex-col gap-3">
         {toasts.map((toast) => (
           <div
@@ -1221,24 +1221,25 @@ export default function App() {
         ))}
       </div>
 
-      <div className="flex flex-1 flex-col gap-5 rounded-[34px] border border-border/60 bg-[linear-gradient(180deg,rgba(255,255,255,0.96),rgba(246,244,240,0.94))] p-3 shadow-sm sm:p-4 lg:p-5">
+      <div className="flex flex-1 flex-col gap-6 rounded-3xl border border-border bg-background/95 p-4 shadow-sm sm:p-6">
 
-      <header className="sticky top-4 z-40 rounded-[28px] border border-border/60 bg-white/90 px-4 py-4 shadow-sm backdrop-blur">
-        <div className="flex flex-col gap-4 lg:grid lg:grid-cols-[auto_1fr_auto] lg:items-center">
+      <header className="sticky top-4 z-40 rounded-2xl border border-border bg-background/95 px-4 py-4 shadow-sm backdrop-blur">
+        <div className="flex flex-col gap-4 lg:grid lg:grid-cols-[auto_minmax(0,1fr)_auto] lg:items-center">
           <div className="flex items-center gap-3">
-            <div className="flex size-10 items-center justify-center rounded-2xl border border-border/70 bg-muted/60 text-lg">⚙️</div>
+            <div className="flex size-10 items-center justify-center rounded-xl border border-border bg-muted text-lg">⚙️</div>
             <div className="font-display text-2xl font-semibold tracking-tight">Cogwheel</div>
           </div>
-          <nav className="grid gap-2 sm:grid-cols-2 lg:mx-auto lg:flex lg:justify-center">
+          <nav className="flex gap-2 overflow-x-auto lg:mx-auto lg:justify-center">
             {navItems.map((item) => (
-              <button
+              <Button
                 key={item.id}
-                type="button"
                 onClick={() => setActivePage(item.id)}
-                className={`rounded-full px-5 py-2.5 text-center text-sm font-medium transition ${activePage === item.id ? "bg-foreground text-background shadow-sm" : "border border-border/70 bg-white text-foreground hover:bg-muted/60"}`}
+                variant={activePage === item.id ? "default" : "outline"}
+                size="sm"
+                className="shrink-0 rounded-full px-4"
               >
                 {item.label}
-              </button>
+              </Button>
             ))}
           </nav>
           <div className="flex items-center justify-end">
@@ -1252,8 +1253,8 @@ export default function App() {
       {activePage === "overview" ? (
         <>
 
-      <section className="grid gap-4">
-        <div className="flex flex-col gap-4 rounded-[28px] border border-border/60 bg-white px-5 py-5 shadow-sm md:flex-row md:items-center md:justify-between">
+      <section className="space-y-6">
+        <Card className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div>
             <h1 className="font-display text-3xl font-semibold tracking-tight">Dashboard</h1>
             <div className="mt-1 text-sm text-muted-foreground">A clean snapshot of household filtering, blocked traffic, and active devices.</div>
@@ -1262,35 +1263,35 @@ export default function App() {
             {dashboard.protection_status === "Paused" ? (
               <Button variant="secondary" onClick={() => void handleResumeRuntime()} disabled={busyAction === "resume-runtime"}>Resume protection</Button>
             ) : (
-              <Button variant="ghost" onClick={() => void handlePauseRuntime(10)} disabled={busyAction === "pause-runtime"}>Pause 10m</Button>
+              <Button variant="outline" onClick={() => void handlePauseRuntime(10)} disabled={busyAction === "pause-runtime"}>Pause 10m</Button>
             )}
           </div>
-        </div>
+        </Card>
 
-        <section id="quick-health" className="grid gap-4 lg:grid-cols-3">
+        <section id="quick-health" className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {overviewStats.map((item) => (
-            <Card key={item.label} className={`border ${item.accent}`}>
+            <Card key={item.label} className={`p-5 ${item.accent}`}>
               <div className="text-sm text-muted-foreground">{item.label}</div>
-              <div className="mt-3 font-display text-5xl font-semibold tracking-tight">{item.value}</div>
+              <div className="mt-3 font-display text-4xl font-semibold tracking-tight sm:text-5xl">{item.value}</div>
               <div className="mt-2 text-sm text-muted-foreground">{item.detail}</div>
             </Card>
           ))}
         </section>
       </section>
 
-        <section className="grid gap-6 lg:grid-cols-[1fr_1fr]">
+        <section className="grid gap-6 xl:grid-cols-2">
 
           <Card>
             <CardTitle>Top queried domains</CardTitle>
             <CardDescription>Recent destinations seen by the resolver over the last day.</CardDescription>
             <div className="mt-5 grid gap-3">
               {dashboard.domain_insights.top_queried_domains.length === 0 ? (
-                <div className="rounded-[24px] border border-dashed border-border/70 bg-muted/30 p-5 text-sm text-muted-foreground">
+                <div className="rounded-2xl border border-dashed border-border bg-muted/30 p-5 text-sm text-muted-foreground">
                   Query activity will appear here once devices begin sending traffic through Cogwheel.
                 </div>
               ) : (
                 dashboard.domain_insights.top_queried_domains.map((entry, index) => (
-                  <div key={entry.domain} className="rounded-[24px] border border-border/70 bg-white/85 p-4">
+                  <div key={entry.domain} className="rounded-2xl border border-border bg-muted/20 p-4">
                     <div className="flex items-center justify-between gap-4">
                       <div>
                         <div className="text-xs uppercase tracking-[0.24em] text-muted-foreground">{String(index + 1).padStart(2, "0")}</div>
@@ -1312,12 +1313,12 @@ export default function App() {
             <CardDescription>Where protection is actively stepping in right now.</CardDescription>
             <div className="mt-5 grid gap-3">
               {dashboard.domain_insights.top_blocked_domains.length === 0 ? (
-                <div className="rounded-[24px] border border-dashed border-border/70 bg-muted/30 p-5 text-sm text-muted-foreground">
+                <div className="rounded-2xl border border-dashed border-border bg-muted/30 p-5 text-sm text-muted-foreground">
                   No blocked domains yet. When filtering engages, the busiest blocked destinations will appear here.
                 </div>
               ) : (
                 dashboard.domain_insights.top_blocked_domains.map((entry) => (
-                  <div key={entry.domain} className="rounded-[24px] border border-border/70 bg-[linear-gradient(135deg,rgba(250,245,239,0.9),rgba(255,255,255,0.96))] p-4">
+                  <div key={entry.domain} className="rounded-2xl border border-border bg-muted/20 p-4">
                     <div className="flex items-center justify-between gap-4">
                       <div>
                         <div className="font-medium text-foreground">{entry.domain}</div>
@@ -1450,17 +1451,21 @@ export default function App() {
       ) : null}
         </>
       ) : activePage === "profiles" ? (
-        <section className="grid gap-6 xl:grid-cols-[0.88fr_1.12fr]">
-          <Card>
-            <CardTitle>Block profiles</CardTitle>
-            <CardDescription>Build named household profiles from OISD defaults, allowlists, and any extra GitHub-hosted list you trust.</CardDescription>
-            <div className="mt-5 flex items-center justify-between gap-3">
-              <div className="text-sm text-muted-foreground">Saved profiles can be assigned to devices without reopening the full settings wall.</div>
-              <Button variant="secondary" size="sm" className="min-w-11 px-0" onClick={startNewBlockProfile} aria-label="Create profile">+</Button>
+        <section className="grid gap-6 xl:grid-cols-[360px_minmax(0,1fr)]">
+          <Card className="p-0 overflow-hidden">
+            <div className="border-b border-border px-6 py-5">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <CardTitle>Profile library</CardTitle>
+                  <CardDescription className="mt-1">Choose a saved profile or start a new one for a different room, device, or family routine.</CardDescription>
+                </div>
+                <Button variant="secondary" size="icon" onClick={startNewBlockProfile} aria-label="Create profile">+</Button>
+              </div>
             </div>
-            <div className="mt-5 grid gap-3">
+            <div className="px-4 py-4">
+            <div className="grid gap-3">
               {settings.block_profiles.length === 0 ? (
-                <div className="rounded-[24px] border border-dashed border-border/70 bg-muted/30 p-5 text-sm text-muted-foreground">
+                <div className="rounded-2xl border border-dashed border-border bg-muted/30 p-5 text-sm text-muted-foreground">
                   No saved profiles yet. Start with a family-safe or focus profile and then assign it to devices.
                 </div>
               ) : (
@@ -1469,38 +1474,52 @@ export default function App() {
                     key={profile.id}
                     type="button"
                     onClick={() => selectBlockProfile(profile)}
-                    className={`rounded-[24px] border p-4 text-left transition ${selectedBlockProfileId === profile.id ? "border-foreground bg-foreground text-background" : "border-border/70 bg-white/80 hover:bg-muted/30"}`}
+                    className={`rounded-2xl border p-4 text-left transition ${selectedBlockProfileId === profile.id ? "border-primary bg-primary/5 shadow-sm" : "border-border bg-muted/20 hover:bg-muted/40"}`}
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div>
                         <div className="text-2xl">{profile.emoji || "◌"}</div>
                         <div className="mt-2 font-medium">{profile.name}</div>
-                        <div className={`mt-1 text-sm ${selectedBlockProfileId === profile.id ? "text-background/70" : "text-muted-foreground"}`}>{profile.description || "No summary yet."}</div>
+                        <div className="mt-1 text-sm text-muted-foreground">{profile.description || "No summary yet."}</div>
                       </div>
-                      <Badge className={selectedBlockProfileId === profile.id ? "bg-background text-foreground" : "bg-muted text-muted-foreground"}>{profile.blocklists.length} sources</Badge>
+                      <Badge className={selectedBlockProfileId === profile.id ? "bg-primary text-primary-foreground" : "bg-secondary text-secondary-foreground"}>{profile.blocklists.length} sources</Badge>
                     </div>
-                    <div className={`mt-3 text-xs ${selectedBlockProfileId === profile.id ? "text-background/70" : "text-muted-foreground"}`}>
+                    <div className="mt-3 text-xs text-muted-foreground">
                       Updated {new Date(profile.updated_at).toLocaleString()} • {profile.allowlists.length} allowlist entr{profile.allowlists.length === 1 ? "y" : "ies"}
                     </div>
                   </button>
                 ))
               )}
             </div>
+            </div>
           </Card>
 
-          <Card>
-            <CardTitle>{selectedBlockProfileId ? "Edit profile" : "Create profile"}</CardTitle>
-            <CardDescription>Pick the OISD lists this profile should use, add any custom GitHub list, and save a clear set of exceptions.</CardDescription>
-            <div className="mt-5 grid gap-4">
-              <div className="grid gap-3 sm:grid-cols-[120px_1fr]">
-                <Input value={blockProfileDraft.emoji} onChange={(event) => setBlockProfileDraft((current) => ({ ...current, emoji: event.target.value }))} placeholder="Optional emoji" />
-                <Input value={blockProfileDraft.name} onChange={(event) => setBlockProfileDraft((current) => ({ ...current, name: event.target.value }))} placeholder="Homework time" />
-              </div>
-              <Input value={blockProfileDraft.description} onChange={(event) => setBlockProfileDraft((current) => ({ ...current, description: event.target.value }))} placeholder="Short summary shown when assigning this profile to devices" />
-              <div className="rounded-[26px] border border-border/70 bg-muted/30 p-4">
-                <div className="font-medium text-foreground">Blocklist sources</div>
-                <div className="mt-1 text-sm text-muted-foreground">These upstream lists define what the profile blocks before device-specific exceptions are applied.</div>
-                <div className="mt-4 rounded-2xl border border-border/70 bg-white/85 p-4">
+          <Card className="p-0 overflow-hidden">
+            <div className="border-b border-border px-6 py-5">
+              <CardTitle>{selectedBlockProfileId ? "Edit profile" : "Create profile"}</CardTitle>
+              <CardDescription className="mt-1">Shape one calm, reusable filtering profile at a time: identity first, then list sources, then exceptions.</CardDescription>
+            </div>
+            <div className="space-y-5 px-6 py-6">
+              <section className="space-y-4">
+                <div>
+                  <div className="text-sm font-medium text-foreground">Profile identity</div>
+                  <div className="mt-1 text-sm text-muted-foreground">Give the profile a name the household will understand instantly during device assignment.</div>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-[120px_1fr]">
+                  <Input value={blockProfileDraft.emoji} onChange={(event) => setBlockProfileDraft((current) => ({ ...current, emoji: event.target.value }))} placeholder="Optional emoji" />
+                  <Input value={blockProfileDraft.name} onChange={(event) => setBlockProfileDraft((current) => ({ ...current, name: event.target.value }))} placeholder="Homework time" />
+                </div>
+                <Input value={blockProfileDraft.description} onChange={(event) => setBlockProfileDraft((current) => ({ ...current, description: event.target.value }))} placeholder="Short summary shown when assigning this profile to devices" />
+              </section>
+
+              <Separator />
+
+              <section className="space-y-4">
+                <div>
+                  <div className="text-sm font-medium text-foreground">Blocklist sources</div>
+                  <div className="mt-1 text-sm text-muted-foreground">Pick the OISD sources and optional GitHub lists that define what this profile blocks before any device-level exceptions apply.</div>
+                </div>
+                <div className="rounded-2xl border border-border bg-muted/20 p-4">
                   <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
                     <div>
                       <div className="font-medium text-foreground">OISD presets</div>
@@ -1512,21 +1531,22 @@ export default function App() {
                     {oisdProfileOptions.map((option) => {
                       const enabled = blockProfileDraft.blocklists.some((entry) => entry.id === option.id);
                       return (
-                        <label key={option.id} className={`rounded-[24px] border px-4 py-4 text-sm transition ${enabled ? "border-foreground bg-foreground text-background shadow-sm" : "border-border/70 bg-white/80 hover:bg-muted/30"}`}>
+                        <label key={option.id} className={`rounded-2xl border px-4 py-4 text-sm transition ${enabled ? "border-primary bg-primary/5 shadow-sm" : "border-border bg-background hover:bg-muted/30"}`}>
                           <input type="checkbox" className="sr-only" checked={enabled} onChange={() => togglePresetBlocklist(option)} />
                           <div className="flex items-start justify-between gap-3">
                             <div>
                               <div className="font-medium">{option.name}</div>
-                              <div className={`mt-1 text-xs ${enabled ? "text-background/70" : "text-muted-foreground"}`}>{option.id.includes("nsfw") ? "Adult-content focused OISD feed." : "General-purpose OISD protection feed."}</div>
+                              <div className="mt-1 text-xs text-muted-foreground">{option.id.includes("nsfw") ? "Adult-content focused OISD feed." : "General-purpose OISD protection feed."}</div>
                             </div>
-                            <Badge className={enabled ? "bg-background text-foreground" : "bg-muted text-muted-foreground"}>{option.id.includes("small") ? "small" : "full"}</Badge>
+                            <Badge className={enabled ? "bg-primary text-primary-foreground" : "bg-secondary text-secondary-foreground"}>{option.id.includes("small") ? "small" : "full"}</Badge>
                           </div>
                         </label>
                       );
                     })}
                   </div>
                 </div>
-                <div className="mt-4 rounded-2xl border border-border/70 bg-white/85 p-4">
+
+                <div className="rounded-2xl border border-border bg-muted/20 p-4">
                   <div className="font-medium text-foreground">Manual GitHub list</div>
                   <div className="mt-1 text-sm text-muted-foreground">Add a named list from GitHub or raw GitHub and bundle it into this profile.</div>
                   <div className="mt-4 grid gap-3 lg:grid-cols-[0.85fr_1.15fr_auto]">
@@ -1535,45 +1555,57 @@ export default function App() {
                     <Button variant="secondary" onClick={addCustomBlocklistToProfile}>Add list</Button>
                   </div>
                 </div>
-                <div className="mt-4 grid gap-3">
+
+                <div className="grid gap-3">
                   {blockProfileDraft.blocklists.length === 0 ? (
-                    <div className="rounded-2xl border border-dashed border-border/70 bg-white/70 p-4 text-sm text-muted-foreground">Choose at least one OISD preset or add a custom GitHub list here.</div>
+                    <div className="rounded-2xl border border-dashed border-border bg-background p-4 text-sm text-muted-foreground">Choose at least one OISD preset or add a custom GitHub list here.</div>
                   ) : (
                     blockProfileDraft.blocklists.map((list) => (
-                      <div key={list.id} className="flex flex-col gap-3 rounded-2xl border border-border/70 bg-white/85 p-4 sm:flex-row sm:items-center sm:justify-between">
+                      <div key={list.id} className="flex flex-col gap-3 rounded-2xl border border-border bg-background p-4 sm:flex-row sm:items-center sm:justify-between">
                         <div>
                           <div className="font-medium text-foreground">{list.name}</div>
                           <div className="mt-1 break-all text-xs text-muted-foreground">{list.url}</div>
                         </div>
                         <div className="flex items-center gap-2">
-                          <Badge>{list.kind}</Badge>
+                          <Badge className="bg-secondary text-secondary-foreground">{list.kind}</Badge>
                           <Button variant="ghost" size="sm" onClick={() => removeBlocklistFromProfile(list.id)}>Remove</Button>
                         </div>
                       </div>
                     ))
                   )}
                 </div>
-              </div>
+              </section>
 
-              <div className="rounded-[26px] border border-border/70 bg-white/85 p-4">
-                <div className="font-medium text-foreground">Allowlist exceptions</div>
-                <div className="mt-1 text-sm text-muted-foreground">Add domains that should stay reachable even when one of the selected blocklists would normally catch them.</div>
-                <Input className="mt-4" value={blockProfileAllowlistDraft} onChange={(event) => setBlockProfileAllowlistDraft(event.target.value)} placeholder="school.example, video.example" />
-              </div>
-              <div className="rounded-[24px] border border-border/70 bg-muted/30 p-4 text-sm text-muted-foreground">
-                Device assignment uses the profile name as the runtime override today, so keeping names short and obvious still makes the household UI easier to scan.
-              </div>
-              <div className="flex flex-wrap gap-3">
+              <Separator />
+
+              <section className="space-y-4">
+                <div>
+                  <div className="text-sm font-medium text-foreground">Allowlist exceptions</div>
+                  <div className="mt-1 text-sm text-muted-foreground">Add domains that should stay reachable even when one of the selected blocklists would normally catch them.</div>
+                </div>
+                <div className="rounded-2xl border border-border bg-muted/20 p-4">
+                  <Input value={blockProfileAllowlistDraft} onChange={(event) => setBlockProfileAllowlistDraft(event.target.value)} placeholder="school.example, video.example" />
+                </div>
+              </section>
+
+              <Separator />
+
+              <section className="space-y-4">
+                <div className="rounded-2xl border border-dashed border-border bg-muted/20 p-4 text-sm text-muted-foreground">
+                  Device assignment uses the profile name as the runtime override today, so keeping names short and obvious still makes the household UI easier to scan.
+                </div>
+                <div className="flex flex-wrap justify-end gap-3">
+                  <Button variant="ghost" onClick={startNewBlockProfile}>Clear editor</Button>
+                  {selectedBlockProfileId ? (
+                    <Button variant="outline" onClick={() => void handleBlockProfileDelete()} disabled={busyAction === "block-profile-delete"}>
+                      {busyAction === "block-profile-delete" ? "Deleting..." : "Delete profile"}
+                    </Button>
+                  ) : null}
                 <Button onClick={() => void handleBlockProfileSave()} disabled={busyAction === "block-profile-save"}>
                   {busyAction === "block-profile-save" ? "Saving..." : "Save profile"}
                 </Button>
-                {selectedBlockProfileId ? (
-                  <Button variant="ghost" onClick={() => void handleBlockProfileDelete()} disabled={busyAction === "block-profile-delete"}>
-                    {busyAction === "block-profile-delete" ? "Deleting..." : "Delete profile"}
-                  </Button>
-                ) : null}
-                <Button variant="ghost" onClick={startNewBlockProfile}>Clear editor</Button>
-              </div>
+                </div>
+              </section>
             </div>
           </Card>
         </section>
@@ -1823,16 +1855,18 @@ export default function App() {
         </section>
       ) : (
         <section className="grid gap-6">
-          <Card>
-            <CardTitle>Settings</CardTitle>
-            <CardDescription>Start with the few settings most homes actually change, then open advanced controls only when you need them.</CardDescription>
-            <div className="mt-5 flex flex-wrap gap-2">
-              <Button variant={settingsView === "basic" ? "primary" : "secondary"} size="sm" onClick={() => setSettingsView("basic")}>Everyday</Button>
-              <Button variant={settingsView === "advanced" ? "primary" : "secondary"} size="sm" onClick={() => setSettingsView("advanced")}>Advanced</Button>
+          <Card className="p-0 overflow-hidden">
+            <div className="border-b border-border px-6 py-5">
+              <CardTitle>Settings</CardTitle>
+              <CardDescription className="mt-1">Start with the few settings most homes actually change, then open advanced controls only when you need them.</CardDescription>
+              <div className="mt-5 inline-flex rounded-xl border border-border bg-muted/40 p-1">
+                <Button variant={settingsView === "basic" ? "default" : "ghost"} size="sm" className="rounded-lg" onClick={() => setSettingsView("basic")}>Everyday</Button>
+                <Button variant={settingsView === "advanced" ? "default" : "ghost"} size="sm" className="rounded-lg" onClick={() => setSettingsView("advanced")}>Advanced</Button>
+              </div>
+              <div className="mt-3 text-sm text-muted-foreground">{settingsView === "advanced" ? "Advanced mode includes sync, Tailscale, classifier tuning, operator feeds, and audit history." : "Everyday mode keeps the page focused on alerts, blocklists, and common services."}</div>
             </div>
-            {settingsView === "advanced" ? <div className="mt-3 text-sm text-muted-foreground">Advanced mode includes sync, Tailscale, classifier tuning, operator feeds, and audit history.</div> : <div className="mt-3 text-sm text-muted-foreground">Everyday mode keeps the page focused on alerts, blocklists, and common services.</div>}
             {settingsView === "advanced" ? <div className="mt-5 grid gap-4 lg:grid-cols-2">
-              <div className="rounded-[24px] border border-border/70 bg-muted/40 p-4 text-sm">
+              <div className="rounded-2xl border border-border bg-muted/20 p-4 text-sm">
                 <div className="font-medium">Sync and replication</div>
                 <div className="mt-2 grid gap-2 text-muted-foreground">
                   <div>Profile: <span className="font-medium text-foreground">{syncStatus.profile}</span></div>
@@ -1856,7 +1890,7 @@ export default function App() {
                   <Button variant="secondary" size="sm" onClick={() => void handleSyncTransportSave()} disabled={busyAction === "sync-transport-save"}>Save transport</Button>
                 </div>
               </div>
-              <div className="rounded-[24px] border border-border/70 bg-muted/40 p-4 text-sm">
+              <div className="rounded-2xl border border-border bg-muted/20 p-4 text-sm">
                 <div className="flex items-center justify-between gap-3">
                   <div className="font-medium">Tailscale</div>
                   <Badge>{tailscaleStatus.exit_node_active ? "Exit node advertised" : tailscaleStatus.installed ? "Installed" : "Not installed"}</Badge>
@@ -1880,7 +1914,7 @@ export default function App() {
                 <div className="mt-3 text-xs text-muted-foreground">When enabled, Cogwheel advertises this machine as a Tailscale exit node and keeps DNS on the local filter path for exit-node traffic only.</div>
               </div>
             </div> : null}
-            {settingsView === "advanced" ? <div className="mt-4 rounded-[24px] border border-border/70 bg-muted/30 p-4">
+            {settingsView === "advanced" ? <div className="mt-4 rounded-2xl border border-border bg-muted/20 p-4">
               <div className="flex items-center justify-between gap-3">
                 <div>
                   <div className="font-medium">Latency budgets</div>
@@ -1889,14 +1923,14 @@ export default function App() {
                 <Badge>{latencyBudget.within_budget ? "Within budget" : "Needs attention"}</Badge>
               </div>
               <div className="mt-4 grid gap-3 lg:grid-cols-[0.9fr_1.1fr]">
-                <div className="rounded-2xl border border-border/70 bg-white/70 p-4 text-sm">
+                <div className="rounded-2xl border border-border bg-background p-4 text-sm">
                   <div className="text-muted-foreground">Current cache hit rate</div>
                   <div className="mt-1 text-2xl font-semibold text-foreground">{(latencyBudget.cache_hit_rate * 100).toFixed(1)}%</div>
                   <div className="mt-2 text-xs text-muted-foreground">Higher cache hit rates usually keep household traffic under the fastest path budget.</div>
                 </div>
                 <div className="grid gap-3 sm:grid-cols-3">
                   {latencyBudget.checks.map((check) => (
-                    <div key={check.label} className="rounded-2xl border border-border/70 bg-white/70 p-4 text-sm">
+                    <div key={check.label} className="rounded-2xl border border-border bg-background p-4 text-sm">
                       <div className="flex items-center justify-between gap-2">
                         <div className="font-medium text-foreground">{check.label}</div>
                         <Badge>{check.status}</Badge>
@@ -1917,10 +1951,12 @@ export default function App() {
           </Card>
 
           <section className="grid gap-6 lg:grid-cols-[1.15fr_0.85fr]">
-            <Card id="settings-page-core">
-              <CardTitle>Policy and notifications</CardTitle>
-              <CardDescription>{settingsView === "advanced" ? "Core controls for alerts, classifier behavior, and optional intelligence features." : "Simple household controls for alerts and the few behaviors you are likely to change often."}</CardDescription>
-              <div className="mt-6 space-y-5">
+            <Card id="settings-page-core" className="p-0 overflow-hidden">
+              <div className="border-b border-border px-6 py-5">
+                <CardTitle>Policy and notifications</CardTitle>
+                <CardDescription className="mt-1">{settingsView === "advanced" ? "Core controls for alerts, classifier behavior, and optional intelligence features." : "Simple household controls for alerts and the few behaviors you are likely to change often."}</CardDescription>
+              </div>
+              <div className="space-y-5 px-6 py-6">
                 {settingsView === "advanced" ? (
                 <>
                 <section className="space-y-3">
@@ -2043,11 +2079,13 @@ export default function App() {
             </Card>
 
             <div className="grid gap-6">
-              <Card id="settings-page-blocklists">
-                <CardTitle>Sources and services</CardTitle>
-                <CardDescription>{settingsView === "advanced" ? "Manage imported blocklists and common-service toggles without crowding the overview." : "The core household settings live here: list sources, profile sources, and a few service toggles."}</CardDescription>
-                <div className="mt-5 grid gap-3">
-                  <div className="rounded-[24px] border border-border/70 bg-muted/40 p-4 text-sm">
+              <Card id="settings-page-blocklists" className="p-0 overflow-hidden">
+                <div className="border-b border-border px-6 py-5">
+                  <CardTitle>Sources and services</CardTitle>
+                  <CardDescription className="mt-1">{settingsView === "advanced" ? "Manage imported blocklists and common-service toggles without crowding the overview." : "The core household settings live here: list sources, profile sources, and a few service toggles."}</CardDescription>
+                </div>
+                <div className="grid gap-4 px-6 py-6">
+                  <div className="rounded-2xl border border-border bg-muted/20 p-4 text-sm">
                     <div className="font-medium">Add blocklist</div>
                     <div className="mt-3 grid gap-3">
                       <Input value={blocklistName} onChange={(event) => setBlocklistName(event.target.value)} placeholder="Human-readable name" />
@@ -2070,7 +2108,7 @@ export default function App() {
                     </div>
                   </div>
                   {settings.blocklists.map((source) => (
-                    <div key={source.id} className="rounded-[24px] border border-border/70 bg-white/80 p-4">
+                    <div key={source.id} className="rounded-2xl border border-border bg-background p-4">
                       <div className="flex items-start justify-between gap-3">
                         <div>
                           <div className="font-medium">{source.name}</div>
@@ -2082,12 +2120,12 @@ export default function App() {
                       </div>
                     </div>
                   ))}
-                  <Card id="services" className="p-5">
+                  <Card id="services" className="border border-border bg-muted/20 p-5 shadow-none">
                     <CardTitle>Services</CardTitle>
                     <CardDescription className="mt-1">Optional curated allow/block toggles for common apps.</CardDescription>
                     <div className="mt-4 grid gap-3">
                       {filteredServices.slice(0, showServicesView ? filteredServices.length : 3).map((service) => (
-                        <div key={service.manifest.service_id} className="rounded-[24px] border border-border/70 bg-muted/40 p-4">
+                        <div key={service.manifest.service_id} className="rounded-2xl border border-border bg-background p-4">
                           <div className="flex items-center justify-between gap-3">
                             <div>
                               <div className="font-medium">{service.manifest.display_name}</div>
@@ -2110,15 +2148,17 @@ export default function App() {
                 </div>
               </Card>
 
-              {settingsView === "advanced" ? <Card>
-                <CardTitle>Recovery and operator feed</CardTitle>
-                <CardDescription>Use guided recovery, audit history, and runtime notes without cluttering the household overview.</CardDescription>
-                <div className="mt-5 space-y-5">
+              {settingsView === "advanced" ? <Card className="p-0 overflow-hidden">
+                <div className="border-b border-border px-6 py-5">
+                  <CardTitle>Recovery and operator feed</CardTitle>
+                  <CardDescription className="mt-1">Use guided recovery, audit history, and runtime notes without cluttering the household overview.</CardDescription>
+                </div>
+                <div className="space-y-5 px-6 py-6">
                   <section className="space-y-3">
                     <div className="font-medium">Guided recovery</div>
                     <div className="grid gap-3">
                       {recoveryActions.map((item) => (
-                        <div key={item.title} className="rounded-[24px] border border-border/70 bg-muted/40 p-4 text-sm">
+                        <div key={item.title} className="rounded-2xl border border-border bg-muted/20 p-4 text-sm">
                           <div className="font-medium">{item.title}</div>
                           <div className="mt-1 text-muted-foreground">{item.detail}</div>
                           <div className="mt-3">
