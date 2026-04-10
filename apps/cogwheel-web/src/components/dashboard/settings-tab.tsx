@@ -31,7 +31,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 
-export default function SettingsPage() {
+export function SettingsTab() {
   const {
     dashboard,
     settings,
@@ -605,7 +605,7 @@ export default function SettingsPage() {
   }
 
   return (
-    <div className="px-4 lg:px-6 space-y-6">
+    <div className="p-4 md:p-6 space-y-6">
       <Tabs defaultValue="everyday">
         <TabsList>
           <TabsTrigger value="everyday">Everyday</TabsTrigger>

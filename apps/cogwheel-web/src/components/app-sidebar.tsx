@@ -1,14 +1,15 @@
-import { useLocation, useNavigate } from "react-router-dom";
 import { useEffect, useState } from "react";
 import {
-  LayoutDashboard,
   Shield,
+  Activity,
+  HardDrive,
+  Moon,
+  Sun,
+  ChevronLeft,
+  LayoutDashboard,
   Laptop,
   BrainCircuit,
   Settings,
-  ChevronLeft,
-  Moon,
-  Sun,
 } from "lucide-react";
 import {
   Sidebar,
@@ -18,33 +19,42 @@ import {
   SidebarGroupContent,
   SidebarGroupLabel,
   SidebarHeader,
-  SidebarMenu,
-  SidebarMenuButton,
-  SidebarMenuItem,
   SidebarTrigger,
   useSidebar,
 } from "@/components/ui/sidebar";
-import { Badge } from "@/components/ui/badge";
 import { useCogwheel } from "@/contexts/cogwheel-context";
 
 const navItems = [
-  { path: "/", label: "Overview", icon: LayoutDashboard },
-  { path: "/profiles", label: "Block Profiles", icon: Shield },
-  { path: "/devices", label: "Devices", icon: Laptop },
-  { path: "/grease-ai", label: "Grease-AI", icon: BrainCircuit },
-  { path: "/settings", label: "Settings", icon: Settings },
-];
+  { key: "overview", label: "Overview", icon: LayoutDashboard },
+  { key: "profiles", label: "Block Profiles", icon: Shield },
+  { key: "devices", label: "Devices", icon: Laptop },
+  { key: "grease-ai", label: "Grease-AI", icon: BrainCircuit },
+  { key: "settings", label: "Settings", icon: Settings },
+] as const;
 
 export function AppSidebar() {
-  const location = useLocation();
-  const navigate = useNavigate();
   const { state: sidebarState } = useSidebar();
-  const { dashboard, state, error } = useCogwheel();
+  const { dashboard, state } = useCogwheel();
   const collapsed = sidebarState === "collapsed";
 
   const [isDark, setIsDark] = useState(() =>
     document.documentElement.classList.contains("dark"),
   );
+
+  // activeTab is read from the dashboard's centered tabs visually,
+  // but the sidebar highlights based on a simple local tracking
+  const [activeTab, setActiveTab] = useState("overview");
+
+  // Listen for tab changes from the dashboard via a custom event
+  useEffect(() => {
+    function handleTabChange(e: Event) {
+      const detail = (e as CustomEvent<string>).detail;
+      if (detail) setActiveTab(detail);
+    }
+    window.addEventListener("cogwheel:tab-change", handleTabChange);
+    return () =>
+      window.removeEventListener("cogwheel:tab-change", handleTabChange);
+  }, []);
 
   useEffect(() => {
     const saved = localStorage.getItem("cogwheel-theme");
@@ -64,7 +74,7 @@ export function AppSidebar() {
   const protectionLabel =
     state === "loading"
       ? "Loading"
-      : error
+      : state === "error"
         ? "Offline"
         : dashboard.protection_status === "Paused"
           ? "Paused"
@@ -72,75 +82,119 @@ export function AppSidebar() {
             ? "Degraded"
             : "Protected";
 
-  const protectionTone =
+  const protectionDot =
     protectionLabel === "Protected"
-      ? "bg-primary/10 text-primary"
+      ? "bg-emerald-400"
       : protectionLabel === "Loading"
-        ? "bg-secondary text-secondary-foreground"
-        : "bg-accent/10 text-accent";
+        ? "bg-muted-foreground"
+        : "bg-destructive";
 
   return (
     <Sidebar variant="inset" collapsible="icon">
       <SidebarHeader>
         <div className="flex items-center gap-3 px-2 py-1">
-          <div className="flex size-9 shrink-0 items-center justify-center rounded-xl border border-border bg-muted text-lg">
+          <div className="flex size-9 shrink-0 items-center justify-center rounded-xl border border-amber-500/20 bg-amber-500/10 text-lg">
             <img
               src="/cogwheel.png"
               alt=""
               className="size-6 rounded"
               onError={(e) => {
                 (e.target as HTMLImageElement).style.display = "none";
-                (e.target as HTMLImageElement).parentElement!.textContent = "\u2699\uFE0F";
+                (e.target as HTMLImageElement).parentElement!.textContent =
+                  "\u2699\uFE0F";
               }}
             />
           </div>
           {!collapsed && (
-            <div className="flex flex-col">
-              <span className="font-display text-lg">
-                Cogwheel
-              </span>
-              <span className="text-[10px] tracking-wider text-muted-foreground">DNS Control Plane</span>
-            </div>
+            <span className="font-display text-lg">Cogwheel</span>
           )}
         </div>
       </SidebarHeader>
 
       <SidebarContent>
         <SidebarGroup>
-          <SidebarGroupLabel>Navigation</SidebarGroupLabel>
+          <SidebarGroupLabel className="text-[10px] uppercase tracking-widest text-muted-foreground/60">
+            Navigation
+          </SidebarGroupLabel>
           <SidebarGroupContent>
-            <SidebarMenu>
+            <div className="space-y-0.5 px-1">
               {navItems.map((item) => {
-                const isActive = location.pathname === item.path;
+                const isActive = activeTab === item.key;
                 return (
-                  <SidebarMenuItem key={item.path}>
-                    <SidebarMenuButton
-                      isActive={isActive}
-                      onClick={() => navigate(item.path)}
-                      tooltip={item.label}
-                    >
-                      <item.icon className="size-4" />
-                      <span>{item.label}</span>
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
+                  <button
+                    key={item.key}
+                    type="button"
+                    onClick={() => {
+                      setActiveTab(item.key);
+                      window.dispatchEvent(
+                        new CustomEvent("cogwheel:sidebar-nav", {
+                          detail: item.key,
+                        }),
+                      );
+                    }}
+                    className={`flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-sm transition-colors ${
+                      isActive
+                        ? "bg-secondary/70 text-foreground"
+                        : "text-muted-foreground hover:bg-secondary/30 hover:text-foreground"
+                    }`}
+                  >
+                    <item.icon className="size-4 shrink-0" />
+                    {!collapsed && <span>{item.label}</span>}
+                  </button>
                 );
               })}
-            </SidebarMenu>
+            </div>
           </SidebarGroupContent>
         </SidebarGroup>
       </SidebarContent>
 
-      <SidebarFooter>
-        <div className="flex items-center justify-between px-2 py-1">
+      <SidebarFooter className="px-4 py-3 space-y-1.5">
+        {/* Protection status */}
+        <div className="flex items-center gap-2 text-[11px] text-muted-foreground/70">
+          <Shield className="h-3 w-3 shrink-0 text-muted-foreground/40" />
           {!collapsed && (
-            <Badge className={`${protectionTone}${protectionLabel === "Offline" || protectionLabel === "Degraded" ? " animate-pulse" : ""}`}>{protectionLabel}</Badge>
+            <span className="flex items-center gap-1.5">
+              <span
+                className={`inline-block h-1.5 w-1.5 rounded-full ${protectionDot}`}
+              />
+              {protectionLabel}
+            </span>
           )}
+        </div>
+
+        {/* Query count */}
+        <div className="flex items-center gap-2 text-[11px] text-muted-foreground/70">
+          <Activity className="h-3 w-3 shrink-0 text-muted-foreground/40" />
+          {!collapsed && (
+            <span className="tabular-nums">
+              {dashboard.runtime_health.snapshot.queries_total.toLocaleString()}{" "}
+              queries
+            </span>
+          )}
+        </div>
+
+        {/* Blocklist count */}
+        <div className="flex items-center gap-2 text-[11px] text-muted-foreground/70">
+          <HardDrive className="h-3 w-3 shrink-0 text-muted-foreground/40" />
+          {!collapsed && (
+            <span className="tabular-nums">
+              {dashboard.enabled_source_count.toLocaleString()} blocklists
+            </span>
+          )}
+        </div>
+
+        {/* Dark mode toggle + collapse trigger */}
+        <div className="flex items-center justify-between pt-1">
           <button
             onClick={toggleDarkMode}
-            className="inline-flex size-8 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            className="inline-flex size-7 items-center justify-center rounded-lg text-muted-foreground/70 transition-colors hover:bg-muted hover:text-foreground"
             aria-label={isDark ? "Switch to light mode" : "Switch to dark mode"}
           >
-            {isDark ? <Sun className="size-4" /> : <Moon className="size-4" />}
+            {isDark ? (
+              <Sun className="size-3.5" />
+            ) : (
+              <Moon className="size-3.5" />
+            )}
           </button>
           <SidebarTrigger>
             <ChevronLeft

@@ -27,7 +27,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 
-export default function Profiles() {
+export function ProfilesTab() {
   const {
     settings,
     busyAction,
@@ -168,9 +168,9 @@ export default function Profiles() {
   const editing = !!selectedProfileId;
 
   return (
-    <div className="px-4 lg:px-6">
+    <div className="p-4 md:p-6 space-y-4">
       <div className="grid gap-6 xl:grid-cols-[360px_minmax(0,1fr)]">
-        {/* ── Left Column: Profile Library ── */}
+        {/* -- Left Column: Profile Library -- */}
         <Card>
           <CardHeader>
             <CardTitle>Profiles</CardTitle>
@@ -227,7 +227,7 @@ export default function Profiles() {
           </CardContent>
         </Card>
 
-        {/* ── Right Column: Profile Editor ── */}
+        {/* -- Right Column: Profile Editor -- */}
         <Card>
           <CardHeader>
             <CardTitle>{editing ? "Edit Profile" : "New Profile"}</CardTitle>

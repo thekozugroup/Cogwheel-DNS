@@ -18,7 +18,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 
-export default function GreaseAiPage() {
+export function GreaseAiTab() {
   const { dashboard, settings, latencyBudget } = useCogwheel();
 
   const greaseAiSignals = useMemo(() => {
@@ -55,7 +55,7 @@ export default function GreaseAiPage() {
   ]);
 
   return (
-    <div className="px-4 lg:px-6">
+    <div className="p-4 md:p-6 space-y-4">
       <div className="grid gap-6 xl:grid-cols-[1.05fr_0.95fr]">
         {/* Left: Classifier workspace */}
         <Card>

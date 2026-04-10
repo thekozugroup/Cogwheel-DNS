@@ -5,7 +5,6 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Card,
-  CardAction,
   CardContent,
   CardDescription,
   CardFooter,
@@ -23,7 +22,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 
-export default function DevicesPage() {
+export function DevicesTab() {
   const { settings, busyAction, setBusyAction, pushToast, load } =
     useCogwheel();
 
@@ -270,7 +269,7 @@ export default function DevicesPage() {
   }
 
   return (
-    <div className="px-4 lg:px-6">
+    <div className="p-4 md:p-6 space-y-4">
       <div className="grid gap-6 xl:grid-cols-[1.05fr_0.95fr]">
         {/* Left: Device form card */}
         <Card>

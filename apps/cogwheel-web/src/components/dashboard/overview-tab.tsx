@@ -30,7 +30,7 @@ function EmptyRow({ colSpan, children }: { colSpan: number; children: React.Reac
   );
 }
 
-export default function Overview() {
+export function OverviewTab() {
   const {
     dashboard,
     settings,
@@ -104,9 +104,9 @@ export default function Overview() {
   ];
 
   return (
-    <>
+    <div className="p-4 md:p-6 space-y-4">
       {/* ---------- Section Cards ---------- */}
-      <div className="grid grid-cols-1 gap-4 px-4 sm:grid-cols-2 lg:px-6 xl:grid-cols-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {/* Protection Status */}
         <Card className="">
           <CardHeader>
@@ -215,7 +215,7 @@ export default function Overview() {
       </div>
 
       {/* ---------- Domain Lists ---------- */}
-      <div className="grid grid-cols-1 gap-4 px-4 lg:px-6 xl:grid-cols-2">
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
         {/* Top Queried Domains */}
         <Card>
           <CardHeader>
@@ -285,15 +285,13 @@ export default function Overview() {
 
       {/* ---------- Error Banner ---------- */}
       {error ? (
-        <div className="px-4 lg:px-6">
-          <Card className="border-destructive/30 bg-destructive/10 text-destructive">
-            <CardContent>{error}</CardContent>
-          </Card>
-        </div>
+        <Card className="border-destructive/30 bg-destructive/10 text-destructive">
+          <CardContent>{error}</CardContent>
+        </Card>
       ) : null}
 
       {/* ---------- Resolver Access & Resolver Summary ---------- */}
-      <div className="grid grid-cols-1 gap-4 px-4 lg:px-6 lg:grid-cols-2">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         {/* Resolver Access */}
         <Card>
           <CardHeader>
@@ -428,67 +426,63 @@ export default function Overview() {
       </div>
 
       {/* ---------- Security Events ---------- */}
-      <div className="px-4 lg:px-6">
-        <Card>
-          <CardHeader>
-            <CardTitle>Recent Risky Events</CardTitle>
-            <CardDescription>
-              High-signal security events from the resolver
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Domain</TableHead>
-                  <TableHead>Device</TableHead>
-                  <TableHead>Client IP</TableHead>
-                  <TableHead className="text-right">Severity</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {dashboard.recent_security_events.length === 0 ? (
-                  <EmptyRow colSpan={4}>
-                    No risky DNS events recorded yet.
-                  </EmptyRow>
-                ) : (
-                  dashboard.recent_security_events.slice(0, 4).map((event) => (
-                    <TableRow key={event.id}>
-                      <TableCell className="font-medium">{event.domain}</TableCell>
-                      <TableCell className="text-muted-foreground">
-                        {event.device_name ?? "Unassigned device"}
-                      </TableCell>
-                      <TableCell className="font-mono text-muted-foreground">
-                        {event.client_ip}
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <Badge variant={event.severity === "high" ? "destructive" : "secondary"}>
-                          {event.severity}
-                        </Badge>
-                      </TableCell>
-                    </TableRow>
-                  ))
-                )}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
-      </div>
+      <Card>
+        <CardHeader>
+          <CardTitle>Recent Risky Events</CardTitle>
+          <CardDescription>
+            High-signal security events from the resolver
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Domain</TableHead>
+                <TableHead>Device</TableHead>
+                <TableHead>Client IP</TableHead>
+                <TableHead className="text-right">Severity</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {dashboard.recent_security_events.length === 0 ? (
+                <EmptyRow colSpan={4}>
+                  No risky DNS events recorded yet.
+                </EmptyRow>
+              ) : (
+                dashboard.recent_security_events.slice(0, 4).map((event) => (
+                  <TableRow key={event.id}>
+                    <TableCell className="font-medium">{event.domain}</TableCell>
+                    <TableCell className="text-muted-foreground">
+                      {event.device_name ?? "Unassigned device"}
+                    </TableCell>
+                    <TableCell className="font-mono text-muted-foreground">
+                      {event.client_ip}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <Badge variant={event.severity === "high" ? "destructive" : "secondary"}>
+                        {event.severity}
+                      </Badge>
+                    </TableCell>
+                  </TableRow>
+                ))
+              )}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
 
       {/* ---------- Footer Status ---------- */}
-      <div className="px-4 lg:px-6">
-        {state === "loading" ? (
-          <p className="text-sm text-muted-foreground">
-            Loading control plane data...
-          </p>
-        ) : null}
-        {state === "ready" ? (
-          <p className="text-sm text-muted-foreground">
-            {enabledBlocklists.length} enabled blocklists and{" "}
-            {settings.devices.length} named devices.
-          </p>
-        ) : null}
-      </div>
-    </>
+      {state === "loading" ? (
+        <p className="text-sm text-muted-foreground">
+          Loading control plane data...
+        </p>
+      ) : null}
+      {state === "ready" ? (
+        <p className="text-sm text-muted-foreground">
+          {enabledBlocklists.length} enabled blocklists and{" "}
+          {settings.devices.length} named devices.
+        </p>
+      ) : null}
+    </div>
   );
 }

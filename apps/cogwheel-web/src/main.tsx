@@ -1,26 +1,26 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { BrowserRouter, Route, Routes } from "react-router-dom";
-import { AppLayout } from "@/components/app-layout";
-import Overview from "@/pages/overview";
-import Profiles from "@/pages/profiles";
-import Devices from "@/pages/devices";
-import GreaseAi from "@/pages/grease-ai";
-import SettingsPage from "@/pages/settings";
+import { SidebarProvider, SidebarInset } from "@/components/ui/sidebar";
+import { AppSidebar } from "@/components/app-sidebar";
+import { Dashboard } from "@/components/dashboard/dashboard";
+import { StatusBar } from "@/components/status-bar";
+import { CogwheelProvider } from "@/contexts/cogwheel-context";
+import { Toaster } from "@/components/ui/sonner";
 import "./index.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <BrowserRouter>
-      <Routes>
-        <Route element={<AppLayout />}>
-          <Route index element={<Overview />} />
-          <Route path="profiles" element={<Profiles />} />
-          <Route path="devices" element={<Devices />} />
-          <Route path="grease-ai" element={<GreaseAi />} />
-          <Route path="settings" element={<SettingsPage />} />
-        </Route>
-      </Routes>
-    </BrowserRouter>
+    <CogwheelProvider>
+      <SidebarProvider>
+        <AppSidebar />
+        <SidebarInset className="flex h-screen flex-col">
+          <div className="flex-1 min-h-0">
+            <Dashboard />
+          </div>
+          <StatusBar />
+        </SidebarInset>
+      </SidebarProvider>
+      <Toaster />
+    </CogwheelProvider>
   </React.StrictMode>,
 );
