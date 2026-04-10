@@ -280,7 +280,7 @@ export function CogwheelProvider({ children }: { children: ReactNode }) {
       setError(
         loadError instanceof Error ? loadError.message : "Unknown error",
       );
-      setState("error");
+      setState("ready");
     }
   }, []);
 

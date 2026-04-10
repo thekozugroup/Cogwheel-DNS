@@ -279,7 +279,7 @@ export function DevicesTab() {
     <div className="p-4 md:p-6 space-y-4">
       <div className="grid gap-6 xl:grid-cols-[1.05fr_0.95fr]">
         {/* Left: Device form card */}
-        <Card>
+        <Card className="animate-fade-up">
           <CardHeader>
             <CardTitle>{deviceId ? "Edit Device" : "Add Device"}</CardTitle>
             <CardDescription>
@@ -289,7 +289,7 @@ export function DevicesTab() {
           <CardContent className="space-y-4">
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="space-y-2">
-                <Label htmlFor="device-name">Device name</Label>
+                <Label htmlFor="device-name" className="text-sm font-medium">Device name</Label>
                 <Input
                   id="device-name"
                   value={deviceName}
@@ -298,7 +298,7 @@ export function DevicesTab() {
                 />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="device-ip">IP Address</Label>
+                <Label htmlFor="device-ip" className="text-sm font-medium">IP Address</Label>
                 <Input
                   id="device-ip"
                   value={deviceIpAddress}
@@ -310,7 +310,7 @@ export function DevicesTab() {
 
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="space-y-2">
-                <Label htmlFor="device-policy">Policy mode</Label>
+                <Label htmlFor="device-policy" className="text-sm font-medium">Policy mode</Label>
                 <Select
                   value={devicePolicyMode}
                   onValueChange={(value) =>
@@ -327,7 +327,7 @@ export function DevicesTab() {
                 </Select>
               </div>
               <div className="space-y-2">
-                <Label htmlFor="device-profile">Profile override</Label>
+                <Label htmlFor="device-profile" className="text-sm font-medium">Profile override</Label>
                 <Select
                   value={deviceProfileOverride}
                   onValueChange={setDeviceProfileOverride}
@@ -349,7 +349,7 @@ export function DevicesTab() {
 
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="space-y-2">
-                <Label htmlFor="device-protection">Protection</Label>
+                <Label htmlFor="device-protection" className="text-sm font-medium">Protection</Label>
                 <Select
                   value={deviceProtectionOverride}
                   onValueChange={(value) =>
@@ -367,7 +367,7 @@ export function DevicesTab() {
                 </Select>
               </div>
               <div className="space-y-2">
-                <Label htmlFor="device-allowed">Allowed domains</Label>
+                <Label htmlFor="device-allowed" className="text-sm font-medium">Allowed domains</Label>
                 <Input
                   id="device-allowed"
                   value={deviceAllowedDomains}
@@ -508,6 +508,7 @@ export function DevicesTab() {
               </Button>
             ) : null}
             <Button
+              className="bg-primary text-primary-foreground"
               onClick={() => void handleDeviceSubmit()}
               disabled={
                 !deviceName ||
@@ -525,7 +526,7 @@ export function DevicesTab() {
         </Card>
 
         {/* Right: Saved devices table */}
-        <Card>
+        <Card className="animate-fade-up [animation-delay:100ms]">
           <CardHeader>
             <CardTitle>Devices</CardTitle>
             <CardDescription>

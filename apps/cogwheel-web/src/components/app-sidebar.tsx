@@ -16,6 +16,7 @@ import {
   SidebarGroup,
   SidebarGroupContent,
   SidebarHeader,
+  useSidebar,
 } from "@/components/ui/sidebar";
 import { useCogwheel } from "@/contexts/cogwheel-context";
 
@@ -29,6 +30,7 @@ const navItems = [
 
 export function AppSidebar() {
   const { dashboard, state } = useCogwheel();
+  const { isMobile, setOpenMobile } = useSidebar();
 
   const [activeTab, setActiveTab] = useState("overview");
 
@@ -98,6 +100,7 @@ export function AppSidebar() {
                           detail: item.key,
                         }),
                       );
+                      if (isMobile) setOpenMobile(false);
                     }}
                     className={`group relative flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-colors mb-0.5 ${
                       isActive

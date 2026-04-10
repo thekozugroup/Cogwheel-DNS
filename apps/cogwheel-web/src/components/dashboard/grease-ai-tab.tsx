@@ -58,7 +58,7 @@ export function GreaseAiTab() {
     <div className="p-4 md:p-6 space-y-4">
       <div className="grid gap-6 xl:grid-cols-[1.05fr_0.95fr]">
         {/* Left: Classifier workspace */}
-        <Card>
+        <Card className="animate-fade-up">
           <CardHeader>
             <CardTitle>Grease-AI Classifier</CardTitle>
             <CardDescription>
@@ -77,7 +77,7 @@ export function GreaseAiTab() {
                       {Math.round(signal.value * 100)}%
                     </span>
                   </div>
-                  <Progress value={signal.value * 100} />
+                  <Progress value={signal.value * 100} className="gold-shimmer" />
                 </div>
               ))}
             </div>
@@ -126,32 +126,32 @@ export function GreaseAiTab() {
         {/* Right: Stats cards grid */}
         <div className="space-y-4">
           <div className="grid gap-4 sm:grid-cols-2">
-            <Card>
-              <CardHeader className="pb-2">
+            <Card className="animate-fade-up [animation-delay:100ms]">
+              <CardHeader className="py-3 gap-3">
                 <CardDescription>Mode</CardDescription>
                 <CardTitle className="text-2xl">
                   {settings.classifier.mode}
                 </CardTitle>
               </CardHeader>
             </Card>
-            <Card>
-              <CardHeader className="pb-2">
+            <Card className="animate-fade-up [animation-delay:150ms]">
+              <CardHeader className="py-3 gap-3">
                 <CardDescription>Threshold</CardDescription>
                 <CardTitle className="text-2xl">
                   {settings.classifier.threshold.toFixed(2)}
                 </CardTitle>
               </CardHeader>
             </Card>
-            <Card>
-              <CardHeader className="pb-2">
+            <Card className="animate-fade-up [animation-delay:200ms]">
+              <CardHeader className="py-3 gap-3">
                 <CardDescription>Queries observed</CardDescription>
                 <CardTitle className="text-2xl">
                   {dashboard.runtime_health.snapshot.queries_total.toLocaleString()}
                 </CardTitle>
               </CardHeader>
             </Card>
-            <Card>
-              <CardHeader className="pb-2">
+            <Card className="animate-fade-up [animation-delay:250ms]">
+              <CardHeader className="py-3 gap-3">
                 <CardDescription>Blocked queries</CardDescription>
                 <CardTitle className="text-2xl">
                   {dashboard.runtime_health.snapshot.blocked_total.toLocaleString()}
@@ -161,7 +161,7 @@ export function GreaseAiTab() {
           </div>
 
           {/* Latency budgets table */}
-          <Card>
+          <Card className="animate-fade-up [animation-delay:300ms]">
             <CardHeader>
               <CardTitle>Latency Budgets</CardTitle>
               <CardDescription>

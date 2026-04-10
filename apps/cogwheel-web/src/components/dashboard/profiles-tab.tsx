@@ -171,7 +171,7 @@ export function ProfilesTab() {
     <div className="p-4 md:p-6 space-y-4">
       <div className="grid gap-6 xl:grid-cols-[360px_minmax(0,1fr)]">
         {/* -- Left Column: Profile Library -- */}
-        <Card>
+        <Card className="animate-fade-up">
           <CardHeader>
             <CardTitle>Profiles</CardTitle>
             <CardDescription>
@@ -228,7 +228,7 @@ export function ProfilesTab() {
         </Card>
 
         {/* -- Right Column: Profile Editor -- */}
-        <Card>
+        <Card className="animate-fade-up [animation-delay:100ms]">
           <CardHeader>
             <CardTitle>{editing ? "Edit Profile" : "New Profile"}</CardTitle>
             <CardDescription>
@@ -273,7 +273,7 @@ export function ProfilesTab() {
                 Core and NSFW families are kept mutually exclusive automatically.
               </p>
               <div className="grid gap-3 lg:grid-cols-2">
-                {oisdProfileOptions.map((option) => {
+                {oisdProfileOptions.map((option, index) => {
                   const enabled = draft.blocklists.some(
                     (e) => e.id === option.id,
                   );
@@ -283,11 +283,12 @@ export function ProfilesTab() {
                       type="button"
                       onClick={() => togglePreset(option)}
                       className={cn(
-                        "rounded-lg border p-3 text-left text-sm transition-colors",
+                        "animate-fade-up rounded-lg border p-3 text-left text-sm transition-colors",
                         enabled
-                          ? "border-primary bg-primary/5"
+                          ? "border-primary bg-primary/5 ring-2 ring-primary/30"
                           : "hover:bg-muted/50",
                       )}
+                      style={{ animationDelay: `${index * 75}ms` }}
                     >
                       <div className="flex items-center justify-between gap-2">
                         <span className="font-medium">{option.name}</span>

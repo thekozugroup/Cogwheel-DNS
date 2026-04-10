@@ -117,6 +117,13 @@ export function OverviewTab() {
 
   return (
     <div className="p-4 md:p-6 space-y-4">
+      {/* ---------- Error Banner ---------- */}
+      {error && (
+        <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-2 text-sm text-destructive">
+          {error}
+        </div>
+      )}
+
       {/* ---------- Section Cards ---------- */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {/* Protection Status */}
@@ -294,13 +301,6 @@ export function OverviewTab() {
           </CardContent>
         </Card>
       </div>
-
-      {/* ---------- Error Banner ---------- */}
-      {error ? (
-        <Card className="border-destructive/30 bg-destructive/10 text-destructive">
-          <CardContent>{error}</CardContent>
-        </Card>
-      ) : null}
 
       {/* ---------- Resolver Access & Resolver Summary ---------- */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -488,13 +488,13 @@ export function OverviewTab() {
         <p className="text-sm text-muted-foreground">
           Loading control plane data...
         </p>
-      ) : null}
-      {state === "ready" ? (
+      ) : (
         <p className="text-sm text-muted-foreground">
           {enabledBlocklists.length} enabled blocklists and{" "}
           {settings.devices.length} named devices.
+          {error ? " (offline)" : ""}
         </p>
-      ) : null}
+      )}
     </div>
   );
 }

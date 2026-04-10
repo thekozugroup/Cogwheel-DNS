@@ -67,11 +67,11 @@ export function Dashboard() {
   return (
     <div className="flex h-full flex-col">
       {/* Header with centered tabs + action buttons */}
-      <header className="relative flex shrink-0 items-center border-b border-border px-4 md:px-6 py-2">
-        {/* Centered tabs */}
-        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+      <header className="flex shrink-0 flex-col gap-2 border-b border-border px-4 md:px-6 py-2 md:relative md:flex-row md:items-center">
+        {/* Centered tabs -- scrollable on mobile, absolutely centered on md+ */}
+        <div className="overflow-x-auto -mx-4 px-4 md:mx-0 md:px-0 md:absolute md:inset-0 md:flex md:items-center md:justify-center md:pointer-events-none">
           <nav
-            className="flex items-center gap-1 rounded-lg bg-muted/50 p-0.5 pointer-events-auto"
+            className="flex items-center gap-1 rounded-lg bg-muted/50 p-0.5 md:pointer-events-auto"
             role="tablist"
           >
             {TABS.map((tab) => (
@@ -80,7 +80,7 @@ export function Dashboard() {
                 role="tab"
                 aria-selected={activeTab === tab.key}
                 onClick={() => setActiveTab(tab.key)}
-                className={`rounded-md px-3 py-1 text-xs font-medium transition-all ${
+                className={`whitespace-nowrap rounded-md px-3 py-1 text-xs font-medium transition-all ${
                   activeTab === tab.key
                     ? "bg-background text-foreground shadow-sm ring-1 ring-foreground/5"
                     : "text-muted-foreground hover:text-foreground"
@@ -92,8 +92,8 @@ export function Dashboard() {
           </nav>
         </div>
 
-        {/* Spacer */}
-        <div className="flex-1" />
+        {/* Spacer -- hidden on mobile where layout is stacked */}
+        <div className="hidden md:block md:flex-1" />
 
         {/* Action buttons on right */}
         <div className="relative z-10 flex items-center gap-2">
@@ -104,7 +104,7 @@ export function Dashboard() {
             className="gap-1.5 text-xs text-muted-foreground hover:text-foreground"
             onClick={handleRefresh}
           >
-            <RotateCw className="h-3 w-3" /> Refresh
+            <RotateCw className="h-3 w-3" /> <span className="hidden sm:inline">Refresh</span>
           </Button>
           <Button
             size="sm"
@@ -121,11 +121,11 @@ export function Dashboard() {
           >
             {isPaused ? (
               <>
-                <Play className="h-3 w-3" /> Resume
+                <Play className="h-3 w-3" /> <span className="hidden sm:inline">Resume</span>
               </>
             ) : (
               <>
-                <Pause className="h-3 w-3" /> Pause
+                <Pause className="h-3 w-3" /> <span className="hidden sm:inline">Pause</span>
               </>
             )}
           </Button>
