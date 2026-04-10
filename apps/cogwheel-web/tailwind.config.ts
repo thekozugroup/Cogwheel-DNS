@@ -27,6 +27,14 @@ export default {
   				DEFAULT: 'hsl(var(--accent))',
   				foreground: 'hsl(var(--accent-foreground))'
   			},
+  			destructive: {
+  				DEFAULT: 'hsl(var(--destructive))',
+  				foreground: 'hsl(var(--destructive-foreground))'
+  			},
+  			popover: {
+  				DEFAULT: 'hsl(var(--popover))',
+  				foreground: 'hsl(var(--popover-foreground))'
+  			},
   			card: {
   				DEFAULT: 'hsl(var(--card))',
   				foreground: 'hsl(var(--card-foreground))'
@@ -45,17 +53,19 @@ export default {
   			}
   		},
   		fontFamily: {
-  			display: [
-  				'Sora',
-  				'sans-serif'
-  			],
-  			body: [
-  				'IBM Plex Sans',
-  				'sans-serif'
-  			]
+  			sans: ['DM Sans', 'system-ui', 'sans-serif'],
+  			display: ['Instrument Serif', 'Georgia', 'serif'],
+  			mono: ['JetBrains Mono', 'monospace'],
   		},
-  		boxShadow: {
-  			halo: '0 24px 80px rgba(17, 24, 39, 0.18)'
+  		borderRadius: {
+  			sm: 'calc(var(--radius) * 0.6)',
+  			md: 'calc(var(--radius) * 0.8)',
+  			lg: 'var(--radius)',
+  			xl: 'calc(var(--radius) * 1.4)',
+  			'2xl': 'calc(var(--radius) * 1.8)',
+  			'3xl': 'calc(var(--radius) * 2.2)',
+  			'4xl': 'calc(var(--radius) * 2.6)',
+  			full: '9999px',
   		},
   		keyframes: {
   			'accordion-down': {

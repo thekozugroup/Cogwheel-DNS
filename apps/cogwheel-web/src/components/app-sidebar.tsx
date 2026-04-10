@@ -96,10 +96,10 @@ export function AppSidebar() {
           </div>
           {!collapsed && (
             <div className="flex flex-col">
-              <span className="font-display text-base font-semibold tracking-tight">
+              <span className="font-display text-lg">
                 Cogwheel
               </span>
-              <span className="text-xs text-muted-foreground">DNS Control Plane</span>
+              <span className="text-[10px] tracking-wider text-muted-foreground">DNS Control Plane</span>
             </div>
           )}
         </div>
