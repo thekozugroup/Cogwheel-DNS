@@ -10,9 +10,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 
-pub mod upstream;
-pub use upstream::{UpstreamEndpoint, UpstreamError, UpstreamProtocol};
-
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DeploymentProfile {

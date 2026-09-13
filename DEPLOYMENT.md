@@ -186,10 +186,10 @@ read-only, so nothing the service does can replace its own binary.
 
 ## 5. Networking: host vs bridge, and why it decides a feature
 
-Cogwheel assigns block profiles **per device**, and it identifies a device by
-the source IP address of its DNS query. Internally the resolver keeps a
-`HashMap<IpAddr, DevicePolicyConfig>`; a query whose client address is not in
-that map falls through to the global policy.
+Cogwheel applies settings **per device**, and it identifies a device by the
+source IP address of its DNS query. Internally the resolver keeps a
+`HashMap<IpAddr, Scope>`; a query whose client address is not in that map
+resolves under the household scope.
 
 So the networking mode is not a deployment detail. It decides whether
 per-device profiles and per-device statistics work at all.

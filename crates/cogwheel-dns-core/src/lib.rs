@@ -1,262 +1,426 @@
+//! The DNS hot path: listeners, one cache of wire-format answers, and the miss pipeline.
+//!
+//! One [`DnsRuntime`] per process. It owns the upstream resolver, the current [`Policy`] and a
+//! single cache keyed by `(scope, qtype, name)`. A hit is answered inside the receive loop — a
+//! memcpy plus a two-byte id patch — so a slow or dead upstream can never starve the names the
+//! household already knows. A miss is handed to a task under a semaphore, and the loop is back at
+//! `recv_from` before the upstream has been asked anything.
+//!
+//! The decision itself lives in `cogwheel-policy`; this crate only decides *when* to ask it
+//! (once per miss, never per hit) and what to do with the upstream's answer.
+
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
 use cogwheel_policy::{
-    BlockMode, DecisionKind, PolicyEngine, RuleAction, RulesetArtifact, normalize_domain,
+    BlockMode, Policy, Reason, SCOPE_UNFILTERED, Verdict, evaluate, evaluate_lists,
+    normalize_domain,
 };
 use hickory_proto::op::{Message, OpCode, ResponseCode};
-use hickory_proto::rr::rdata::{A, AAAA};
-use hickory_proto::rr::{RData, Record, RecordType};
+use hickory_proto::rr::{Name, RData, Record, RecordType};
 use hickory_resolver::TokioResolver;
+use hickory_resolver::net::{DnsError, NetError};
 use moka::future::Cache;
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::{Semaphore, mpsc, watch};
 
-const MAX_CNAME_UNCLOAK_DEPTH: usize = 8;
+mod response;
+#[cfg(test)]
+mod tests;
+pub mod upstream;
 
+pub use upstream::{
+    UpstreamEndpoint, UpstreamError, UpstreamProtocol, build_resolver, resolver_options,
+};
+
+use response::{
+    BLOCKED_CACHE_TTL, build_base_response, build_blocked_response, cacheable_for,
+    error_response_for_payload,
+};
+
+/// Names held at once. Each entry is one wire-format answer, so the whole cache is a few
+/// megabytes even when full.
+const CACHE_CAPACITY: u64 = 10_000;
+
+/// How long an entry may outlive its own freshness.
+///
+/// A stale entry is only ever served after the upstream has failed, where a day-old address the
+/// site probably still answers on beats SERVFAIL. Past this the entry is evicted outright.
+const STALE_CEILING: Duration = Duration::from_secs(86_400);
+
+/// How long a stale answer stays fresh once the upstream has failed to refresh it.
+///
+/// RFC 8767 §5's figure. Without it every query for a known name during an outage is a miss
+/// that waits out the full upstream timeout before the stale bytes go out — longer than a stub
+/// waits for us, so serve-stale would reach nobody — and holds a miss permit the whole time.
+/// Half a minute makes an outage cost one timeout per name per 30 s, with hits answered inline.
+const STALE_REFRESH: Duration = Duration::from_secs(30);
+
+/// Misses in flight at once. Past this a miss is answered SERVFAIL and counted as dropped rather
+/// than queued behind an upstream that is not answering.
+const MISS_PERMITS: usize = 512;
+
+/// Log entries buffered between the hot path and whoever drains them.
+///
+/// Entries are handed off with `try_send` and dropped when this is full; the writer flushes every
+/// few seconds, so this is minutes of headroom at household rates and DNS never waits on SQLite.
+pub const LOG_QUEUE_DEPTH: usize = 8_192;
+
+/// Receive loops sharing the UDP socket. Four is plenty for the syscall rate one household can
+/// produce; the loops do nothing slow, so more would only contend on the socket.
+const MAX_UDP_WORKERS: usize = 4;
+
+/// One datagram's worth of buffer per receive loop; a query is never larger.
+const UDP_BUFFER: usize = 4096;
+
+/// The largest UDP answer a client without EDNS accepts (RFC 1035 §4.2.1).
+const MAX_PLAIN_UDP_PAYLOAD: usize = 512;
+
+/// CNAME targets checked per upstream answer.
+const MAX_CNAME_TARGETS: usize = 8;
+
+/// The RD flag, bit 0 of the third header byte.
+const RD_BIT: u8 = 0x01;
+
+/// Where the listeners bind.
 #[derive(Debug, Clone)]
 pub struct DnsRuntimeConfig {
     pub udp_bind_addr: SocketAddr,
     pub tcp_bind_addr: SocketAddr,
 }
 
-type QueryActivityObserver = Arc<dyn Fn(QueryActivityEvent) + Send + Sync>;
-
-#[derive(Clone)]
-pub struct DnsRuntime {
-    resolver: TokioResolver,
-    policy: Arc<RwLock<Arc<PolicyEngine>>>,
-    allow_all_policy: Arc<RwLock<Arc<PolicyEngine>>>,
-    profile_policies: Arc<RwLock<HashMap<String, Arc<PolicyEngine>>>>,
-    devices_by_ip: Arc<RwLock<HashMap<IpAddr, DevicePolicyConfig>>>,
-    query_activity_observer: Arc<RwLock<Option<QueryActivityObserver>>>,
-    global_pause_until: Arc<RwLock<Option<DateTime<Utc>>>>,
-    cache: Cache<String, CachedLookup>,
-    fallback_cache: Cache<String, CachedLookup>,
-    stats: Arc<DnsRuntimeStats>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct QueryActivityEvent {
-    pub domain: String,
-    pub client_ip: Option<String>,
-    pub blocked: bool,
-    pub observed_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct DevicePolicyConfig {
-    pub ip_address: String,
-    pub policy_mode: String,
-    pub blocklist_profile_override: Option<String>,
-    pub protection_override: String,
-    pub allowed_domains: Vec<String>,
-    pub blocked_domains: Vec<String>,
-}
-
+/// One answered query, handed off the hot path for the query log.
+///
+/// No `String`s: `domain` is the same allocation the cache key shares, so building an entry costs
+/// one refcount bump and a `try_send`.
 #[derive(Debug, Clone)]
-struct CachedLookup {
-    response: Message,
-    blocked: bool,
-    /// When this entry stops being usable.
-    ///
-    /// The cache previously had no expiry at all: `Cache::new` sets a capacity
-    /// and nothing else, and no record TTL was ever read. An answer therefore
-    /// stayed until 10,000 other names pushed it out, which on a household
-    /// resolver can be days. Anything that moves addresses -- CDN failover,
-    /// geo-routing, blue/green deploys, dynamic DNS -- kept resolving to an
-    /// address that had stopped serving it, and the failure looks exactly like
-    /// "the ad blocker broke this site".
-    expires_at: Instant,
+pub struct LogEntry {
+    /// Unix seconds.
+    pub ts: u32,
+    pub client: IpAddr,
+    pub domain: Arc<str>,
+    pub qtype: u16,
+    pub verdict: Verdict,
 }
 
-/// Never cache for less than this, however small the record's TTL.
-///
-/// Some CDNs answer with a TTL of 0 or 1 second. Honouring that literally
-/// turns every page load into a fresh upstream query per name, which on an
-/// encrypted upstream means a TLS round trip on the critical path.
-const MIN_CACHE_TTL: Duration = Duration::from_secs(5);
-
-/// Never cache for longer than this, however large the record's TTL.
-///
-/// Some records advertise a day or more. Holding an address that long on an
-/// appliance nobody restarts is how a household ends up pinned to a decommissioned
-/// server, so this bounds the worst case regardless of what upstream claims.
-const MAX_CACHE_TTL: Duration = Duration::from_secs(3_600);
-
-/// Lifetime for a response carrying no answer records.
-///
-/// NXDOMAIN and NODATA get a shorter life than a positive answer: a name that
-/// does not exist yet is far more likely to start existing than a live address
-/// is to change, and caching "this does not exist" for an hour is how a
-/// newly-provisioned host stays unreachable long after it came up.
-const NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(60);
-
-/// How long a response may be cached, from the records it actually contains.
-///
-/// The minimum TTL across the answer section, clamped. The minimum rather than
-/// the maximum because a response is only wholly valid until its shortest-lived
-/// record expires.
-fn cacheable_for(response: &Message) -> Duration {
-    response
-        .answers
-        .iter()
-        .map(|record| record.ttl)
-        .min()
-        .map_or(NEGATIVE_CACHE_TTL, |ttl| {
-            Duration::from_secs(u64::from(ttl)).clamp(MIN_CACHE_TTL, MAX_CACHE_TTL)
-        })
-}
-
-#[derive(Debug, Default)]
-pub struct DnsRuntimeStats {
-    upstream_failures_total: AtomicU64,
-    fallback_served_total: AtomicU64,
-    cache_hits_total: AtomicU64,
-    cache_expired_total: AtomicU64,
-    cname_uncloaks_total: AtomicU64,
-    cname_blocks_total: AtomicU64,
-    queries_total: AtomicU64,
-    blocked_total: AtomicU64,
-    cache_hit_latency_total_ns: AtomicU64,
-    cache_hit_samples: AtomicU64,
-    cache_miss_latency_total_ns: AtomicU64,
-    cache_miss_samples: AtomicU64,
-}
-
+/// What the runtime has done since it started.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DnsRuntimeSnapshot {
-    pub upstream_failures_total: u64,
-    pub fallback_served_total: u64,
-    pub cache_hits_total: u64,
-    pub cache_expired_total: u64,
-    pub cname_uncloaks_total: u64,
-    pub cname_blocks_total: u64,
     pub queries_total: u64,
     pub blocked_total: u64,
+    pub cache_hits_total: u64,
+    pub cache_expired_total: u64,
+    pub upstream_failures_total: u64,
+    pub stale_served_total: u64,
+    pub cname_blocks_total: u64,
+    pub dropped_total: u64,
     pub cache_hit_latency_avg_ns: u64,
     pub cache_hit_samples: u64,
     pub cache_miss_latency_avg_ns: u64,
     pub cache_miss_samples: u64,
 }
 
+/// The DNS forwarder: listeners, cache, policy and the upstream resolver.
+pub struct DnsRuntime {
+    resolver: TokioResolver,
+    policy: RwLock<Arc<Policy>>,
+    /// Unix seconds; 0 when not paused.
+    pause_until: AtomicU64,
+    cache: Cache<CacheKey, Arc<CachedWire>>,
+    /// Bumped by every swap that empties the cache, so a miss decided under the policy being
+    /// replaced can tell that its answer came back too late to be cached.
+    cache_epoch: AtomicU64,
+    miss_permits: Arc<Semaphore>,
+    log_tx: mpsc::Sender<LogEntry>,
+    stats: DnsRuntimeStats,
+}
+
+/// What an answer depends on: who asked (by scope, not by address), for what, and the name.
+///
+/// `qtype` is part of the key because an A answer cached under a bare name would be served to
+/// the AAAA query that follows it, which is the one that must never happen on a dual-stack
+/// network.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CacheKey {
+    scope: u32,
+    qtype: u16,
+    domain: Arc<str>,
+}
+
+/// One cached answer, already on the wire.
+///
+/// A hit copies `bytes` and patches the id and RD bit; nothing is re-encoded per request. The
+/// question name is therefore replayed in whatever case the first requester used. That is
+/// deliberate — 0x20-strict stubs are not a household concern, and rebuilding a `Message` per
+/// hit is what this design exists to avoid.
+struct CachedWire {
+    bytes: Box<[u8]>,
+    /// The TC form, present only when `bytes` cannot fit a plain 512-byte datagram.
+    truncated: Option<Box<[u8]>>,
+    fresh_until: Instant,
+    /// Past this the answer is not served even as a fallback. Fixed when the upstream last
+    /// confirmed it, so serving it stale through an outage does not push the ceiling out.
+    stale_until: Instant,
+    blocked: bool,
+    verdict: Verdict,
+}
+
+impl CachedWire {
+    fn from_message(response: &Message, fresh_for: Duration, verdict: Verdict) -> Result<Self> {
+        let bytes = response
+            .to_vec()
+            .context("encode response")?
+            .into_boxed_slice();
+        // Precomputed once here rather than per hit: a non-EDNS client asking for a large
+        // answer is common (every `dig +noedns`, some IoT stubs), and encoding on the hot path
+        // is exactly what the cache is meant to remove.
+        let truncated = if bytes.len() > MAX_PLAIN_UDP_PAYLOAD {
+            Some(
+                response
+                    .truncate()
+                    .to_vec()
+                    .context("encode truncated response")?
+                    .into_boxed_slice(),
+            )
+        } else {
+            None
+        };
+        let now = Instant::now();
+        Ok(Self {
+            bytes,
+            truncated,
+            fresh_until: now + fresh_for,
+            stale_until: now + STALE_CEILING,
+            blocked: verdict.is_blocked(),
+            verdict,
+        })
+    }
+
+    /// The same answer, fresh again for `fresh_for`, under the original stale ceiling.
+    fn refreshed(&self, fresh_for: Duration) -> Self {
+        Self {
+            bytes: self.bytes.clone(),
+            truncated: self.truncated.clone(),
+            fresh_until: Instant::now() + fresh_for,
+            stale_until: self.stale_until,
+            blocked: self.blocked,
+            verdict: self.verdict,
+        }
+    }
+}
+
+/// A parsed query with everything the hit and miss paths need, owned so a miss can move to a task.
+struct Admitted {
+    request: Message,
+    key: CacheKey,
+    policy: Arc<Policy>,
+    /// The cache epoch `policy` was read under.
+    epoch: u64,
+    client: IpAddr,
+    /// Whether the scope was reached through the household pause rather than a bypassed device;
+    /// the two share [`SCOPE_UNFILTERED`] and only the log tells them apart.
+    paused: bool,
+    /// The largest datagram the client accepts.
+    edns_max: usize,
+    ts: u32,
+    started: Instant,
+}
+
+enum Probe {
+    Hit(Arc<CachedWire>),
+    /// Carries the expired entry, if any, so an upstream failure can fall back to it.
+    Miss(Option<Arc<CachedWire>>),
+}
+
+#[derive(Debug, Default)]
+struct DnsRuntimeStats {
+    queries_total: AtomicU64,
+    blocked_total: AtomicU64,
+    cache_hits_total: AtomicU64,
+    cache_expired_total: AtomicU64,
+    upstream_failures_total: AtomicU64,
+    stale_served_total: AtomicU64,
+    cname_blocks_total: AtomicU64,
+    dropped_total: AtomicU64,
+    cache_hit_latency_total_ns: AtomicU64,
+    cache_hit_samples: AtomicU64,
+    cache_miss_latency_total_ns: AtomicU64,
+    cache_miss_samples: AtomicU64,
+}
+
+impl DnsRuntimeStats {
+    fn record_hit(&self, elapsed: Duration) {
+        self.cache_hit_latency_total_ns
+            .fetch_add(saturating_ns(elapsed), Ordering::Relaxed);
+        bump(&self.cache_hit_samples);
+    }
+
+    fn record_miss(&self, elapsed: Duration) {
+        self.cache_miss_latency_total_ns
+            .fetch_add(saturating_ns(elapsed), Ordering::Relaxed);
+        bump(&self.cache_miss_samples);
+    }
+}
+
+fn bump(counter: &AtomicU64) {
+    counter.fetch_add(1, Ordering::Relaxed);
+}
+
+fn saturating_ns(elapsed: Duration) -> u64 {
+    u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX)
+}
+
+fn average_ns(total: &AtomicU64, samples: u64) -> u64 {
+    total
+        .load(Ordering::Relaxed)
+        .checked_div(samples)
+        .unwrap_or(0)
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+}
+
+/// Grow the process's file-descriptor table to `slots` while the process is still
+/// single-threaded. Returns how many descriptors were actually opened, which is fewer than
+/// asked when `RLIMIT_NOFILE` is smaller.
+///
+/// Every upstream send binds a fresh UDP socket, and a retry wave against a dead upstream opens
+/// a batch of them at once. Linux doubles the descriptor table on demand, and once a process has
+/// more than one thread each doubling waits out an RCU grace period — 7 to 20 ms measured
+/// here — with every concurrent `socket()` queued behind it. Four workers stuck in that wait is
+/// four receive loops not answering hits. Opening and closing the descriptors before the
+/// runtime spawns its workers pays for the growth once, when it is cheap; the table never
+/// shrinks.
+pub fn reserve_descriptor_table(slots: usize) -> usize {
+    let Ok(anchor) = std::fs::File::open("/dev/null") else {
+        return 0;
+    };
+    let mut held = Vec::with_capacity(slots);
+    while held.len() < slots {
+        match anchor.try_clone() {
+            Ok(descriptor) => held.push(descriptor),
+            Err(_) => break,
+        }
+    }
+    held.len()
+}
+
 /// Read an `RwLock`, recovering the value even when the lock is poisoned.
 ///
-/// Poisoning only signals that some thread panicked while holding the lock. Every field guarded
-/// this way holds a wholesale replacement — an `Arc` swap or a rebuilt map — so the last committed
-/// value is still coherent, and recovering it keeps one panicking task from taking DNS resolution
-/// down for the remaining life of the process. Failing open is the right posture for a household
-/// resolver: losing the policy should mean "resolve normally", never "take the network offline".
+/// Poisoning only signals that some thread panicked while holding the lock. The policy is swapped
+/// wholesale — an `Arc` replacement — so the last committed value is still coherent, and
+/// recovering it keeps one panicking task from taking DNS resolution down for the remaining life
+/// of the process. Failing open is the right posture for a household resolver: losing the policy
+/// should mean "resolve normally", never "take the network offline".
 fn read_recover<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
     lock.read().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl DnsRuntime {
-    /// Build a runtime around a resolver and a policy engine.
-    pub fn new(resolver: TokioResolver, policy: Arc<PolicyEngine>) -> Self {
-        Self {
+    /// Build a runtime around a resolver and an initial policy.
+    ///
+    /// The receiver carries one [`LogEntry`] per answered query; whoever owns it must keep
+    /// draining or entries are dropped (and counted) once [`LOG_QUEUE_DEPTH`] is reached.
+    pub fn new(
+        resolver: TokioResolver,
+        policy: Arc<Policy>,
+    ) -> (Arc<Self>, mpsc::Receiver<LogEntry>) {
+        let (log_tx, log_rx) = mpsc::channel(LOG_QUEUE_DEPTH);
+        let runtime = Self {
             resolver,
-            policy: Arc::new(RwLock::new(policy.clone())),
-            allow_all_policy: Arc::new(RwLock::new(build_allow_all_policy(&policy))),
-            profile_policies: Arc::new(RwLock::new(HashMap::new())),
-            devices_by_ip: Arc::new(RwLock::new(HashMap::new())),
-            query_activity_observer: Arc::new(RwLock::new(None)),
-            global_pause_until: Arc::new(RwLock::new(None)),
-            // The per-entry deadline in `CachedLookup` is what enforces each
-            // record's own TTL. This ceiling is a second, coarser bound so an
-            // expired entry cannot sit in the map occupying capacity until
-            // 10,000 other names evict it.
+            policy: RwLock::new(policy),
+            pause_until: AtomicU64::new(0),
+            // `fresh_until` on each entry is what enforces the record's own TTL; moka's
+            // time-to-live is only the ceiling on how long a stale entry stays available for
+            // an outage before it is evicted outright.
             cache: Cache::builder()
-                .max_capacity(10_000)
-                .time_to_live(MAX_CACHE_TTL)
+                .max_capacity(CACHE_CAPACITY)
+                .time_to_live(STALE_CEILING)
                 .build(),
-            // The fallback cache is deliberately allowed to hold stale answers:
-            // its whole job is to keep the household resolving through an
-            // upstream outage, where an hour-old address beats no address. It
-            // is bounded only so it cannot grow without limit.
-            fallback_cache: Cache::builder()
-                .max_capacity(10_000)
-                .time_to_live(Duration::from_secs(86_400))
-                .build(),
-            stats: Arc::new(DnsRuntimeStats::default()),
-        }
+            cache_epoch: AtomicU64::new(0),
+            miss_permits: Arc::new(Semaphore::new(MISS_PERMITS)),
+            log_tx,
+            stats: DnsRuntimeStats::default(),
+        };
+        (Arc::new(runtime), log_rx)
     }
 
-    pub fn replace_policy(&self, policy: Arc<PolicyEngine>) {
-        self.replace_policy_catalog(policy, HashMap::new());
-    }
-
-    pub fn replace_policy_catalog(
-        &self,
-        policy: Arc<PolicyEngine>,
-        profile_policies: HashMap<String, Arc<PolicyEngine>>,
-    ) {
-        let allow_all_policy = build_allow_all_policy(&policy);
-        if let Ok(mut guard) = self.policy.write() {
-            *guard = policy;
-        }
-        if let Ok(mut guard) = self.allow_all_policy.write() {
-            *guard = allow_all_policy;
-        }
-        if let Ok(mut guard) = self.profile_policies.write() {
-            *guard = profile_policies;
-        }
-        self.cache.invalidate_all();
-        self.fallback_cache.invalidate_all();
-    }
-
-    pub fn replace_device_policies(&self, devices: Vec<DevicePolicyConfig>) {
-        let normalized = devices
-            .into_iter()
-            .filter_map(|device| {
-                device
-                    .ip_address
-                    .parse::<IpAddr>()
-                    .ok()
-                    .map(|ip| (ip, device))
-            })
-            .collect::<HashMap<_, _>>();
-        if let Ok(mut guard) = self.devices_by_ip.write() {
-            *guard = normalized;
-        }
+    /// Install a policy whose verdicts may differ from the current one's — a list rebuild or a
+    /// household-rule edit — and drop every cached answer with it.
+    pub fn swap_policy(&self, policy: Arc<Policy>) {
+        self.swap_policy_keep_cache(policy);
+        // The sweep only covers entries already inserted. A miss that read the old policy and
+        // is still waiting on the upstream will insert after it; bumping the epoch first is
+        // what lets that miss notice (see `insert`).
+        self.cache_epoch.fetch_add(1, Ordering::Release);
         self.cache.invalidate_all();
     }
 
-    /// The policy engine currently answering unscoped queries.
-    pub fn current_policy(&self) -> Arc<PolicyEngine> {
+    /// Install a policy that only re-maps clients to scopes (a device edit).
+    ///
+    /// Cached answers stay valid because a scope's verdicts are a function of the lists and
+    /// household rules, which did not change; a device whose settings changed simply lands on a
+    /// fresh scope id and its old entries age out unread.
+    pub fn swap_policy_keep_cache(&self, policy: Arc<Policy>) {
+        let mut guard = self
+            .policy
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = policy;
+    }
+
+    /// The policy answering queries right now.
+    pub fn current_policy(&self) -> Arc<Policy> {
         read_recover(&self.policy).clone()
     }
 
-    pub fn set_query_activity_observer(&self, observer: QueryActivityObserver) {
-        if let Ok(mut guard) = self.query_activity_observer.write() {
-            *guard = Some(observer);
-        }
+    /// How blocked names are answered under the current policy.
+    pub fn block_mode(&self) -> BlockMode {
+        read_recover(&self.policy).block_mode
+    }
+
+    /// Unix seconds until which every client resolves unfiltered; 0 when not paused.
+    pub fn pause_until(&self) -> u64 {
+        self.pause_until.load(Ordering::Relaxed)
+    }
+
+    /// Pause protection until the given unix second (0 resumes).
+    ///
+    /// No cache invalidation is needed: blocked answers live under scope 0 and the device
+    /// scopes, and a paused client reads [`SCOPE_UNFILTERED`].
+    pub fn set_pause_until(&self, until: u64) {
+        self.pause_until.store(until, Ordering::Relaxed);
     }
 
     pub fn snapshot(&self) -> DnsRuntimeSnapshot {
-        let cache_hit_samples = self.stats.cache_hit_samples.load(Ordering::Relaxed);
-        let cache_miss_samples = self.stats.cache_miss_samples.load(Ordering::Relaxed);
+        let stats = &self.stats;
+        let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
+        let cache_hit_samples = load(&stats.cache_hit_samples);
+        let cache_miss_samples = load(&stats.cache_miss_samples);
         DnsRuntimeSnapshot {
-            upstream_failures_total: self.stats.upstream_failures_total.load(Ordering::Relaxed),
-            fallback_served_total: self.stats.fallback_served_total.load(Ordering::Relaxed),
-            cache_hits_total: self.stats.cache_hits_total.load(Ordering::Relaxed),
-            cache_expired_total: self.stats.cache_expired_total.load(Ordering::Relaxed),
-            cname_uncloaks_total: self.stats.cname_uncloaks_total.load(Ordering::Relaxed),
-            cname_blocks_total: self.stats.cname_blocks_total.load(Ordering::Relaxed),
-            queries_total: self.stats.queries_total.load(Ordering::Relaxed),
-            blocked_total: self.stats.blocked_total.load(Ordering::Relaxed),
-            cache_hit_latency_avg_ns: average_atomic_ns(
-                &self.stats.cache_hit_latency_total_ns,
+            queries_total: load(&stats.queries_total),
+            blocked_total: load(&stats.blocked_total),
+            cache_hits_total: load(&stats.cache_hits_total),
+            cache_expired_total: load(&stats.cache_expired_total),
+            upstream_failures_total: load(&stats.upstream_failures_total),
+            stale_served_total: load(&stats.stale_served_total),
+            cname_blocks_total: load(&stats.cname_blocks_total),
+            dropped_total: load(&stats.dropped_total),
+            cache_hit_latency_avg_ns: average_ns(
+                &stats.cache_hit_latency_total_ns,
                 cache_hit_samples,
             ),
             cache_hit_samples,
-            cache_miss_latency_avg_ns: average_atomic_ns(
-                &self.stats.cache_miss_latency_total_ns,
+            cache_miss_latency_avg_ns: average_ns(
+                &stats.cache_miss_latency_total_ns,
                 cache_miss_samples,
             ),
             cache_miss_samples,
@@ -264,7 +428,7 @@ impl DnsRuntime {
     }
 
     pub async fn serve(self: Arc<Self>, config: DnsRuntimeConfig) -> Result<()> {
-        let (_tx, never) = tokio::sync::watch::channel(false);
+        let (_tx, never) = watch::channel(false);
         self.serve_with_ready_signal(config, || {}, never).await
     }
 
@@ -276,38 +440,49 @@ impl DnsRuntime {
         self: Arc<Self>,
         config: DnsRuntimeConfig,
         on_ready: F,
-        shutdown: tokio::sync::watch::Receiver<bool>,
+        shutdown: watch::Receiver<bool>,
     ) -> Result<()>
     where
         F: FnOnce() + Send + 'static,
     {
-        // Bind before spawning the accept loops so a bind failure is reported as a startup error
-        // rather than surfacing later as a dead task.
-        let udp_socket = UdpSocket::bind(config.udp_bind_addr)
-            .await
-            .context("bind udp socket")?;
+        // Bind before spawning the loops so a bind failure is reported as a startup error rather
+        // than surfacing later as a dead task.
+        let udp_socket = Arc::new(
+            UdpSocket::bind(config.udp_bind_addr)
+                .await
+                .context("bind udp socket")?,
+        );
         let tcp_listener = TcpListener::bind(config.tcp_bind_addr)
             .await
             .context("bind tcp listener")?;
         on_ready();
 
-        let udp = tokio::spawn(self.clone().accept_udp(udp_socket, shutdown.clone()));
+        // Several loops share the one socket so a hit on one core is answered while another is
+        // parsing; a single loop was the serial bottleneck this replaces.
+        let workers = std::thread::available_parallelism()
+            .map_or(1, |cores| cores.get())
+            .min(MAX_UDP_WORKERS);
+        let udp_loops: Vec<_> = (0..workers)
+            .map(|_| tokio::spawn(self.clone().recv_loop(udp_socket.clone(), shutdown.clone())))
+            .collect();
         let tcp = tokio::spawn(self.clone().accept_tcp(tcp_listener, shutdown));
-        udp.await??;
+        for udp in udp_loops {
+            udp.await??;
+        }
         tcp.await??;
         Ok(())
     }
 
-    async fn accept_udp(
+    async fn recv_loop(
         self: Arc<Self>,
-        socket: UdpSocket,
-        mut shutdown: tokio::sync::watch::Receiver<bool>,
+        socket: Arc<UdpSocket>,
+        mut shutdown: watch::Receiver<bool>,
     ) -> Result<()> {
-        let mut buffer = [0u8; 4096];
+        let mut buffer = [0u8; UDP_BUFFER];
         loop {
-            // Select only on the *accept* point. A query already being handled runs to completion
-            // below before the loop comes back here, so shutdown drains in-flight work rather than
-            // cancelling it mid-flight and dropping the client's answer.
+            // Select only on the receive point. A hit being answered runs to completion below
+            // before the loop comes back here, so shutdown drains in-flight work rather than
+            // cancelling it and dropping the client's answer.
             let (size, peer) = tokio::select! {
                 result = socket.recv_from(&mut buffer) => result?,
                 _ = shutdown.changed() => {
@@ -315,22 +490,108 @@ impl DnsRuntime {
                     return Ok(());
                 }
             };
-            let response = self
-                .handle_wire_query(&buffer[..size], Some(peer))
-                .await
-                .unwrap_or_else(|error| {
-                    tracing::warn!(%error, "failed to handle udp dns query");
-                    error_response_for_payload(&buffer[..size])
+            let payload = &buffer[..size];
+            if let Err(error) = self.handle_udp(&socket, payload, peer).await {
+                tracing::warn!(%error, "failed to handle udp dns query");
+                if let Ok(bytes) = error_response_for_payload(payload).to_vec() {
+                    // The client is retrying either way; a second failure adds nothing.
+                    let _ = socket.send_to(&bytes, peer).await;
+                }
+            }
+        }
+    }
+
+    /// One UDP datagram: answer a hit here, hand a miss to a task, never wait on the upstream.
+    async fn handle_udp(
+        self: &Arc<Self>,
+        socket: &Arc<UdpSocket>,
+        payload: &[u8],
+        peer: SocketAddr,
+    ) -> Result<()> {
+        let started = Instant::now();
+        let admitted = match self.admit(payload, peer.ip(), started) {
+            Ok(admitted) => admitted,
+            Err(rejection) => {
+                socket.send_to(&rejection.to_vec()?, peer).await?;
+                return Ok(());
+            }
+        };
+        match self.probe(&admitted.key, started).await {
+            Probe::Hit(entry) => {
+                self.count_hit(&entry);
+                let bytes = wire_for(&entry, &admitted.request, admitted.edns_max);
+                self.log(&admitted, entry.verdict);
+                // Sampled before the send: the latency counters measure this server's own
+                // work, and the loopback delivery plus the client's wake-up is the kernel's.
+                self.stats.record_hit(started.elapsed());
+                socket
+                    .send_to(&bytes, peer)
+                    .await
+                    .context("send udp response")?;
+            }
+            Probe::Miss(stale) => {
+                let Ok(permit) = Arc::clone(&self.miss_permits).try_acquire_owned() else {
+                    bump(&self.stats.dropped_total);
+                    let servfail = Message::error_msg(
+                        admitted.request.metadata.id,
+                        admitted.request.metadata.op_code,
+                        ResponseCode::ServFail,
+                    );
+                    socket.send_to(&servfail.to_vec()?, peer).await?;
+                    return Ok(());
+                };
+                let runtime = Arc::clone(self);
+                let socket = Arc::clone(socket);
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    runtime
+                        .finish_udp_miss(&socket, admitted, stale, peer)
+                        .await;
                 });
-            let response_bytes = response.to_vec()?;
-            socket.send_to(&response_bytes, peer).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn finish_udp_miss(
+        &self,
+        socket: &UdpSocket,
+        admitted: Admitted,
+        stale: Option<Arc<CachedWire>>,
+        peer: SocketAddr,
+    ) {
+        let (bytes, verdict) = match self.resolve_miss(&admitted, stale).await {
+            Ok(wire) => (
+                wire_for(&wire, &admitted.request, admitted.edns_max),
+                wire.verdict,
+            ),
+            Err(error) => {
+                tracing::warn!(%error, domain = %admitted.key.domain, "failed to resolve query");
+                let servfail = Message::error_msg(
+                    admitted.request.metadata.id,
+                    admitted.request.metadata.op_code,
+                    ResponseCode::ServFail,
+                );
+                match servfail.to_vec() {
+                    Ok(bytes) => (bytes, Verdict::Allow(Reason::NoMatch)),
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to encode servfail");
+                        return;
+                    }
+                }
+            }
+        };
+        self.log(&admitted, verdict);
+        self.stats.record_miss(admitted.started.elapsed());
+        if let Err(error) = socket.send_to(&bytes, peer).await {
+            tracing::warn!(%error, "failed to send udp dns response");
         }
     }
 
     async fn accept_tcp(
         self: Arc<Self>,
         listener: TcpListener,
-        mut shutdown: tokio::sync::watch::Receiver<bool>,
+        mut shutdown: watch::Receiver<bool>,
     ) -> Result<()> {
         loop {
             let (stream, peer) = tokio::select! {
@@ -352,635 +613,347 @@ impl DnsRuntime {
     async fn handle_tcp_stream(&self, mut stream: TcpStream, peer: SocketAddr) -> Result<()> {
         let mut len_buffer = [0u8; 2];
         stream.read_exact(&mut len_buffer).await?;
-        let length = u16::from_be_bytes(len_buffer) as usize;
+        let length = usize::from(u16::from_be_bytes(len_buffer));
         let mut payload = vec![0u8; length];
         stream.read_exact(&mut payload).await?;
-        let response = self.handle_wire_query(&payload, Some(peer)).await?;
-        let response_bytes = response.to_vec()?;
-        stream
-            .write_all(&(response_bytes.len() as u16).to_be_bytes())
-            .await?;
-        stream.write_all(&response_bytes).await?;
+        let response = match self.answer_tcp(&payload, peer.ip()).await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::warn!(%error, "failed to resolve tcp dns query");
+                error_response_for_payload(&payload).to_vec()?
+            }
+        };
+        let length = u16::try_from(response.len()).context("tcp response exceeds 64 KiB")?;
+        stream.write_all(&length.to_be_bytes()).await?;
+        stream.write_all(&response).await?;
         Ok(())
     }
 
-    async fn handle_wire_query(
+    /// TCP is the retry path for a truncated UDP answer, so it never truncates, and it runs the
+    /// miss inline: a connection is already a per-client resource, so no permit is needed.
+    async fn answer_tcp(&self, payload: &[u8], client: IpAddr) -> Result<Vec<u8>> {
+        let started = Instant::now();
+        let admitted = match self.admit(payload, client, started) {
+            Ok(admitted) => admitted,
+            Err(rejection) => return Ok(rejection.to_vec()?),
+        };
+        let (wire, hit) = match self.probe(&admitted.key, started).await {
+            Probe::Hit(entry) => {
+                self.count_hit(&entry);
+                (entry, true)
+            }
+            Probe::Miss(stale) => (self.resolve_miss(&admitted, stale).await?, false),
+        };
+        let bytes = wire_for(&wire, &admitted.request, usize::MAX);
+        self.log(&admitted, wire.verdict);
+        if hit {
+            self.stats.record_hit(started.elapsed());
+        } else {
+            self.stats.record_miss(started.elapsed());
+        }
+        Ok(bytes)
+    }
+
+    /// Parse and classify a query. `Err` carries the error response to send instead.
+    ///
+    /// This is the whole per-hit cost besides the cache probe: one `Message` parse, one `String`
+    /// for the lowercased name (shared by the key and the log entry), one policy `Arc` clone.
+    fn admit(
         &self,
         payload: &[u8],
-        client_addr: Option<SocketAddr>,
-    ) -> Result<Message> {
-        self.stats.queries_total.fetch_add(1, Ordering::Relaxed);
-        let query_start = Instant::now();
-        let request = Message::from_vec(payload)?;
-        let query = request
-            .queries
-            .first()
-            .cloned()
-            .context("dns query missing question")?;
-        let name = query.name().to_utf8();
-        let domain = name.trim_end_matches('.').to_ascii_lowercase();
-
-        let (engine, cache_scope, forced_block_mode) = self.policy_for_client(client_addr, &domain);
-        let cache_key = policy_cache_key(&cache_scope, &domain);
-
-        // An entry past its deadline is a miss, not a hit. moka's own
-        // time_to_live is a coarse memory ceiling; this is what actually
-        // enforces the TTL the authoritative server asked for, which is the
-        // difference between following a CDN when it moves and pinning the
-        // household to an address that has stopped answering.
-        if let Some(cached) = self.cache.get(&cache_key).await {
-            if Instant::now() < cached.expires_at {
-                self.stats.cache_hits_total.fetch_add(1, Ordering::Relaxed);
-                self.emit_query_activity(&domain, client_addr, cached.blocked);
-                self.record_cache_hit_latency(query_start.elapsed().as_nanos());
-                return Ok(response_for_request(&request, &cached.response));
+        client: IpAddr,
+        started: Instant,
+    ) -> Result<Admitted, Box<Message>> {
+        let request = match Message::from_vec(payload) {
+            Ok(request) => request,
+            Err(_) => {
+                // The id is the first two bytes whether or not the rest parsed; echoing it lets
+                // the client match the FORMERR to its query instead of waiting for a timeout.
+                let id = payload
+                    .first_chunk::<2>()
+                    .map_or(0, |id| u16::from_be_bytes(*id));
+                return Err(Box::new(Message::error_msg(
+                    id,
+                    OpCode::Query,
+                    ResponseCode::FormErr,
+                )));
             }
-            self.stats
-                .cache_expired_total
-                .fetch_add(1, Ordering::Relaxed);
-            self.cache.invalidate(&cache_key).await;
+        };
+        let id = request.metadata.id;
+        let op_code = request.metadata.op_code;
+        if op_code != OpCode::Query {
+            return Err(Box::new(Message::error_msg(
+                id,
+                op_code,
+                ResponseCode::NotImp,
+            )));
         }
+        let [query] = request.queries.as_slice() else {
+            return Err(Box::new(Message::error_msg(
+                id,
+                op_code,
+                ResponseCode::FormErr,
+            )));
+        };
+        bump(&self.stats.queries_total);
 
-        if let Some(block_mode) = forced_block_mode {
-            let response = build_blocked_response(&request, block_mode);
-            self.stats.blocked_total.fetch_add(1, Ordering::Relaxed);
-            self.cache
-                .insert(
-                    cache_key,
-                    CachedLookup {
-                        response: response.clone(),
-                        blocked: true,
-                        expires_at: Instant::now() + cacheable_for(&response),
-                    },
-                )
-                .await;
-            self.emit_query_activity(&domain, client_addr, true);
-            self.record_cache_miss_latency(query_start.elapsed().as_nanos());
-            return Ok(response);
-        }
-        let decision = engine.evaluate(&domain);
-        let allow_matched = decision
-            .matched_rule
-            .as_ref()
-            .is_some_and(|rule| matches!(rule.action, RuleAction::Allow));
+        // `to_ascii`, not `to_utf8`: lists carry `xn--` labels as they appear on the wire, and
+        // the UTF-8 form decodes them to Unicode, which nothing would ever match against. It
+        // also sizes the String exactly, where the UTF-8 form grows it through `format!`.
+        let domain = {
+            let mut name = query.name().to_ascii();
+            name.make_ascii_lowercase();
+            Arc::<str>::from(name.trim_end_matches('.'))
+        };
+        let qtype = u16::from(query.query_type());
+        let edns_max = usize::from(request.max_payload());
 
-        let blocked = matches!(&decision.kind, DecisionKind::Blocked(_));
-        let response = match decision.kind {
-            DecisionKind::Blocked(mode) => {
-                self.stats.blocked_total.fetch_add(1, Ordering::Relaxed);
-                build_blocked_response(&request, mode)
-            }
-            DecisionKind::Allowed => {
-                if !allow_matched {
-                    if let Some(mode) = self.uncloaked_block_mode(&domain, &engine).await? {
-                        self.stats.blocked_total.fetch_add(1, Ordering::Relaxed);
-                        let response = build_blocked_response(&request, mode);
-                        self.cache
-                            .insert(
-                                cache_key.clone(),
-                                CachedLookup {
-                                    response: response.clone(),
-                                    blocked: true,
-                                    expires_at: Instant::now() + cacheable_for(&response),
-                                },
-                            )
-                            .await;
-                        self.emit_query_activity(&domain, client_addr, true);
-                        self.record_cache_miss_latency(query_start.elapsed().as_nanos());
-                        return Ok(response);
-                    }
-                }
-
-                match self.resolve_upstream(&request, &domain).await {
-                    Ok(response) => {
-                        self.fallback_cache
-                            .insert(
-                                domain.clone(),
-                                CachedLookup {
-                                    response: response.clone(),
-                                    blocked: false,
-                                    expires_at: Instant::now() + cacheable_for(&response),
-                                },
-                            )
-                            .await;
-                        response
-                    }
-                    Err(error) => {
-                        self.stats
-                            .upstream_failures_total
-                            .fetch_add(1, Ordering::Relaxed);
-                        // Deliberately ignores `expires_at`. This path is only
-                        // reached when the upstream has already failed, and an
-                        // expired address the site probably still answers on
-                        // beats SERVFAIL. Staleness here is the feature.
-                        if let Some(fallback) = self.fallback_cache.get(&domain).await {
-                            self.stats
-                                .fallback_served_total
-                                .fetch_add(1, Ordering::Relaxed);
-                            tracing::warn!(%domain, %error, "serving fallback DNS response after upstream failure");
-                            response_for_request(&request, &fallback.response)
-                        } else {
-                            return Err(error);
-                        }
-                    }
-                }
+        // Epoch before policy: a swap that lands between the two is then seen as a new epoch
+        // with the new policy, never as the old policy under the new epoch.
+        let epoch = self.cache_epoch.load(Ordering::Acquire);
+        let policy = read_recover(&self.policy).clone();
+        let now = unix_now();
+        let pause_until = self.pause_until.load(Ordering::Relaxed);
+        let paused = pause_until != 0 && now < pause_until;
+        let scope = if paused {
+            SCOPE_UNFILTERED
+        } else {
+            let scope = policy.scope_for(client);
+            if scope.filtering {
+                scope.id
+            } else {
+                SCOPE_UNFILTERED
             }
         };
 
-        self.cache
-            .insert(
-                cache_key,
-                CachedLookup {
-                    response: response.clone(),
-                    blocked,
-                    expires_at: Instant::now() + cacheable_for(&response),
-                },
-            )
-            .await;
-        self.emit_query_activity(&domain, client_addr, blocked);
-        self.record_cache_miss_latency(query_start.elapsed().as_nanos());
-        Ok(response)
+        Ok(Admitted {
+            request,
+            key: CacheKey {
+                scope,
+                qtype,
+                domain,
+            },
+            policy,
+            epoch,
+            client,
+            paused,
+            edns_max,
+            ts: u32::try_from(now).unwrap_or(u32::MAX),
+            started,
+        })
     }
 
-    fn record_cache_hit_latency(&self, elapsed_ns: u128) {
-        self.stats
-            .cache_hit_latency_total_ns
-            .fetch_add(saturating_ns(elapsed_ns), Ordering::Relaxed);
-        self.stats.cache_hit_samples.fetch_add(1, Ordering::Relaxed);
-    }
-
-    fn record_cache_miss_latency(&self, elapsed_ns: u128) {
-        self.stats
-            .cache_miss_latency_total_ns
-            .fetch_add(saturating_ns(elapsed_ns), Ordering::Relaxed);
-        self.stats
-            .cache_miss_samples
-            .fetch_add(1, Ordering::Relaxed);
-    }
-
-    fn emit_query_activity(&self, domain: &str, client_addr: Option<SocketAddr>, blocked: bool) {
-        let observer = read_recover(&self.query_activity_observer).clone();
-        if let Some(observer) = observer {
-            observer(QueryActivityEvent {
-                domain: domain.to_string(),
-                client_ip: client_addr.map(|addr| addr.ip().to_string()),
-                blocked,
-                observed_at: Utc::now(),
-            });
+    /// An entry past its freshness is a miss, not a hit — but it is kept in hand, because if the
+    /// upstream then fails it is the answer the household gets.
+    async fn probe(&self, key: &CacheKey, now: Instant) -> Probe {
+        match self.cache.get(key).await {
+            Some(entry) if now < entry.fresh_until => Probe::Hit(entry),
+            Some(stale) => {
+                bump(&self.stats.cache_expired_total);
+                Probe::Miss((now < stale.stale_until).then_some(stale))
+            }
+            None => Probe::Miss(None),
         }
     }
 
-    pub fn pause_protection_until(&self, until: DateTime<Utc>) {
-        if let Ok(mut guard) = self.global_pause_until.write() {
-            *guard = Some(until);
+    fn count_hit(&self, entry: &CachedWire) {
+        bump(&self.stats.cache_hits_total);
+        // A blocked answer served from cache is still a block the household saw; counting only
+        // the first one made `blocked_total` a count of distinct names, not of queries.
+        if entry.blocked {
+            bump(&self.stats.blocked_total);
         }
     }
 
-    pub fn resume_protection(&self) {
-        if let Ok(mut guard) = self.global_pause_until.write() {
-            *guard = None;
-        }
-    }
-
-    pub fn protection_paused_until(&self) -> Option<DateTime<Utc>> {
-        self.global_pause_until.read().ok().and_then(|guard| *guard)
-    }
-
-    fn policy_for_client(
+    /// Decide the name, ask the upstream if allowed, cache what came back.
+    ///
+    /// Returns the entry to send. It is in the cache unless it is a SERVFAIL, which is never
+    /// cached, or the stale entry handed in, which already is.
+    async fn resolve_miss(
         &self,
-        client_addr: Option<SocketAddr>,
-        domain: &str,
-    ) -> (Arc<PolicyEngine>, String, Option<BlockMode>) {
-        if let Some(until) = self.protection_paused_until() {
-            if Utc::now() < until {
-                let allow_all_policy = read_recover(&self.allow_all_policy).clone();
-                return (allow_all_policy, "global-pause".to_string(), None);
+        admitted: &Admitted,
+        stale: Option<Arc<CachedWire>>,
+    ) -> Result<Arc<CachedWire>> {
+        let Admitted {
+            request,
+            key,
+            policy,
+            paused,
+            ..
+        } = admitted;
+        let scope = policy.scope(key.scope);
+        let mut verdict = evaluate(policy, scope, &key.domain);
+        if *paused {
+            verdict = Verdict::Allow(Reason::Paused);
+        }
+        if verdict.is_blocked() {
+            return self.insert_blocked(admitted, verdict).await;
+        }
+
+        let response = match self
+            .resolver
+            .lookup(&*key.domain, RecordType::from(key.qtype))
+            .await
+        {
+            Ok(lookup) => {
+                // Only a name nothing matched is re-checked through its aliases. An explicit
+                // allow — a rule, a protected suffix, a list exception — named the query, and
+                // a pause or bypass switched filtering off altogether.
+                if verdict.reason() == Reason::NoMatch
+                    && let Some(blocked) = cname_block(policy, scope.mask, lookup.answers())
+                {
+                    bump(&self.stats.cname_blocks_total);
+                    return self.insert_blocked(admitted, blocked).await;
+                }
+                let mut response = build_base_response(request, ResponseCode::NoError);
+                for record in lookup.answers() {
+                    response.add_answer(record.clone());
+                }
+                response
             }
-        }
-
-        let global = read_recover(&self.policy).clone();
-        let Some(client_ip) = client_addr.map(|addr| addr.ip()) else {
-            return (global.clone(), global.artifact().hash.clone(), None);
+            // hickory reports NXDOMAIN and NODATA as errors, but to the client they are answers:
+            // the name does not exist, or has no record of that type. Forward the code (and the
+            // SOA, which tells the stub how long it may remember that) rather than SERVFAIL,
+            // which would make the client retry elsewhere.
+            Err(NetError::Dns(DnsError::NoRecordsFound(negative))) => {
+                let mut response = build_base_response(request, negative.response_code);
+                if let Some(soa) = negative.soa {
+                    response.add_authority(soa.into_record_of_rdata());
+                }
+                response
+            }
+            Err(error) => {
+                bump(&self.stats.upstream_failures_total);
+                if let Some(stale) = stale {
+                    bump(&self.stats.stale_served_total);
+                    tracing::warn!(
+                        %error,
+                        domain = %key.domain,
+                        "serving stale answer after upstream failure"
+                    );
+                    let refreshed = Arc::new(stale.refreshed(STALE_REFRESH));
+                    self.insert(admitted, Arc::clone(&refreshed)).await;
+                    return Ok(refreshed);
+                }
+                let servfail = build_base_response(request, ResponseCode::ServFail);
+                return CachedWire::from_message(&servfail, Duration::ZERO, verdict).map(Arc::new);
+            }
         };
 
-        let devices = read_recover(&self.devices_by_ip);
-        let Some(device) = devices.get(&client_ip) else {
-            return (global.clone(), global.artifact().hash.clone(), None);
-        };
-        if device.policy_mode != "custom" {
-            return (global.clone(), global.artifact().hash.clone(), None);
-        }
-        if device
-            .blocked_domains
-            .iter()
-            .any(|candidate| domain_matches_override(domain, candidate))
-        {
-            return (
-                global.clone(),
-                format!("device-block:{}", client_ip),
-                Some(global.artifact().block_mode.clone()),
-            );
-        }
-        if device
-            .allowed_domains
-            .iter()
-            .any(|candidate| domain_matches_override(domain, candidate))
-        {
-            let allow_all_policy = read_recover(&self.allow_all_policy).clone();
-            return (
-                allow_all_policy,
-                format!("device-allow:{}", client_ip),
-                None,
-            );
-        }
-        if device.protection_override == "bypass" {
-            let allow_all_policy = read_recover(&self.allow_all_policy).clone();
-            return (allow_all_policy, "bypass".to_string(), None);
-        }
-
-        let Some(profile) = device.blocklist_profile_override.as_deref() else {
-            return (global.clone(), global.artifact().hash.clone(), None);
-        };
-
-        let profile_policies = read_recover(&self.profile_policies);
-        let Some(policy) = profile_policies.get(profile) else {
-            return (global.clone(), global.artifact().hash.clone(), None);
-        };
-
-        (policy.clone(), format!("profile:{}", profile), None)
+        let fresh_for = cacheable_for(&response);
+        let wire = Arc::new(CachedWire::from_message(&response, fresh_for, verdict)?);
+        self.insert(admitted, Arc::clone(&wire)).await;
+        Ok(wire)
     }
 
-    async fn resolve_upstream(&self, request: &Message, domain: &str) -> Result<Message> {
-        let query = request
-            .queries
-            .first()
-            .context("dns query missing question")?;
-        let lookup = self.resolver.lookup(domain, query.query_type()).await?;
-        let mut response = build_base_response(request, ResponseCode::NoError);
-        // A 0.26 `Lookup` carries the upstream message with its sections intact, so the answer
-        // section is addressed directly instead of through the old flattened record list.
-        for record in lookup.answers() {
-            response.add_answer(record.clone());
-        }
-        Ok(response)
-    }
-
-    async fn uncloaked_block_mode(
+    async fn insert_blocked(
         &self,
-        domain: &str,
-        engine: &PolicyEngine,
-    ) -> Result<Option<BlockMode>> {
-        let mut current = domain.to_string();
-        let mut seen = HashSet::new();
+        admitted: &Admitted,
+        verdict: Verdict,
+    ) -> Result<Arc<CachedWire>> {
+        let response = build_blocked_response(&admitted.request, admitted.policy.block_mode);
+        let wire = Arc::new(CachedWire::from_message(
+            &response,
+            BLOCKED_CACHE_TTL,
+            verdict,
+        )?);
+        bump(&self.stats.blocked_total);
+        self.insert(admitted, Arc::clone(&wire)).await;
+        Ok(wire)
+    }
 
-        for _ in 0..MAX_CNAME_UNCLOAK_DEPTH {
-            if !seen.insert(current.clone()) {
-                return Ok(None);
-            }
-
-            let lookup = match self.resolver.lookup(&current, RecordType::CNAME).await {
-                Ok(lookup) => lookup,
-                Err(_) => return Ok(None),
-            };
-
-            let Some(target) = lookup.answers().iter().find_map(extract_cname_target) else {
-                return Ok(None);
-            };
-
-            self.stats
-                .cname_uncloaks_total
-                .fetch_add(1, Ordering::Relaxed);
-            let normalized_target = normalize_domain(&target);
-            let decision = engine.evaluate(&normalized_target);
-            if let DecisionKind::Blocked(mode) = decision.kind {
-                self.stats
-                    .cname_blocks_total
-                    .fetch_add(1, Ordering::Relaxed);
-                return Ok(Some(mode));
-            }
-
-            current = normalized_target;
+    /// Cache an answer, unless the policy it was decided under was replaced while it was in
+    /// flight.
+    ///
+    /// Checked after the insert rather than before so there is no window: a swap that bumps
+    /// the epoch after this check runs its sweep after this insert, and the sweep takes the
+    /// entry; a swap that bumped before is seen here, and the entry is taken back.
+    async fn insert(&self, admitted: &Admitted, wire: Arc<CachedWire>) {
+        self.cache.insert(admitted.key.clone(), wire).await;
+        if self.cache_epoch.load(Ordering::Acquire) != admitted.epoch {
+            self.cache.invalidate(&admitted.key).await;
         }
+    }
 
-        Ok(None)
+    fn log(&self, admitted: &Admitted, verdict: Verdict) {
+        let entry = LogEntry {
+            ts: admitted.ts,
+            client: admitted.client,
+            domain: Arc::clone(&admitted.key.domain),
+            qtype: admitted.key.qtype,
+            verdict: logged_verdict(admitted, verdict),
+        };
+        match self.log_tx.try_send(entry) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => bump(&self.stats.dropped_total),
+            // Nobody is draining the log; there is nothing to lose.
+            Err(TrySendError::Closed(_)) => {}
+        }
     }
 }
 
-fn extract_cname_target(record: &Record) -> Option<String> {
+/// The verdict the query log records.
+///
+/// Paused households and bypassed devices share one cache scope, so an entry under it remembers
+/// whichever of the two inserted it. The requester's own route to that scope is what the log
+/// should say.
+fn logged_verdict(admitted: &Admitted, stored: Verdict) -> Verdict {
+    if admitted.key.scope != SCOPE_UNFILTERED {
+        return stored;
+    }
+    Verdict::Allow(if admitted.paused {
+        Reason::Paused
+    } else {
+        Reason::Unfiltered
+    })
+}
+
+/// A list-tier block for any CNAME target in `answers`, attributed to [`Reason::Cname`].
+///
+/// Read from the answer the upstream already returned, so the check costs no round trip. Only
+/// the list tier applies: a user's rule names the query, not the aliases behind it.
+fn cname_block(policy: &Policy, mask: u64, answers: &[Record]) -> Option<Verdict> {
+    answers
+        .iter()
+        .filter_map(cname_target)
+        .take(MAX_CNAME_TARGETS)
+        .find_map(|target| {
+            let target = normalize_domain(&target.to_ascii());
+            match evaluate_lists(policy, mask, &target) {
+                Verdict::Block(_, slot) => Some(Verdict::Block(Reason::Cname, slot)),
+                Verdict::Allow(_) => None,
+            }
+        })
+}
+
+fn cname_target(record: &Record) -> Option<&Name> {
     match &record.data {
-        RData::CNAME(target) => Some(target.0.to_utf8()),
+        RData::CNAME(target) => Some(&target.0),
         _ => None,
     }
 }
 
-fn policy_cache_key(scope: &str, domain: &str) -> String {
-    format!("{scope}:{domain}")
+/// The bytes to send for `request`: the cached answer, or its TC form when the answer would not
+/// fit the client's datagram, with the header patched to this request.
+fn wire_for(entry: &CachedWire, request: &Message, max_payload: usize) -> Vec<u8> {
+    let bytes = match &entry.truncated {
+        Some(truncated) if entry.bytes.len() > max_payload => truncated,
+        _ => &entry.bytes,
+    };
+    let mut out = bytes.to_vec();
+    patch_header(
+        &mut out,
+        request.metadata.id,
+        request.metadata.recursion_desired,
+    );
+    out
 }
 
-fn build_allow_all_policy(global_policy: &Arc<PolicyEngine>) -> Arc<PolicyEngine> {
-    let artifact = global_policy.artifact();
-    Arc::new(PolicyEngine::new(RulesetArtifact::new(
-        Vec::new(),
-        artifact.protected_domains.clone(),
-        artifact.block_mode.clone(),
-    )))
-}
-
-fn domain_matches_override(domain: &str, candidate: &str) -> bool {
-    domain == candidate
-        || domain
-            .strip_suffix(candidate)
-            .is_some_and(|prefix| prefix.ends_with('.'))
-}
-
-fn response_for_request(request: &Message, cached: &Message) -> Message {
-    let mut response = cached.clone();
-    response.metadata.id = request.metadata.id;
-    response
-}
-
-fn saturating_ns(elapsed_ns: u128) -> u64 {
-    elapsed_ns.min(u64::MAX as u128) as u64
-}
-
-fn average_atomic_ns(total: &AtomicU64, samples: u64) -> u64 {
-    total
-        .load(Ordering::Relaxed)
-        .checked_div(samples)
-        .unwrap_or(0)
-}
-
-fn error_response_for_payload(payload: &[u8]) -> Message {
-    match Message::from_vec(payload) {
-        Ok(request) => Message::error_msg(
-            request.metadata.id,
-            request.metadata.op_code,
-            ResponseCode::ServFail,
-        ),
-        Err(_) => Message::error_msg(0, OpCode::Query, ResponseCode::ServFail),
-    }
-}
-
-fn build_base_response(request: &Message, code: ResponseCode) -> Message {
-    let mut response = Message::response(request.metadata.id, request.metadata.op_code);
-    // We are a forwarder, never the zone's authority, and we always accept recursion. The RD bit is
-    // echoed from the request because RFC 1035 requires the response to mirror it.
-    response.metadata.authoritative = false;
-    response.metadata.recursion_desired = request.metadata.recursion_desired;
-    response.metadata.recursion_available = true;
-    // Assigned rather than merged: `merge_response_code` folds in the EDNS high-order bits, which
-    // would change what a blocked answer reports.
-    response.metadata.response_code = code;
-    for query in &request.queries {
-        response.add_query(query.clone());
-    }
-    response
-}
-
-fn build_blocked_response(request: &Message, mode: BlockMode) -> Message {
-    match mode {
-        BlockMode::NxDomain => build_base_response(request, ResponseCode::NXDomain),
-        BlockMode::NoData => build_base_response(request, ResponseCode::NoError),
-        BlockMode::Refused => build_base_response(request, ResponseCode::Refused),
-        BlockMode::NullIp => build_ip_response(
-            request,
-            Some(Ipv4Addr::new(0, 0, 0, 0)),
-            Some(Ipv6Addr::UNSPECIFIED),
-        ),
-        BlockMode::CustomIp { ipv4, ipv6 } => build_ip_response(request, ipv4, ipv6),
-    }
-}
-
-fn build_ip_response(request: &Message, ipv4: Option<Ipv4Addr>, ipv6: Option<Ipv6Addr>) -> Message {
-    let mut response = build_base_response(request, ResponseCode::NoError);
-    for query in &request.queries {
-        let name = query.name().clone();
-        match query.query_type() {
-            hickory_proto::rr::RecordType::A => {
-                if let Some(address) = ipv4 {
-                    response.add_answer(Record::from_rdata(name, 60, RData::A(A(address))));
-                }
-            }
-            hickory_proto::rr::RecordType::AAAA => {
-                if let Some(address) = ipv6 {
-                    response.add_answer(Record::from_rdata(name, 60, RData::AAAA(AAAA(address))));
-                }
-            }
-            _ => {}
-        }
-    }
-    response
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use hickory_proto::op::{MessageType, Query};
-    use hickory_proto::rr::Name;
-
-    fn response_with_ttls(ttls: &[u32]) -> Message {
-        let mut message = Message::query();
-        let name = Name::from_ascii("example.com.").expect("name");
-        for ttl in ttls {
-            message.add_answer(Record::from_rdata(
-                name.clone(),
-                *ttl,
-                RData::A(A(Ipv4Addr::new(192, 0, 2, 1))),
-            ));
-        }
-        message
-    }
-
-    /// The shortest-lived record decides: a response is only wholly valid
-    /// until its first record expires.
-    #[test]
-    fn cache_lifetime_follows_the_smallest_record_ttl() {
-        assert_eq!(
-            cacheable_for(&response_with_ttls(&[300, 60, 900])),
-            Duration::from_secs(60)
-        );
-        assert_eq!(
-            cacheable_for(&response_with_ttls(&[120])),
-            Duration::from_secs(120)
-        );
-    }
-
-    /// A CDN answering with TTL 0 or 1 would otherwise mean an upstream query
-    /// per name per page load -- a TLS round trip each, on DoT.
-    #[test]
-    fn a_tiny_ttl_is_raised_to_the_floor() {
-        assert_eq!(cacheable_for(&response_with_ttls(&[0])), MIN_CACHE_TTL);
-        assert_eq!(cacheable_for(&response_with_ttls(&[1])), MIN_CACHE_TTL);
-    }
-
-    /// Bounds the worst case: an appliance nobody restarts must not pin the
-    /// household to an address for a day because a record said so.
-    #[test]
-    fn a_huge_ttl_is_capped_at_the_ceiling() {
-        assert_eq!(cacheable_for(&response_with_ttls(&[86_400])), MAX_CACHE_TTL);
-        assert_eq!(
-            cacheable_for(&response_with_ttls(&[u32::MAX])),
-            MAX_CACHE_TTL
-        );
-    }
-
-    /// NXDOMAIN and NODATA carry no answers. Caching "does not exist" for an
-    /// hour keeps a freshly-provisioned host unreachable long after it is up.
-    #[test]
-    fn a_response_with_no_answers_uses_the_shorter_negative_lifetime() {
-        assert_eq!(cacheable_for(&response_with_ttls(&[])), NEGATIVE_CACHE_TTL);
-        assert!(NEGATIVE_CACHE_TTL < MAX_CACHE_TTL);
-    }
-
-    /// The regression this whole change exists for: before it, nothing in the
-    /// DNS path read a TTL at all, and an entry lived until 10,000 other names
-    /// evicted it.
-    #[test]
-    fn every_cached_entry_has_a_deadline_in_the_future_but_bounded() {
-        let lifetime = cacheable_for(&response_with_ttls(&[300]));
-        assert!(lifetime >= MIN_CACHE_TTL && lifetime <= MAX_CACHE_TTL);
-        let entry = CachedLookup {
-            response: response_with_ttls(&[300]),
-            blocked: false,
-            expires_at: Instant::now() + lifetime,
-        };
-        assert!(entry.expires_at > Instant::now());
-        assert!(entry.expires_at <= Instant::now() + MAX_CACHE_TTL);
-    }
-    use std::fs;
-
-    #[test]
-    fn runtime_snapshot_starts_at_zero() {
-        let stats = DnsRuntimeStats::default();
-        let snapshot = DnsRuntimeSnapshot {
-            upstream_failures_total: stats.upstream_failures_total.load(Ordering::Relaxed),
-            fallback_served_total: stats.fallback_served_total.load(Ordering::Relaxed),
-            cache_hits_total: stats.cache_hits_total.load(Ordering::Relaxed),
-            cache_expired_total: stats.cache_expired_total.load(Ordering::Relaxed),
-            cname_uncloaks_total: stats.cname_uncloaks_total.load(Ordering::Relaxed),
-            cname_blocks_total: stats.cname_blocks_total.load(Ordering::Relaxed),
-            queries_total: stats.queries_total.load(Ordering::Relaxed),
-            blocked_total: stats.blocked_total.load(Ordering::Relaxed),
-            cache_hit_latency_avg_ns: 0,
-            cache_hit_samples: 0,
-            cache_miss_latency_avg_ns: 0,
-            cache_miss_samples: 0,
-        };
-        assert_eq!(
-            snapshot,
-            DnsRuntimeSnapshot {
-                upstream_failures_total: 0,
-                fallback_served_total: 0,
-                cache_hits_total: 0,
-                cache_expired_total: 0,
-                cname_uncloaks_total: 0,
-                cname_blocks_total: 0,
-                queries_total: 0,
-                blocked_total: 0,
-                cache_hit_latency_avg_ns: 0,
-                cache_hit_samples: 0,
-                cache_miss_latency_avg_ns: 0,
-                cache_miss_samples: 0,
-            }
-        );
-    }
-
-    #[test]
-    fn extract_cname_target_reads_record_data() {
-        use hickory_proto::rr::Name;
-        use hickory_proto::rr::rdata::CNAME;
-
-        let alias = Name::from_ascii("tracker.example.com").expect("valid test name");
-        let record = Record::from_rdata(
-            Name::from_ascii("alias.example.com").expect("valid owner name"),
-            60,
-            RData::CNAME(CNAME(alias)),
-        );
-
-        assert_eq!(
-            extract_cname_target(&record),
-            Some("tracker.example.com".to_string())
-        );
-    }
-
-    #[test]
-    fn cached_response_adopts_request_id() {
-        let request = Message::new(42, MessageType::Query, OpCode::Query);
-        let cached = Message::response(7, OpCode::Query);
-
-        let response = response_for_request(&request, &cached);
-        assert_eq!(response.metadata.id, 42);
-    }
-
-    #[test]
-    fn error_response_uses_original_request_id() {
-        let mut request = Message::new(17, MessageType::Query, OpCode::Query);
-        request.add_query(Query::query(
-            Name::from_ascii("example.com").expect("valid test name"),
-            RecordType::A,
-        ));
-        let response = error_response_for_payload(&request.to_vec().expect("wire request"));
-        assert_eq!(response.metadata.id, request.metadata.id);
-        assert_eq!(response.metadata.response_code, ResponseCode::ServFail);
-    }
-
-    #[test]
-    fn policy_cache_key_scopes_by_policy() {
-        assert_eq!(
-            policy_cache_key("profile:balanced", "ads.example.com"),
-            "profile:balanced:ads.example.com"
-        );
-    }
-
-    #[test]
-    fn build_allow_all_policy_removes_block_rules() {
-        let policy = Arc::new(PolicyEngine::new(RulesetArtifact::new(
-            vec![cogwheel_policy::Rule {
-                pattern: cogwheel_policy::RulePattern::Exact("ads.example".to_string()),
-                action: cogwheel_policy::RuleAction::Block,
-                source: "test".to_string(),
-                comment: None,
-            }],
-            HashSet::new(),
-            BlockMode::NullIp,
-        )));
-
-        let allow_all = build_allow_all_policy(&policy);
-
-        assert!(matches!(
-            allow_all.evaluate("ads.example").kind,
-            DecisionKind::Allowed
-        ));
-    }
-
-    #[test]
-    fn domain_matches_override_supports_suffixes() {
-        assert!(domain_matches_override("ads.example.com", "example.com"));
-        assert!(domain_matches_override("example.com", "example.com"));
-        assert!(!domain_matches_override("badexample.com", "example.com"));
-    }
-
-    #[test]
-    fn hot_path_crates_remain_llm_and_network_independent() {
-        let dns_core_manifest =
-            fs::read_to_string(format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR")))
-                .expect("read dns core manifest");
-        let forbidden_dependencies = [
-            "reqwest",
-            "ureq",
-            "surf",
-            "async-openai",
-            "openai-api-rs",
-            "ollama-rs",
-            "rig-core",
-            "langchain-rust",
-        ];
-
-        for dependency in forbidden_dependencies {
-            assert!(
-                !dns_core_manifest.contains(&format!("{dependency} =")),
-                "cogwheel-dns-core should not depend on {dependency}; the DNS hot path must stay deterministic and LLM-independent"
-            );
-        }
+/// Make a cached response answer this request: its id, and its RD bit (RFC 1035 §4.1.1 says
+/// the response copies it from the query).
+fn patch_header(bytes: &mut [u8], id: u16, recursion_desired: bool) {
+    if let Some([hi, lo, flags]) = bytes.first_chunk_mut::<3>() {
+        [*hi, *lo] = id.to_be_bytes();
+        *flags = (*flags & !RD_BIT) | (u8::from(recursion_desired) * RD_BIT);
     }
 }

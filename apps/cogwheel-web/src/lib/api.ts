@@ -83,14 +83,16 @@ const post = (body?: unknown): RequestInit => ({
 /* ------------------------------------------------------------------------- */
 
 export type DnsRuntimeSnapshot = {
-  upstream_failures_total: number;
-  fallback_served_total: number;
-  cache_hits_total: number;
-  cache_expired_total: number;
-  cname_uncloaks_total: number;
-  cname_blocks_total: number;
   queries_total: number;
   blocked_total: number;
+  cache_hits_total: number;
+  cache_expired_total: number;
+  upstream_failures_total: number;
+  /** Expired answers served because the upstream failed. */
+  stale_served_total: number;
+  cname_blocks_total: number;
+  /** Queries answered SERVFAIL or left out of the log because the runtime was saturated. */
+  dropped_total: number;
   cache_hit_latency_avg_ns: number;
   cache_hit_samples: number;
   cache_miss_latency_avg_ns: number;

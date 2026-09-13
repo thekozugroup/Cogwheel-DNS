@@ -25,13 +25,12 @@ services:
     # =====================================================================
     # NETWORKING — read this before changing it.
     #
-    # Cogwheel assigns block profiles per device, and it identifies a device
-    # by the source IP of its DNS query
-    # (cogwheel-dns-core keys `devices_by_ip: HashMap<IpAddr, DevicePolicyConfig>`;
-    # a query whose client address does not match a known device falls through
-    # to the global policy). So whether the container can see the *real* client
-    # address is not a networking detail — it decides whether per-device
-    # profiles work at all.
+    # Cogwheel applies settings per device, and it identifies a device by the
+    # source IP of its DNS query (cogwheel-policy keys `Policy::by_ip:
+    # HashMap<IpAddr, Scope>`; a query whose client address does not match a
+    # known device resolves under the household scope). So whether the
+    # container can see the *real* client address is not a networking detail —
+    # it decides whether per-device settings work at all.
     #
     # ---------------------------------------------------------------------
     # Option A (default, below): host networking.

@@ -253,8 +253,8 @@ export function OverviewScreen() {
             <SummaryRow label="Cache hits">
               <span className="tabular">{formatCount(snapshot.cache_hits_total)}</span>
             </SummaryRow>
-            <SummaryRow label="Fallback served">
-              <span className="tabular">{formatCount(snapshot.fallback_served_total)}</span>
+            <SummaryRow label="Stale served">
+              <span className="tabular">{formatCount(snapshot.stale_served_total)}</span>
             </SummaryRow>
             <SummaryRow label="Upstream failures">
               <span className="tabular">{formatCount(snapshot.upstream_failures_total)}</span>

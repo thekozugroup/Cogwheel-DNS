@@ -20,14 +20,14 @@ path from quietly growing dependencies on the control plane.
 The workspace has five library crates, one binary and one web app:
 
 - `crates/cogwheel-policy`
-  - Owns the rule model (`Rule`, `RulePattern`, `RuleAction`), the compiled
-    `RulesetArtifact`, `PolicyEngine::evaluate`, `BlockMode`, domain
-    normalisation and the `PROTECTED_SUFFIXES` safety net.
+  - Owns the rule model (`ListIndex`, `RuleSet`, `Scope`, `Policy`), the
+    allocation-free `evaluate`, `BlockMode`, domain normalisation and the
+    `PROTECTED_SUFFIXES` safety net.
   - Pure: no I/O and no path dependencies. Everything else that filters is
     built on it.
 - `crates/cogwheel-lists`
-  - Owns blocklist fetch, parse (`domains`, `hosts`, Adblock), verification and
-    compilation into a `PolicyEngine`.
+  - Owns blocklist fetch, parse (`domains`, `hosts`, Adblock) and
+    verification; the server compiles the parsed lists into a `ListIndex`.
   - Control plane only: it talks HTTP, so it is never on the DNS path.
   - Depends on `cogwheel-policy`.
 - `crates/cogwheel-dns-core`
@@ -62,8 +62,8 @@ The workspace has five library crates, one binary and one web app:
   and a slow event subscriber loses frames rather than slowing resolution.
 - A candidate policy that would block a protected name is refused before
   activation; nothing rolls a live policy back after the fact.
-- Cross-crate sharing prefers compiled artifacts (`PolicyEngine`,
-  `RulesetArtifact`) over leaking internal structs.
+- Cross-crate sharing prefers compiled artifacts (`Policy`, `ListIndex`)
+  over leaking internal structs.
 - Reusable domain behaviour lands in a library crate; the server composes.
 - Any change to the path-dependency graph updates this ADR first and the
   regression test in `crates/cogwheel-api/src/lib.rs`

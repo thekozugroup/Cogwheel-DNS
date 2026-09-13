@@ -18,8 +18,8 @@ Current guardrails:
 Design expectation:
 
 - Answering a query must never depend on a remote model, a web service or a
-  storage write. `PolicyEngine::evaluate` is pure; the cache and the counters
-  are in memory.
+  storage write. `cogwheel_policy::evaluate` is pure; the cache and the
+  counters are in memory.
 - A blocklist refresh that fails leaves the policy already in force serving.
 - New cloud-backed or AI-assisted features belong in off-path control-plane
   code, never in `cogwheel-dns-core`.

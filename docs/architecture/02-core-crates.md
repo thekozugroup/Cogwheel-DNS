@@ -14,7 +14,7 @@ branch.
 
 | Member | Role | Lines (approx.) |
 |---|---|---|
-| `crates/cogwheel-policy` | rule model, `PolicyEngine::evaluate`, protected suffixes | 550 |
+| `crates/cogwheel-policy` | rule model, `evaluate`, protected suffixes | 550 |
 | `crates/cogwheel-lists` | fetch / parse / verify / compile blocklists | 520 |
 | `crates/cogwheel-dns-core` | listeners, cache, per-client policy, upstream | 990 |
 | `crates/cogwheel-storage` | SQLite schema, migrations, repositories, pruning | 740 |
@@ -66,28 +66,26 @@ Leaf crate, `#![warn(missing_docs)]`, no I/O.
   needs to stay on the network and to explain what is wrong when it is not.
   Banking, government and health names are deliberately absent: blocking
   those is bad, but visible and reversible.
-- `BlockMode` — `NullIp` (default), `NxDomain`, `NoData`, `Refused`,
-  `CustomIp { ipv4, ipv6 }`. One per artifact, not per rule.
-- `RulePattern` — `Exact(String)` | `Suffix(String)`.
-- `RuleAction` — `Allow` | `Block`.
-- `Rule { pattern, action, source, comment }`.
-- `DecisionKind` — `Allowed` | `Blocked(BlockMode)`; `Decision { kind,
-  matched_rule: Option<Rule> }`.
-- `RulesetArtifact { id, hash, created_at, rules, protected_domains,
-  block_mode }` and `RulesetArtifact::new(rules, protected, mode)`, which
-  SHA-256-hashes the rules, the **sorted** protected set and the mode. The
-  hash scopes the DNS response cache, so its stability across restarts is
-  load-bearing (`artifact_hash_is_stable_across_protected_domain_ordering`).
-- `PolicyEngine::new(artifact)`, `.artifact()`, `.evaluate(domain)`.
+- `BlockMode` — `NullIp` (default), `NxDomain`, `NoData`, `Refused`. One per
+  policy, not per rule.
+- `Pattern` — `Exact` | `Suffix`; `Action` — `Allow` | `Block`.
+- `ListIndex` — exact and suffix maps from name to per-list bit masks, built
+  once per refresh; a lookup takes `&str` and allocates nothing.
+- `RuleSet` — user rules, suffix semantics, matched on label boundaries.
+- `Scope { id, filtering, mask, rules }` — what one client resolves under;
+  `Policy { index, household, by_ip, all_mask, block_mode }`.
+- `Verdict` — `Allow(Reason)` | `Block(Reason, slot)`.
+- `evaluate(policy, scope, name)` and `evaluate_lists(policy, mask, name)`.
 - `normalize_domain` — lowercase, trailing dot stripped; the one normalisation
   both rule patterns and lookups go through.
 
-### 2.2 Evaluation order (`PolicyEngine::evaluate`)
+### 2.2 Evaluation order (`evaluate`)
 
-1. Protected suffix match on a label boundary → `Allowed`, no rule.
-2. First matching `Allow` rule → `Allowed`.
-3. First matching `Block` rule → `Blocked(artifact.block_mode)`.
-4. Otherwise `Allowed`.
+1. Device rules, then household rules (allow before block within each).
+2. Protected suffix match on a label boundary → `Allow(Protected)`.
+3. List allow (`@@`) under the scope's mask, then list block.
+4. Otherwise `Allow(NoMatch)`; the runtime re-checks CNAME targets against
+   step 3.
 
 Allow beats Block regardless of source order (`allow_precedes_block`). Suffix
 rules match only on a label boundary
@@ -132,12 +130,9 @@ Control-plane crate: it talks HTTP, so it is never on the DNS path.
   the hostname field; `adblock` maps `||domain^` to a suffix block, `@@` to
   an allow, a bare name to an exact rule, and counts modifier (`$…`) and
   regex (`/…`) lines as invalid rather than approximating them.
-- `verify_candidate(parsed, protected)` — aggregate invalid ratio ≤ 20 %;
-  per-source ratio within its strictness (`strict` 5 %, `balanced` 20 %,
-  `relaxed` 40 %); and a throwaway engine with **no** protected tier must not
-  block any protected suffix. `passed` is true only when `notes` is empty.
-- `compile_ruleset(parsed, protected, mode)` → `RulesetArtifact`;
-  `build_policy_engine(...)` → `PolicyEngine`. Neither verifies; callers do.
+- `verify_list(parsed)` — the list's own invalid-line ratio must be ≤ 20 %.
+- `protected_hits(index)` — which protected suffixes a built index would
+  block; a note for the operator, since protection is enforced at evaluation.
 
 ### 3.3 Tests (4)
 
@@ -155,15 +150,11 @@ gains `reqwest`, `ureq`, `surf` or a known LLM client
 ### 4.1 Public types
 
 - `DnsRuntimeConfig { udp_bind_addr, tcp_bind_addr }`.
-- `DnsRuntime` — holds the `TokioResolver`, the global `PolicyEngine`, an
-  allow-all copy of it (block rules stripped; used for pause, bypass and
-  device allow-lists), the per-profile engines, `devices_by_ip`, the
-  query-activity observer, the pause deadline, two moka caches of 10,000
-  entries each (the response cache keyed by `<scope>|<domain>`, and a fallback
-  cache keyed by domain) and the counters.
-- `DevicePolicyConfig { ip_address, policy_mode, blocklist_profile_override,
-  protection_override, allowed_domains, blocked_domains }`.
-- `QueryActivityEvent { domain, client_ip, blocked, observed_at }`.
+- `DnsRuntime` — holds the `TokioResolver`, the current `Policy`, the pause
+  deadline, one moka cache of 10,000 wire-format answers keyed by
+  `(scope, qtype, name)`, the miss semaphore, the log channel and the
+  counters.
+- `LogEntry { ts, client, domain, qtype, verdict }`.
 - `DnsRuntimeStats` (atomics) and its `DnsRuntimeSnapshot`
   (`01-backend-api.md` §5).
 
@@ -179,8 +170,7 @@ gains `reqwest`, `ureq`, `surf` or a known LLM client
 
 1. `queries_total += 1`; parse the message; take the first question; lowercase
    the name and strip the trailing dot.
-2. `policy_for_client(client_addr, domain)` → `(engine, cache_scope,
-   forced_block_mode)`:
+2. Scope selection (one lock read, no allocation):
    - paused → the allow-all engine, scope `global-pause`;
    - no device for the source IP, or `policy_mode != custom` → the global
      engine, scope = the artifact hash;
@@ -213,7 +203,7 @@ both listeners stop on the shutdown watch.
 ### 4.4 Tests (13)
 
 TTL clamping (5), `runtime_snapshot_starts_at_zero`, CNAME target extraction,
-request-id adoption (2), `policy_cache_key_scopes_by_policy`,
+request-id adoption (2), the cache key carrying the query type,
 `build_allow_all_policy_removes_block_rules`,
 `domain_matches_override_supports_suffixes`, and the dependency guard.
 

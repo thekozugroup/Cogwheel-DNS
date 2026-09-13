@@ -56,7 +56,6 @@ axum's default; the control plane is meant to be reachable on the LAN only.
 | `events` | `EventBus` | broadcast channel behind the SSE endpoint |
 | `shutdown` | `watch::Receiver<bool>` | ends open SSE streams on SIGTERM |
 | `protected_domains` | `Arc<HashSet<String>>` | `cogwheel_policy::PROTECTED_SUFFIXES`, materialised once |
-| `previous_policy` | `Arc<RwLock<Option<Arc<PolicyEngine>>>>` | the engine the last activation displaced; reported as `policy.previous_hash`, never rolled back to |
 | `rate_limiter` | `Arc<RateLimiter>` | 100 requests per 60 s per key; the keys are `refresh_sources` and `upsert_blocklist` |
 | `dns_udp_bind_addr`, `advertised_dns_port`, `advertised_dns_targets` | | inputs to `GET /api/v1/resolver-access` |
 
@@ -71,8 +70,8 @@ axum's default; the control plane is meant to be reachable on the LAN only.
    reserved `baseline` source — id `00000000-0000-0000-0000-000000000001`, a
    `data:` URL carrying two example names — so the node always has a policy to
    serve. That source cannot be disabled or deleted (`409`).
-4. Compile the bootstrap `PolicyEngine` from the baseline source, verified
-   against the protected suffixes. A failure here aborts startup.
+4. Start the runtime on an empty `Policy` (every name resolves); the real one
+   is installed by the startup refresh below.
 5. `build_resolver` from `COGWHEEL_UPSTREAM__SERVERS`: cleartext `host:port`,
    `tls://host#name` and `https://host#name/path` endpoints. Mixing encrypted
    and cleartext entries logs a warning.
@@ -311,30 +310,21 @@ change takes:
    `source_refresh_state`, read back as `blocklist_statuses`).
 2. Fetch and parse every selected enabled source (`cogwheel-lists`; bodies
    over 32 MiB are refused).
-3. `verify_candidate` on the flattened rules: aggregate invalid-line ratio
-   ≤ 20 %, each source within its own strictness threshold, and no protected
-   suffix blocked. A failure returns `rejected`.
-4. `build_runtime_policy_catalog`: one global `PolicyEngine` from every source,
-   plus one engine per distinct `sources.profile` (other than `shared`), each
-   built from that profile's sources plus the `shared` ones.
-5. `protected_domain_regressions` probes every engine in the catalog with the
-   protected tier stripped, so a per-profile engine that lost the allow rule
-   rescuing a name globally is caught. A hit returns `rejected`.
-6. `activate_policy_catalog`: the outgoing global engine moves into
-   `previous_policy`, the catalog is swapped into the runtime, and device
-   policies are re-applied.
+3. `verify_list` on each fetched body: a per-list invalid-line ratio over
+   20 % returns `rejected` and nothing is installed.
+4. `install_policy`: under the rebuild lock, every enabled source's kept body
+   is compiled into one `ListIndex` (a list slot per source, in id order),
+   devices are mapped to scopes, and the `Policy` is swapped into the runtime,
+   emptying the answer cache.
 
-Nothing about the compiled policy is written to storage; `previous_policy` is
-the only history and it lives in memory.
+Nothing about the compiled policy is written to storage.
 
-Per-device policy, as the runtime applies it (`DnsRuntime::policy_for_client`):
-a device is looked up by source IP; only `policy_mode = custom` changes
-anything; then, in order, a device `allowed_domains` suffix match answers from
-the allow-all engine, `protection_override = bypass` answers everything from
-the allow-all engine, and `blocklist_profile_override` selects the matching
-per-profile engine. Anything else falls through to the global engine. The
-per-device **block** half is absent: `DevicePolicyConfig.blocked_domains` is
-always empty until the device model is rebuilt.
+Per-device policy, as the runtime applies it: a device is looked up by source
+IP into `Policy::by_ip`; a device with filtering off resolves under the
+unfiltered scope; otherwise its own allow rules (today's `allowed_domains`)
+are consulted before the household rules, the protected suffixes and the
+lists. The per-device **block** half is absent until the device model is
+rebuilt.
 
 Retention: `COGWHEEL_RETENTION__HISTORY_DAYS` (default 30; `0` keeps
 everything and logs a warning) drives an hourly prune of the

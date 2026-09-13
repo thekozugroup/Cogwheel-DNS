@@ -13,14 +13,14 @@ import type {
  */
 
 export const emptyRuntimeSnapshot: DnsRuntimeSnapshot = {
-  upstream_failures_total: 0,
-  fallback_served_total: 0,
-  cache_hits_total: 0,
-  cache_expired_total: 0,
-  cname_uncloaks_total: 0,
-  cname_blocks_total: 0,
   queries_total: 0,
   blocked_total: 0,
+  cache_hits_total: 0,
+  cache_expired_total: 0,
+  upstream_failures_total: 0,
+  stale_served_total: 0,
+  cname_blocks_total: 0,
+  dropped_total: 0,
   cache_hit_latency_avg_ns: 0,
   cache_hit_samples: 0,
   cache_miss_latency_avg_ns: 0,

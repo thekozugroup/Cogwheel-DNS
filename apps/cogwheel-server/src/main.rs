@@ -3,26 +3,28 @@ use axum::extract::{FromRef, State};
 use axum::http::HeaderMap;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use cogwheel_api::{ApiEnvelope, ApiState, AppConfig, UpstreamEndpoint, UpstreamProtocol, router};
+use cogwheel_api::{ApiEnvelope, ApiState, AppConfig, router};
 use cogwheel_dns_core::{
-    DevicePolicyConfig, DnsRuntime, DnsRuntimeConfig, DnsRuntimeSnapshot, QueryActivityEvent,
+    DnsRuntime, DnsRuntimeConfig, DnsRuntimeSnapshot, LogEntry, build_resolver,
+    reserve_descriptor_table,
 };
 use cogwheel_lists::{
-    ParsedSource, SourceDefinition, SourceKind, build_policy_engine, fetch_and_parse_source,
-    parse_source, verify_candidate,
+    FetchOutcome, ParsedList, SourceKind, build_index, fetch_source_body, parse_list,
+    protected_hits, verify_list,
 };
-use cogwheel_policy::{BlockMode, DecisionKind, PolicyEngine, RulesetArtifact};
+use cogwheel_policy::{
+    Action, BlockMode, ListIndex, Policy, RuleSet, SCOPE_HOUSEHOLD, SCOPE_UNFILTERED, Scope,
+    normalize_rule_domain,
+};
 use cogwheel_storage::{DeviceRecord, SourceRecord, Storage};
 use futures::StreamExt;
-use hickory_resolver::TokioResolver;
-use hickory_resolver::config::{ConnectionConfig, NameServerConfig, ResolverConfig, ResolverOpts};
-use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 use tokio::time::interval;
 use tower_http::compression::CompressionLayer;
 use tower_http::services::{ServeDir, ServeFile};
@@ -36,19 +38,21 @@ struct ServerState {
     api_state: ApiState,
     storage: Arc<Storage>,
     dns_runtime: Arc<DnsRuntime>,
+    /// The last body successfully parsed for each source, by source id.
+    ///
+    /// The policy is always compiled from every enabled source, not just the ones a
+    /// refresh happened to fetch, and a device edit recompiles scopes without touching
+    /// the network at all. Both need the bodies to hand.
+    lists: Arc<RwLock<HashMap<Uuid, ParsedList>>>,
+    scopes: Arc<Mutex<ScopeAllocator>>,
+    /// Serialises policy rebuilds so a device edit landing mid-refresh cannot install a
+    /// policy compiled from the lists the refresh is about to replace.
+    rebuild_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Device names by address, for attributing live query frames.
+    device_names: Arc<RwLock<HashMap<IpAddr, String>>>,
     recent_dns_activity: Arc<Mutex<VecDeque<DomainActivityRecord>>>,
     events: EventBus,
     shutdown: tokio::sync::watch::Receiver<bool>,
-    protected_domains: Arc<HashSet<String>>,
-    /// The policy engine displaced by the most recent activation.
-    ///
-    /// Compiled policies are no longer written to storage, so this one-deep,
-    /// in-memory slot is all the history there is. Its only reader is
-    /// [`PolicySummary::previous_hash`] on the dashboard: nothing rolls back to
-    /// it, because a candidate that would regress a protected name is refused
-    /// before activation (`protected_domain_regressions`) rather than reverted
-    /// after. `None` until the first activation.
-    previous_policy: Arc<RwLock<Option<Arc<PolicyEngine>>>>,
     rate_limiter: Arc<RateLimiter>,
     dns_udp_bind_addr: SocketAddr,
     advertised_dns_port: u16,
@@ -93,19 +97,87 @@ impl RateLimiter {
     }
 }
 
-#[derive(Clone)]
-struct RuntimePolicyCatalog {
-    global_policy: Arc<PolicyEngine>,
-    profile_policies: HashMap<String, Arc<PolicyEngine>>,
+/// Enabled lists that fit in one policy: one bit of the scope mask each.
+const MAX_LIST_SLOTS: usize = 64;
+
+/// Entries taken off the query-log channel per wake-up of the drain task.
+const LOG_BATCH: usize = 256;
+
+/// The settings that make one device's filtering differ from another's: filtering on or
+/// off, the list slots that apply, and its own rules in a canonical order.
+type ScopeSignature = (bool, u64, Vec<(Box<str>, Action)>);
+
+/// Hands out cache-scope ids by signature, so devices with identical settings share one.
+///
+/// This lives in [`ServerState`] rather than being rebuilt with each policy because the ids
+/// are baked into cache keys. A device edit keeps the cache, so an id that meant "these
+/// rules" before the edit must not mean different rules after it: a device whose settings
+/// changed gets a fresh id and its old entries age out unread. Ids are never reused. A list
+/// rebuild — which drops the cache anyway — starts a fresh table, because the same mask
+/// value no longer names the same lists.
+#[derive(Debug)]
+struct ScopeAllocator {
+    by_signature: HashMap<ScopeSignature, u32>,
+    next: u32,
+}
+
+impl ScopeAllocator {
+    fn new() -> Self {
+        Self {
+            by_signature: HashMap::new(),
+            next: SCOPE_UNFILTERED + 1,
+        }
+    }
+
+    /// Forget every signature; the next rebuild interns afresh, above every id ever handed out.
+    fn reset(&mut self) {
+        self.by_signature.clear();
+    }
+
+    /// The scope id for a device with these settings.
+    ///
+    /// A device whose settings equal the household's shares the household's scope and its
+    /// cache, so a family of "default" devices costs nothing extra; filtering off is the
+    /// reserved unfiltered scope whatever else is set.
+    fn scope_id(&mut self, all_mask: u64, filtering: bool, mask: u64, rules: &RuleSet) -> u32 {
+        if !filtering {
+            return SCOPE_UNFILTERED;
+        }
+        if mask == all_mask && rules.is_empty() {
+            return SCOPE_HOUSEHOLD;
+        }
+        let mut sorted = rules
+            .iter()
+            .map(|(domain, action)| (Box::<str>::from(domain), action))
+            .collect::<Vec<_>>();
+        sorted.sort_by(|left, right| left.0.cmp(&right.0));
+        let Self { by_signature, next } = self;
+        *by_signature
+            .entry((filtering, mask, sorted))
+            .or_insert_with(|| {
+                let id = *next;
+                *next += 1;
+                id
+            })
+    }
+}
+
+/// What a refresh did with the sources it fetched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+enum RefreshOutcome {
+    /// A policy compiled from the fetched bodies is now in force.
+    Activated,
+    /// A fetched body failed verification; nothing changed.
+    Rejected,
+    /// The source was saved without a refresh.
+    Saved,
 }
 
 #[derive(serde::Serialize)]
 struct RefreshResponse {
-    /// `activated`, `rejected` or `saved` (saved without a refresh).
-    outcome: String,
-    /// Content hash of the policy now in force, when this refresh activated one.
-    hash: Option<String>,
-    /// Rules in that policy, when this refresh activated one.
+    outcome: RefreshOutcome,
+    /// Entries in the policy now in force, when this refresh activated one.
     rule_count: Option<usize>,
     notes: Vec<String>,
 }
@@ -123,13 +195,11 @@ struct DashboardSummary {
     domain_insights: DomainInsights,
 }
 
-/// The policy in force and the one step of history kept in memory.
+/// The policy in force.
 #[derive(serde::Serialize)]
 struct PolicySummary {
-    hash: String,
+    /// Distinct list entries compiled into it.
     rule_count: usize,
-    /// Hash of the policy the last activation replaced, if there has been one.
-    previous_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -147,7 +217,9 @@ struct DomainInsights {
 
 #[derive(Debug, Clone)]
 struct DomainActivityRecord {
-    domain: String,
+    /// Shared with the runtime's cache key and log entry, so recording a query allocates
+    /// nothing for the name.
+    domain: Arc<str>,
     blocked: bool,
     observed_at: chrono::DateTime<chrono::Utc>,
 }
@@ -276,21 +348,6 @@ struct UpsertDeviceRequest {
     allowed_domains: Option<Vec<String>>,
 }
 
-/// The response every policy is compiled to give for a blocked name.
-///
-/// A `OnceLock` rather than a value threaded through the call graph: policies
-/// are rebuilt from three unrelated places -- startup, a blocklist refresh, and
-/// a policy rebuild -- and the alternative is passing the same immutable value
-/// down three chains that have no other use for it. It is written once, before
-/// any policy is built, and never changes for the life of the process.
-static BLOCK_MODE: std::sync::OnceLock<BlockMode> = std::sync::OnceLock::new();
-
-/// The configured block response, or the historical default before startup has
-/// resolved it (which is also what every version before this one always did).
-fn configured_block_mode() -> BlockMode {
-    BLOCK_MODE.get().cloned().unwrap_or(BlockMode::NullIp)
-}
-
 /// Turn the configured mode into the response the DNS core will send.
 fn resolve_block_mode(blocking: &cogwheel_api::BlockingConfig) -> BlockMode {
     use cogwheel_api::BlockResponseMode;
@@ -357,8 +414,24 @@ fn parse_cli(args: &[String]) -> CliAction {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Descriptors the table is grown to at boot: 512 misses in flight, each holding up to three
+/// upstream sockets per attempt, plus the TCP fallbacks, listeners and HTTP connections — the
+/// next doubling is never reached.
+const DESCRIPTOR_TABLE_SLOTS: usize = 4096;
+
+fn main() -> Result<()> {
+    // Before the runtime: once its workers exist, growing the descriptor table is an RCU
+    // grace period per doubling, paid on whichever worker's `socket()` call crosses the
+    // boundary — under a retry wave, all of them at once.
+    let descriptors = reserve_descriptor_table(DESCRIPTOR_TABLE_SLOTS);
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("build runtime")?
+        .block_on(run(descriptors))
+}
+
+async fn run(descriptors: usize) -> Result<()> {
     // Before init_tracing: `--version` should print a version and nothing else,
     // not a version wrapped in JSON log lines.
     let args: Vec<String> = std::env::args_os()
@@ -378,14 +451,14 @@ async fn main() -> Result<()> {
     }
 
     init_tracing();
+    tracing::debug!(descriptors, "descriptor table reserved");
 
     let config = AppConfig::load()?;
 
-    // Resolved before the first policy is compiled, because the block response
-    // is baked into the compiled policy rather than consulted per query.
+    // Carried by every policy the runtime is handed, starting with the empty one it
+    // boots on; later builds read it back from there rather than from a global.
     let block_mode = resolve_block_mode(&config.blocking);
     tracing::info!(mode = ?config.blocking.mode, response = ?block_mode, "blocked names will be answered with this");
-    let _ = BLOCK_MODE.set(block_mode);
 
     let storage = Arc::new(Storage::connect(&config.storage.database_url).await?);
     // Captured before `storage` is moved into the shared app state below.
@@ -403,40 +476,6 @@ async fn main() -> Result<()> {
     };
     storage.insert_source(&default_source).await?;
 
-    let parsed = parse_source(
-        SourceDefinition {
-            id: default_source.id,
-            name: default_source.name.clone(),
-            url: Url::parse(&default_source.url)?,
-            kind: SourceKind::Domains,
-            enabled: true,
-            profile: default_source.profile.clone(),
-            verification_strictness: default_source.verification_strictness.clone(),
-        },
-        "ads.example.com\ntracker.example.com",
-    );
-
-    // The suffixes a subscribed list is never allowed to block: resolver
-    // bootstrap, captive-portal checks, NTP and the CAs' status endpoints. See
-    // `cogwheel_policy::PROTECTED_SUFFIXES` for why exactly these and no more.
-    let protected_domains = Arc::new(
-        cogwheel_policy::PROTECTED_SUFFIXES
-            .iter()
-            .map(|suffix| (*suffix).to_string())
-            .collect::<HashSet<String>>(),
-    );
-    let verification = verify_candidate(std::slice::from_ref(&parsed), &protected_domains);
-    anyhow::ensure!(
-        verification.passed,
-        "default policy failed verification: {:?}",
-        verification.notes
-    );
-
-    let policy = Arc::new(build_policy_engine(
-        vec![parsed],
-        protected_domains.as_ref().clone(),
-        configured_block_mode(),
-    ));
     // Broadcast shutdown to everything that would otherwise outlive the signal: the DNS accept
     // loops, and every open SSE stream. Without this, `with_graceful_shutdown` waits forever for
     // an SSE connection that never ends on its own.
@@ -448,28 +487,19 @@ async fn main() -> Result<()> {
     readiness.mark_storage_ready();
 
     let resolver = build_resolver(&config.upstream.servers)?;
-    let recent_dns_activity = Arc::new(Mutex::new(VecDeque::with_capacity(4096)));
-    let dns_runtime = Arc::new(DnsRuntime::new(resolver, policy));
+    // The runtime boots on an empty policy -- every name resolves -- and takes the real
+    // one the moment the sources below compile. The listeners come up either way, so a
+    // household is never without DNS while a list downloads.
+    let (dns_runtime, log_rx) = DnsRuntime::new(resolver, Arc::new(Policy::empty(block_mode)));
     let events = EventBus::new();
-
-    dns_runtime.set_query_activity_observer(Arc::new({
-        let recent_dns_activity = recent_dns_activity.clone();
-        let events = events.clone();
-        move |event: cogwheel_dns_core::QueryActivityEvent| {
-            events.publish(StreamEvent::Query(Box::new(StreamQueryEvent {
-                domain: event.domain.clone(),
-                client: event
-                    .client_ip
-                    .clone()
-                    .unwrap_or_else(|| "unknown".to_string()),
-                device_name: None,
-                blocked: event.blocked,
-                reason: None,
-                observed_at: event.observed_at.to_rfc3339(),
-            })));
-            record_recent_dns_activity(&recent_dns_activity, event)
-        }
-    }));
+    let recent_dns_activity = Arc::new(Mutex::new(VecDeque::with_capacity(4096)));
+    let device_names = Arc::new(RwLock::new(HashMap::new()));
+    tokio::spawn(drain_query_log(
+        log_rx,
+        events.clone(),
+        Arc::clone(&recent_dns_activity),
+        Arc::clone(&device_names),
+    ));
 
     let dns_handle = tokio::spawn({
         let runtime = dns_runtime.clone();
@@ -499,11 +529,13 @@ async fn main() -> Result<()> {
         },
         storage,
         dns_runtime,
+        lists: Arc::new(RwLock::new(HashMap::new())),
+        scopes: Arc::new(Mutex::new(ScopeAllocator::new())),
+        rebuild_lock: Arc::new(tokio::sync::Mutex::new(())),
+        device_names,
         recent_dns_activity,
         events,
         shutdown: shutdown_rx.clone(),
-        protected_domains,
-        previous_policy: Arc::new(RwLock::new(None)),
         rate_limiter: Arc::new(RateLimiter::new(100, 60)),
         dns_udp_bind_addr: config.server.dns_udp_bind_addr,
         advertised_dns_port: std::env::var("COGWHEEL_SERVER__ADVERTISED_DNS_PORT")
@@ -522,16 +554,26 @@ async fn main() -> Result<()> {
             })
             .unwrap_or_default(),
     };
-    match warm_runtime_policy_catalog(&app_state).await {
-        Ok(()) => readiness.mark_policy_ready(),
-        Err(error) => {
-            // The node keeps serving -- an empty policy resolves everything rather than nothing --
-            // but it must not advertise itself as ready, or a rolling upgrade would send traffic to
-            // a node that is not actually filtering yet.
-            tracing::warn!(%error, "failed to warm runtime policy catalog on startup");
+    let activated = match refresh_sources_once(&app_state, "startup", None).await {
+        Ok(response) if response.outcome == RefreshOutcome::Activated => true,
+        Ok(response) => {
+            tracing::warn!(notes = ?response.notes, "startup refresh did not activate a policy");
+            false
         }
+        Err(error) => {
+            tracing::warn!(%error, "failed to compile the policy on startup");
+            false
+        }
+    };
+    if activated {
+        readiness.mark_policy_ready();
+    } else {
+        // The node keeps serving -- an empty policy resolves everything rather than nothing --
+        // but it must not advertise itself as ready, or a rolling upgrade would send traffic to
+        // a node that is not actually filtering yet. Devices are still installed so bypasses
+        // and the live stream's names are right from the first query.
+        install_policy(&app_state, Rebuild::Devices).await?;
     }
-    apply_runtime_device_policies(&app_state).await?;
     let refresh_handle = tokio::spawn({
         let state = app_state.clone();
         let refresh_every = config.updater.refresh_interval_secs.max(30);
@@ -708,89 +750,55 @@ fn init_tracing() {
         .init();
 }
 
-fn build_resolver(servers: &[String]) -> Result<TokioResolver> {
-    let mut name_servers = Vec::new();
-    let mut encrypted = 0usize;
+/// Unix seconds now, the clock the runtime's pause deadline is measured on.
+fn unix_now() -> u64 {
+    u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0)
+}
 
-    for server in servers {
-        let endpoint = UpstreamEndpoint::parse(server)
-            .with_context(|| format!("invalid upstream server: {server}"))?;
-
-        // hickory 0.26 models an upstream as one address carrying a list of connections, rather
-        // than one entry per protocol. The port moved onto the connection, so it has to be copied
-        // across from the configured address or every upstream would silently fall back to 53.
-        let connections = match endpoint.protocol {
-            UpstreamProtocol::Udp => {
-                let mut udp = ConnectionConfig::udp();
-                udp.port = endpoint.addr.port();
-                let mut tcp = ConnectionConfig::tcp();
-                tcp.port = endpoint.addr.port();
-                vec![udp, tcp]
+/// Move answered queries off the runtime's channel into the live stream and the activity ring.
+///
+/// One task, batched. The runtime hands entries over with `try_send`, so anything slow here
+/// shows up as `dropped_total` rather than as DNS latency. Frames are only built while a
+/// browser is listening; the ring feeding the dashboard's top-domain tiles is always kept.
+async fn drain_query_log(
+    mut log_rx: mpsc::Receiver<LogEntry>,
+    events: EventBus,
+    recent: Arc<Mutex<VecDeque<DomainActivityRecord>>>,
+    device_names: Arc<RwLock<HashMap<IpAddr, String>>>,
+) {
+    let mut batch = Vec::with_capacity(LOG_BATCH);
+    while log_rx.recv_many(&mut batch, LOG_BATCH).await > 0 {
+        let streaming = events.sender.receiver_count() > 0;
+        for entry in batch.drain(..) {
+            let observed_at = chrono::DateTime::from_timestamp(i64::from(entry.ts), 0)
+                .unwrap_or_else(chrono::Utc::now);
+            record_recent_dns_activity(&recent, &entry, observed_at);
+            if streaming {
+                let device_name = read_recover(&device_names).get(&entry.client).cloned();
+                events.publish(StreamEvent::Query(Box::new(query_frame(
+                    &entry,
+                    device_name,
+                    observed_at,
+                ))));
             }
-            // No cleartext fallback is added alongside an encrypted transport, and that is the
-            // whole point. A fallback would mean that anything making TLS fail -- a captive
-            // portal, a middlebox, an expired certificate -- silently downgrades every query in
-            // the house back onto the wire in plaintext, which is precisely the outcome the
-            // operator configured this to avoid. If DoT is broken, resolution should fail
-            // visibly and get fixed, not quietly succeed in the clear.
-            UpstreamProtocol::Tls => {
-                let server_name = endpoint
-                    .server_name
-                    .clone()
-                    .context("DoT upstream without a certificate name reached the resolver")?;
-                let mut tls = ConnectionConfig::tls(Arc::from(server_name.as_str()));
-                tls.port = endpoint.addr.port();
-                encrypted += 1;
-                vec![tls]
-            }
-            UpstreamProtocol::Https => {
-                let server_name = endpoint
-                    .server_name
-                    .clone()
-                    .context("DoH upstream without a certificate name reached the resolver")?;
-                let path = endpoint.path.clone().map(|path| Arc::from(path.as_str()));
-                let mut https = ConnectionConfig::https(Arc::from(server_name.as_str()), path);
-                https.port = endpoint.addr.port();
-                encrypted += 1;
-                vec![https]
-            }
-        };
-
-        tracing::info!(
-            upstream = %endpoint,
-            protocol = ?endpoint.protocol,
-            encrypted = endpoint.is_encrypted(),
-            "configured upstream resolver"
-        );
-        name_servers.push(NameServerConfig::new(endpoint.addr.ip(), true, connections));
+        }
     }
+}
 
-    // Said once, plainly, rather than left for the operator to infer. Cleartext is still the
-    // default because it is what works on every network without configuration, but running a
-    // tracker blocker while handing the full browsing history of the house to whoever carries
-    // the packets deserves to be stated rather than assumed.
-    if encrypted == 0 {
-        tracing::warn!(
-            "all upstream resolvers are cleartext DNS on port 53; every domain this network \
-             looks up is visible to the local network and to the ISP. Configure DNS-over-TLS \
-             with e.g. COGWHEEL_UPSTREAM__SERVERS=tls://1.1.1.1#cloudflare-dns.com"
-        );
-    } else if encrypted < name_servers.len() {
-        // Mixing is a real footgun: hickory will happily use whichever responds, so a single
-        // cleartext entry in the list quietly leaks a share of the queries.
-        tracing::warn!(
-            encrypted,
-            total = name_servers.len(),
-            "some upstream resolvers are encrypted and some are cleartext; queries will be \
-             spread across both, so a share of them still travel in plaintext"
-        );
+/// The live-stream frame for one answered query.
+fn query_frame(
+    entry: &LogEntry,
+    device_name: Option<String>,
+    observed_at: chrono::DateTime<chrono::Utc>,
+) -> StreamQueryEvent {
+    StreamQueryEvent {
+        domain: entry.domain.to_string(),
+        client: entry.client.to_string(),
+        device_name,
+        blocked: entry.verdict.is_blocked(),
+        reason: Some(entry.verdict.reason().as_str().to_string()),
+        observed_at: observed_at.to_rfc3339(),
     }
-
-    let config = ResolverConfig::from_parts(None, vec![], name_servers);
-    TokioResolver::builder_with_config(config, TokioRuntimeProvider::default())
-        .with_options(ResolverOpts::default())
-        .build()
-        .context("build upstream resolver")
 }
 
 fn build_http_app(app_state: ServerState) -> Router {
@@ -962,12 +970,14 @@ async fn upsert_device(
         )
     })?;
 
-    apply_runtime_device_policies(&state).await.map_err(|_| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "failed to apply runtime device policies".to_string(),
-        )
-    })?;
+    install_policy(&state, Rebuild::Devices)
+        .await
+        .map_err(|_| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to apply runtime device policies".to_string(),
+            )
+        })?;
 
     Ok(Json(ApiEnvelope { data: device }))
 }
@@ -986,25 +996,19 @@ async fn dashboard_summary(
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     let domain_insights = build_domain_insights(&state);
-    let protection_paused_until = state.dns_runtime.protection_paused_until();
-
-    let current = state.dns_runtime.current_policy();
-    let policy = PolicySummary {
-        hash: current.artifact().hash.clone(),
-        rule_count: current.artifact().rules.len(),
-        previous_hash: read_recover(&state.previous_policy)
-            .as_ref()
-            .map(|previous| previous.artifact().hash.clone()),
-    };
+    let protection_paused_until = pause_deadline(&state.dns_runtime);
 
     Ok(Json(ApiEnvelope {
         data: DashboardSummary {
-            protection_status: match protection_paused_until {
-                Some(until) if chrono::Utc::now() < until => "Paused".to_string(),
-                _ => "Protected".to_string(),
+            protection_status: if protection_paused_until.is_some() {
+                "Paused".to_string()
+            } else {
+                "Protected".to_string()
             },
             protection_paused_until,
-            policy,
+            policy: PolicySummary {
+                rule_count: state.dns_runtime.current_policy().index.len(),
+            },
             source_count: sources.len(),
             enabled_source_count: sources.iter().filter(|source| source.enabled).count(),
             device_count: devices.len(),
@@ -1014,9 +1018,19 @@ async fn dashboard_summary(
     }))
 }
 
+/// When the current pause ends, if one is running.
+fn pause_deadline(runtime: &DnsRuntime) -> Option<chrono::DateTime<chrono::Utc>> {
+    let until = runtime.pause_until();
+    if until <= unix_now() {
+        return None;
+    }
+    chrono::DateTime::from_timestamp(i64::try_from(until).ok()?, 0)
+}
+
 fn record_recent_dns_activity(
     activity: &Arc<Mutex<VecDeque<DomainActivityRecord>>>,
-    event: QueryActivityEvent,
+    entry: &LogEntry,
+    observed_at: chrono::DateTime<chrono::Utc>,
 ) {
     let mut guard = lock_recover(activity);
     let cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
@@ -1027,9 +1041,9 @@ fn record_recent_dns_activity(
         guard.pop_front();
     }
     guard.push_back(DomainActivityRecord {
-        domain: event.domain,
-        blocked: event.blocked,
-        observed_at: event.observed_at,
+        domain: Arc::clone(&entry.domain),
+        blocked: entry.verdict.is_blocked(),
+        observed_at,
     });
 }
 
@@ -1037,15 +1051,15 @@ fn build_domain_insights(state: &ServerState) -> DomainInsights {
     let cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
     let guard = lock_recover(&state.recent_dns_activity);
 
-    let mut queried = HashMap::<String, usize>::new();
-    let mut blocked = HashMap::<String, usize>::new();
+    let mut queried = HashMap::<Arc<str>, usize>::new();
+    let mut blocked = HashMap::<Arc<str>, usize>::new();
     let mut observed_queries = 0usize;
 
     for item in guard.iter().filter(|item| item.observed_at >= cutoff) {
         observed_queries += 1;
-        *queried.entry(item.domain.clone()).or_default() += 1;
+        *queried.entry(Arc::clone(&item.domain)).or_default() += 1;
         if item.blocked {
-            *blocked.entry(item.domain.clone()).or_default() += 1;
+            *blocked.entry(Arc::clone(&item.domain)).or_default() += 1;
         }
     }
 
@@ -1056,11 +1070,11 @@ fn build_domain_insights(state: &ServerState) -> DomainInsights {
     }
 }
 
-fn top_domain_entries(counts: &HashMap<String, usize>) -> Vec<DomainInsightEntry> {
+fn top_domain_entries(counts: &HashMap<Arc<str>, usize>) -> Vec<DomainInsightEntry> {
     let mut entries = counts
         .iter()
         .map(|(domain, count)| DomainInsightEntry {
-            domain: domain.clone(),
+            domain: domain.to_string(),
             count: *count,
         })
         .collect::<Vec<_>>();
@@ -1249,12 +1263,14 @@ struct PauseRuntimeRequest {
 
 async fn pause_runtime(State(state): State<ServerState>, Json(request): Json<PauseRuntimeRequest>) {
     let until = chrono::Utc::now() + chrono::Duration::minutes(i64::from(request.minutes));
-    state.dns_runtime.pause_protection_until(until);
+    state
+        .dns_runtime
+        .set_pause_until(u64::try_from(until.timestamp()).unwrap_or(0));
     tracing::info!(minutes = request.minutes, %until, "protection paused");
 }
 
 async fn resume_runtime(State(state): State<ServerState>) {
-    state.dns_runtime.resume_protection();
+    state.dns_runtime.set_pause_until(0);
     tracing::info!("protection resumed");
 }
 
@@ -1315,8 +1331,7 @@ async fn upsert_blocklist(
 
     Ok(Json(ApiEnvelope {
         data: RefreshResponse {
-            outcome: "saved".to_string(),
-            hash: None,
+            outcome: RefreshOutcome::Saved,
             rule_count: None,
             notes: vec![format!("saved blocklist {}", source.name)],
         },
@@ -1356,8 +1371,7 @@ async fn update_blocklist_state(
 
     Ok(Json(ApiEnvelope {
         data: RefreshResponse {
-            outcome: "saved".to_string(),
-            hash: None,
+            outcome: RefreshOutcome::Saved,
             rule_count: None,
             notes: vec![format!(
                 "{} blocklist {}",
@@ -1407,14 +1421,21 @@ async fn delete_blocklist(
 
     Ok(Json(ApiEnvelope {
         data: RefreshResponse {
-            outcome: "saved".to_string(),
-            hash: None,
+            outcome: RefreshOutcome::Saved,
             rule_count: None,
             notes: vec![format!("deleted blocklist {}", source.name)],
         },
     }))
 }
 
+/// Fetch the selected enabled sources and put a policy compiled from every enabled source
+/// in force.
+///
+/// `only_source_ids` narrows what is downloaded, not what is compiled: the scheduler passes
+/// the sources whose interval has elapsed, and the rest are compiled from the bodies kept
+/// since their last fetch. A body that fails verification rejects the whole refresh, exactly
+/// as before -- nothing is installed and the previous policy keeps serving -- so a single bad
+/// list can never take the others out with it.
 async fn refresh_sources_once(
     state: &ServerState,
     reason: &str,
@@ -1425,11 +1446,9 @@ async fn refresh_sources_once(
         .build()
         .context("build refresh http client")?;
 
-    let selected_sources = state
-        .storage
-        .list_sources()
-        .await?
-        .into_iter()
+    let sources = state.storage.list_sources().await?;
+    let selected = sources
+        .iter()
         .filter(|source| source.enabled)
         .filter(|source| {
             only_source_ids
@@ -1438,84 +1457,72 @@ async fn refresh_sources_once(
         })
         .collect::<Vec<_>>();
 
-    anyhow::ensure!(
-        !selected_sources.is_empty(),
-        "no enabled sources configured"
-    );
+    anyhow::ensure!(!selected.is_empty(), "no enabled sources configured");
 
-    let source_ids = selected_sources
-        .iter()
-        .map(|source| source.id)
-        .collect::<Vec<_>>();
+    let source_ids = selected.iter().map(|source| source.id).collect::<Vec<_>>();
     update_source_refresh_attempts(&state.storage, &source_ids, chrono::Utc::now()).await?;
 
-    let enabled_sources = selected_sources
-        .into_iter()
-        .map(source_definition_from_record)
-        .collect::<Result<Vec<_>>>()?;
-
-    let enabled_source_count = enabled_sources.len();
-    let mut parsed_sources = Vec::with_capacity(enabled_source_count);
-    for source in enabled_sources {
-        parsed_sources.push(fetch_and_parse_source(&client, source).await?);
+    let mut fetched = Vec::with_capacity(selected.len());
+    for source in &selected {
+        let parsed = fetch_and_parse(&client, source)
+            .await
+            .with_context(|| format!("fetch source {}", source.name))?;
+        if let Err(problem) = verify_list(&parsed) {
+            tracing::warn!(
+                reason,
+                source = %source.name,
+                %problem,
+                "refresh rejected before activation"
+            );
+            return Ok(RefreshResponse {
+                outcome: RefreshOutcome::Rejected,
+                rule_count: None,
+                notes: vec![format!("{}: {problem}", source.name)],
+            });
+        }
+        fetched.push((source.id, parsed));
     }
 
-    let verification = verify_candidate(&parsed_sources, &state.protected_domains);
-    if !verification.passed {
-        tracing::warn!(
-            reason,
-            notes = ?verification.notes,
-            "refresh rejected before activation"
-        );
-        return Ok(RefreshResponse {
-            outcome: "rejected".to_string(),
-            hash: None,
-            rule_count: None,
-            notes: verification.notes,
-        });
+    {
+        let mut lists = write_recover(&state.lists);
+        for (source_id, parsed) in fetched {
+            lists.insert(source_id, parsed);
+        }
     }
 
-    let catalog = build_runtime_policy_catalog(
-        &parsed_sources,
-        state.protected_domains.as_ref().clone(),
-        configured_block_mode(),
+    let installed = install_policy(state, Rebuild::Lists).await?;
+    tracing::info!(
+        reason,
+        rule_count = installed.rule_count,
+        "activated refreshed policy"
     );
 
-    // The safety net runs against the candidate BEFORE it is installed. It
-    // used to run after activation and roll the runtime back to the previous
-    // compiled policy from storage; with that history gone, the only sound
-    // order is to refuse a candidate that would take a protected name off the
-    // network and keep serving whatever is already in force. `verify_candidate`
-    // above already probed the flattened rule set; this pass covers what it
-    // cannot see -- each per-profile engine is built from a subset of the
-    // sources and can lose the allow rule that rescued a name globally.
-    let regressions = protected_domain_regressions(&catalog, &state.protected_domains);
-    if !regressions.is_empty() {
-        tracing::warn!(
-            reason,
-            notes = ?regressions,
-            "refresh rejected: candidate blocks protected domains"
-        );
-        return Ok(RefreshResponse {
-            outcome: "rejected".to_string(),
-            hash: None,
-            rule_count: None,
-            notes: regressions,
-        });
-    }
-
-    let hash = catalog.global_policy.artifact().hash.clone();
-    let rule_count = catalog.global_policy.artifact().rules.len();
-    activate_policy_catalog(state, catalog);
-    apply_runtime_device_policies(state).await?;
-    tracing::info!(reason, %hash, rule_count, "activated refreshed policy");
-
+    let mut notes = vec![format!("refreshed {} source(s)", selected.len())];
+    notes.extend(installed.notes);
     Ok(RefreshResponse {
-        outcome: "activated".to_string(),
-        hash: Some(hash),
-        rule_count: Some(rule_count),
-        notes: vec![format!("refreshed {} source(s)", enabled_source_count)],
+        outcome: RefreshOutcome::Activated,
+        rule_count: Some(installed.rule_count),
+        notes,
     })
+}
+
+/// Download one source and parse it for its kind.
+///
+/// Unconditional for now: no validators are stored yet, so a 304 cannot legitimately
+/// happen and is reported rather than treated as "nothing changed".
+async fn fetch_and_parse(client: &reqwest::Client, source: &SourceRecord) -> Result<ParsedList> {
+    let kind = source
+        .kind
+        .parse::<SourceKind>()
+        .ok()
+        .with_context(|| format!("unsupported source kind: {}", source.kind))?;
+    let url = Url::parse(&source.url)?;
+    match fetch_source_body(client, &url, None, None).await? {
+        FetchOutcome::Body { text, .. } => Ok(parse_list(kind, &text)),
+        FetchOutcome::NotModified => {
+            anyhow::bail!("upstream answered 304 to an unconditional request")
+        }
+    }
 }
 
 async fn load_block_profiles(storage: &Storage) -> Result<Vec<BlockProfileRecord>> {
@@ -1964,60 +1971,6 @@ async fn due_source_ids(state: &ServerState) -> Result<HashSet<Uuid>> {
         .collect())
 }
 
-async fn warm_runtime_policy_catalog(state: &ServerState) -> Result<()> {
-    let catalog = load_current_runtime_policy_catalog(state).await?;
-    activate_policy_catalog(state, catalog);
-    Ok(())
-}
-
-/// Install a compiled catalog and remember the engine it displaces.
-///
-/// The displaced engine goes into [`ServerState::previous_policy`]; nothing on
-/// the DNS path reads it, so a swap costs one `Arc` move under a lock nobody
-/// else contends for.
-fn activate_policy_catalog(state: &ServerState, catalog: RuntimePolicyCatalog) {
-    let outgoing = state.dns_runtime.current_policy();
-    *write_recover(&state.previous_policy) = Some(outgoing);
-    state
-        .dns_runtime
-        .replace_policy_catalog(catalog.global_policy, catalog.profile_policies);
-}
-
-async fn load_current_runtime_policy_catalog(state: &ServerState) -> Result<RuntimePolicyCatalog> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()
-        .context("build runtime policy catalog http client")?;
-
-    let enabled_sources = state
-        .storage
-        .list_sources()
-        .await?
-        .into_iter()
-        .filter(|source| source.enabled)
-        .map(source_definition_from_record)
-        .collect::<Result<Vec<_>>>()?;
-    anyhow::ensure!(!enabled_sources.is_empty(), "no enabled sources configured");
-
-    let mut parsed_sources = Vec::with_capacity(enabled_sources.len());
-    for source in enabled_sources {
-        parsed_sources.push(fetch_and_parse_source(&client, source).await?);
-    }
-
-    let verification = verify_candidate(&parsed_sources, &state.protected_domains);
-    anyhow::ensure!(
-        verification.passed,
-        "runtime policy catalog verification failed: {:?}",
-        verification.notes
-    );
-
-    Ok(build_runtime_policy_catalog(
-        &parsed_sources,
-        state.protected_domains.as_ref().clone(),
-        configured_block_mode(),
-    ))
-}
-
 fn source_due_for_refresh(
     source: &SourceRecord,
     last_refresh_attempt_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -2032,22 +1985,6 @@ fn source_due_for_refresh(
     elapsed >= source.refresh_interval_minutes.max(1)
 }
 
-fn source_definition_from_record(record: SourceRecord) -> Result<SourceDefinition> {
-    let kind = source_kind_from_str(&record.kind)
-        .ok_or_else(|| anyhow::anyhow!("unsupported source kind: {}", record.kind))?;
-
-    Ok(SourceDefinition {
-        id: record.id,
-        name: record.name,
-        url: Url::parse(&record.url)?,
-        kind,
-        enabled: record.enabled,
-        profile: normalize_profile_name(&record.profile)
-            .ok_or_else(|| anyhow::anyhow!("unsupported source profile: {}", record.profile))?,
-        verification_strictness: record.verification_strictness,
-    })
-}
-
 fn normalize_profile_name(profile: &str) -> Option<String> {
     let normalized = profile.trim().to_ascii_lowercase();
     if normalized.is_empty() {
@@ -2057,118 +1994,193 @@ fn normalize_profile_name(profile: &str) -> Option<String> {
     }
 }
 
-fn build_runtime_policy_catalog(
-    parsed_sources: &[ParsedSource],
-    protected_domains: HashSet<String>,
-    block_mode: BlockMode,
-) -> RuntimePolicyCatalog {
-    let global_policy = Arc::new(build_policy_engine(
-        parsed_sources.to_vec(),
-        protected_domains.clone(),
-        block_mode.clone(),
-    ));
+/// What changed, which decides what happens to the runtime's cached answers.
+#[derive(Debug, Clone, Copy)]
+enum Rebuild {
+    /// Lists were fetched, toggled or removed: verdicts may differ for everyone, so the
+    /// cache is dropped and scope ids start afresh.
+    Lists,
+    /// Only devices changed: cached answers stay valid, a changed device moves to a new
+    /// scope id and its old entries age out.
+    Devices,
+}
 
-    let profiles = parsed_sources
-        .iter()
-        .filter_map(|source| normalize_profile_name(&source.source.profile))
-        .filter(|profile| profile != "shared")
-        .collect::<HashSet<_>>();
+/// What a policy build reports back.
+struct PolicyBuild {
+    policy: Policy,
+    /// Distinct list entries compiled in.
+    rule_count: usize,
+    /// Things worth telling the operator that did not stop the build.
+    notes: Vec<String>,
+}
 
-    let mut profile_policies = HashMap::new();
-    for profile in profiles {
-        let scoped_sources = parsed_sources
-            .iter()
-            .filter(|source| {
-                normalize_profile_name(&source.source.profile)
-                    .is_some_and(|candidate| candidate == profile || candidate == "shared")
-            })
-            .cloned()
-            .collect::<Vec<_>>();
+/// What [`install_policy`] hands back to the caller.
+struct Installed {
+    rule_count: usize,
+    notes: Vec<String>,
+}
 
-        if !scoped_sources.iter().any(|source| {
-            normalize_profile_name(&source.source.profile).as_deref() == Some(profile.as_str())
-        }) {
-            continue;
+/// Compile the current sources and devices into a policy and swap it into the runtime.
+async fn install_policy(state: &ServerState, rebuild: Rebuild) -> Result<Installed> {
+    let _serialised = state.rebuild_lock.lock().await;
+    let sources = state.storage.list_sources().await?;
+    let devices = state.storage.list_devices().await?;
+    // A deleted source's body has no reader left; drop it rather than carry it until
+    // restart. Done here, under the lock and against the sources as they are now, because a
+    // refresh's own view of the sources is minutes old by the time its fetches finish, and
+    // pruning against that would evict a list added while it was downloading.
+    write_recover(&state.lists)
+        .retain(|source_id, _| sources.iter().any(|source| source.id == *source_id));
+    let built = {
+        let lists = read_recover(&state.lists);
+        let mut scopes = lock_recover(&state.scopes);
+        if matches!(rebuild, Rebuild::Lists) {
+            scopes.reset();
         }
+        build_policy(
+            &sources,
+            &lists,
+            &devices,
+            &mut scopes,
+            state.dns_runtime.block_mode(),
+        )
+    };
+    *write_recover(&state.device_names) = devices
+        .iter()
+        .filter_map(|device| {
+            device
+                .ip_address
+                .parse::<IpAddr>()
+                .ok()
+                .map(|ip| (ip, device.name.clone()))
+        })
+        .collect();
+    for note in &built.notes {
+        tracing::info!(note, "policy build note");
+    }
+    let policy = Arc::new(built.policy);
+    match rebuild {
+        Rebuild::Lists => state.dns_runtime.swap_policy(policy),
+        Rebuild::Devices => state.dns_runtime.swap_policy_keep_cache(policy),
+    }
+    Ok(Installed {
+        rule_count: built.rule_count,
+        notes: built.notes,
+    })
+}
 
-        profile_policies.insert(
-            profile,
-            Arc::new(build_policy_engine(
-                scoped_sources,
-                protected_domains.clone(),
-                block_mode.clone(),
+/// Build the policy today's schema describes.
+///
+/// Every enabled source with a parsed body takes a list slot in id order. There are no
+/// household rules yet -- nothing writes them -- and every device sees every list: block
+/// profiles never reached the DNS path, so a device's profile override is ignored here
+/// exactly as it was. A device in `custom` mode contributes its `allowed_domains` as
+/// device allow rules and, with `protection_override = bypass`, filtering off.
+fn build_policy(
+    sources: &[SourceRecord],
+    lists: &HashMap<Uuid, ParsedList>,
+    devices: &[DeviceRecord],
+    scopes: &mut ScopeAllocator,
+    block_mode: BlockMode,
+) -> PolicyBuild {
+    let mut notes = Vec::new();
+
+    let mut enabled = sources
+        .iter()
+        .filter(|source| source.enabled)
+        .collect::<Vec<_>>();
+    enabled.sort_by_key(|source| source.id);
+    let mut compiled = Vec::with_capacity(enabled.len());
+    for source in enabled {
+        match lists.get(&source.id) {
+            Some(list) if compiled.len() < MAX_LIST_SLOTS => {
+                compiled.push((source.name.as_str(), list));
+            }
+            Some(_) => notes.push(format!(
+                "{}: not compiled; only {MAX_LIST_SLOTS} enabled lists fit in one policy",
+                source.name
             )),
+            None => notes.push(format!(
+                "{}: not compiled; it has not been fetched yet",
+                source.name
+            )),
+        }
+    }
+    let index = Arc::new(build_index(compiled.iter().copied()));
+    let all_mask = (0..compiled.len()).fold(0u64, |mask, slot| mask | (1 << slot));
+    notes.extend(protected_notes(&index));
+
+    let mut by_ip = HashMap::with_capacity(devices.len());
+    for device in devices {
+        let Ok(ip) = device.ip_address.parse::<IpAddr>() else {
+            notes.push(format!(
+                "device {}: address {:?} is not an IP; it resolves as the household",
+                device.name, device.ip_address
+            ));
+            continue;
+        };
+        let custom = normalize_device_policy_mode(&device.policy_mode).as_deref() == Some("custom");
+        let bypass = normalize_device_protection_override(&device.protection_override).as_deref()
+            == Some("bypass");
+        let filtering = !(custom && bypass);
+        let rules = if custom {
+            device
+                .allowed_domains
+                .iter()
+                .map(|domain| normalize_rule_domain(domain))
+                .filter(|domain| !domain.is_empty())
+                .map(|domain| (domain, Action::Allow))
+                .collect::<RuleSet>()
+        } else {
+            RuleSet::new()
+        };
+        let id = scopes.scope_id(all_mask, filtering, all_mask, &rules);
+        by_ip.insert(
+            ip,
+            Scope {
+                id,
+                filtering,
+                mask: all_mask,
+                rules: (!rules.is_empty()).then(|| Arc::new(rules)),
+            },
         );
     }
 
-    RuntimePolicyCatalog {
-        global_policy,
-        profile_policies,
+    let rule_count = index.len();
+    PolicyBuild {
+        policy: Policy::new(index, Arc::new(RuleSet::new()), by_ip, all_mask, block_mode),
+        rule_count,
+        notes,
     }
 }
 
-fn runtime_device_policies_from_records(devices: Vec<DeviceRecord>) -> Vec<DevicePolicyConfig> {
-    devices
+/// One note per protected name the compiled lists would have blocked, naming the lists.
+///
+/// A note and not a rejection: protection is enforced at evaluation, so the name stays
+/// reachable whatever the lists say. The operator still deserves to know a list is
+/// overreaching.
+fn protected_notes(index: &ListIndex) -> Vec<String> {
+    protected_hits(index)
         .into_iter()
-        .map(|device| {
-            let policy_mode = normalize_device_policy_mode(&device.policy_mode)
-                .unwrap_or_else(|| "global".to_string());
-            let blocklist_profile_override = if policy_mode == "custom" {
-                device
-                    .blocklist_profile_override
-                    .as_deref()
-                    .and_then(normalize_profile_name)
-            } else {
-                None
-            };
-            let protection_override = if policy_mode == "custom" {
-                normalize_device_protection_override(&device.protection_override)
-                    .unwrap_or_else(|| "inherit".to_string())
-            } else {
-                "inherit".to_string()
-            };
-            let allowed_domains = if policy_mode == "custom" {
-                normalize_device_allowed_domains(device.allowed_domains)
-            } else {
-                Vec::new()
-            };
-
-            DevicePolicyConfig {
-                ip_address: device.ip_address,
-                policy_mode,
-                blocklist_profile_override,
-                protection_override,
-                allowed_domains,
-                // Per-device block rules had no source other than the service
-                // manifests, which are gone. The runtime still honours the
-                // field; nothing fills it until the device model is rebuilt.
-                blocked_domains: Vec::new(),
-            }
+        .map(|suffix| {
+            let blocked_by = index.lookup(suffix).block;
+            let lists = index
+                .names()
+                .iter()
+                .enumerate()
+                .filter(|(slot, _)| blocked_by & (1u64 << slot) != 0)
+                .map(|(_, name)| name.as_ref())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{suffix} is on {lists}; it stays reachable because it is a protected name")
         })
         .collect()
 }
 
-async fn apply_runtime_device_policies(state: &ServerState) -> Result<()> {
-    let devices = state.storage.list_devices().await?;
-    state
-        .dns_runtime
-        .replace_device_policies(runtime_device_policies_from_records(devices));
-    Ok(())
-}
-
 fn normalize_source_kind(kind: &str) -> Option<String> {
     let normalized = kind.trim().to_ascii_lowercase();
-    source_kind_from_str(&normalized)?;
+    normalized.parse::<SourceKind>().ok()?;
     Some(normalized)
-}
-
-fn source_kind_from_str(kind: &str) -> Option<SourceKind> {
-    match kind {
-        "domains" => Some(SourceKind::Domains),
-        "hosts" => Some(SourceKind::Hosts),
-        "adblock" => Some(SourceKind::Adblock),
-        _ => None,
-    }
 }
 
 fn normalize_verification_strictness(strictness: &str) -> Option<String> {
@@ -2216,52 +2228,10 @@ fn is_reserved_source_id(source_id: Uuid) -> bool {
     source_id == Uuid::from_u128(1)
 }
 
-/// Protected names the candidate's rules would block, per policy scope. Empty
-/// means it is safe to install.
-///
-/// The compiled engines cannot be probed directly: [`PolicyEngine::evaluate`]
-/// answers `Allowed` for every protected suffix before it consults a single
-/// rule, so evaluating the catalog as built would never find anything. Each
-/// engine's rules are therefore recompiled WITHOUT a protected set -- the same
-/// trick `verify_candidate` uses -- and probed in that form. Every engine in
-/// the catalog is checked, not just the global one: a profile is built from a
-/// subset of the sources and can lack the allow rule that rescued a name in
-/// the global set.
-fn protected_domain_regressions(
-    catalog: &RuntimePolicyCatalog,
-    protected_domains: &HashSet<String>,
-) -> Vec<String> {
-    let scopes = std::iter::once(("global", catalog.global_policy.as_ref())).chain(
-        catalog
-            .profile_policies
-            .iter()
-            .map(|(profile, policy)| (profile.as_str(), policy.as_ref())),
-    );
-
-    let mut blocked = Vec::new();
-    for (scope, policy) in scopes {
-        let artifact = policy.artifact();
-        let probe = PolicyEngine::new(RulesetArtifact::new(
-            artifact.rules.clone(),
-            HashSet::new(),
-            artifact.block_mode.clone(),
-        ));
-        blocked.extend(protected_domains.iter().filter_map(|domain| {
-            match probe.evaluate(domain).kind {
-                DecisionKind::Blocked(_) => Some(format!(
-                    "protected domain blocked in {scope} policy: {domain}"
-                )),
-                DecisionKind::Allowed => None,
-            }
-        }));
-    }
-    blocked.sort_unstable();
-    blocked
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cogwheel_policy::{Reason, Verdict, evaluate};
 
     /// The subscriber cap and the Drop-based slot release are the event bus's two
     /// correctness-critical behaviours. Without a test, a refactor that dropped `SubscriberGuard`
@@ -2410,128 +2380,495 @@ mod tests {
         assert_eq!(normalize_profile_name("   "), None);
     }
 
-    #[test]
-    fn runtime_device_policies_clear_global_overrides() {
-        let configs = runtime_device_policies_from_records(vec![DeviceRecord {
+    fn source(id: u128, name: &str, enabled: bool, url: &str) -> SourceRecord {
+        SourceRecord {
+            id: Uuid::from_u128(id),
+            name: name.to_string(),
+            url: url.to_string(),
+            kind: "domains".to_string(),
+            enabled,
+            refresh_interval_minutes: 60,
+            profile: "custom".to_string(),
+            verification_strictness: "balanced".to_string(),
+        }
+    }
+
+    fn device(
+        name: &str,
+        ip: &str,
+        policy_mode: &str,
+        protection_override: &str,
+        allowed: &[&str],
+    ) -> DeviceRecord {
+        DeviceRecord {
             id: Uuid::new_v4(),
-            name: "Laptop".to_string(),
-            ip_address: "192.168.1.10".to_string(),
-            policy_mode: "global".to_string(),
-            blocklist_profile_override: Some("Aggressive".to_string()),
-            protection_override: "bypass".to_string(),
-            allowed_domains: vec!["example.com".to_string()],
+            name: name.to_string(),
+            ip_address: ip.to_string(),
+            policy_mode: policy_mode.to_string(),
+            blocklist_profile_override: Some("aggressive".to_string()),
+            protection_override: protection_override.to_string(),
+            allowed_domains: allowed.iter().map(|d| (*d).to_string()).collect(),
             service_overrides: Vec::new(),
-        }]);
+        }
+    }
 
-        assert_eq!(configs.len(), 1);
-        assert_eq!(configs[0].policy_mode, "global");
-        assert_eq!(configs[0].blocklist_profile_override, None);
-        assert_eq!(configs[0].protection_override, "inherit");
-        assert!(configs[0].allowed_domains.is_empty());
-        assert!(configs[0].blocked_domains.is_empty());
+    fn domains(body: &str) -> ParsedList {
+        parse_list(SourceKind::Domains, body)
+    }
+
+    fn ip(text: &str) -> IpAddr {
+        text.parse().expect("test address")
+    }
+
+    /// One enabled list blocking `ads.example`, plus the given devices.
+    fn built(devices: &[DeviceRecord], scopes: &mut ScopeAllocator) -> Policy {
+        let sources = [source(1, "ads", true, "data:text/plain,ads.example")];
+        let lists = HashMap::from([(sources[0].id, domains("ads.example"))]);
+        build_policy(&sources, &lists, devices, scopes, BlockMode::NullIp).policy
     }
 
     #[test]
-    fn build_runtime_policy_catalog_includes_shared_rules_in_profiles() {
-        let shared = parse_source(
-            SourceDefinition {
-                id: Uuid::new_v4(),
-                name: "Shared".to_string(),
-                url: Url::parse("data:text/plain,shared.example").expect("shared url"),
-                kind: SourceKind::Domains,
-                enabled: true,
-                profile: "shared".to_string(),
-                verification_strictness: "balanced".to_string(),
-            },
-            "shared.example",
+    fn global_mode_devices_share_the_household_scope() {
+        // In global mode the per-device columns are ignored, bypass and allow list
+        // included: that is what the runtime did before and the schema has not moved.
+        let laptop = device(
+            "Laptop",
+            "192.168.1.10",
+            "global",
+            "bypass",
+            &["ads.example"],
         );
-        let balanced = parse_source(
-            SourceDefinition {
-                id: Uuid::new_v4(),
-                name: "Balanced".to_string(),
-                url: Url::parse("data:text/plain,balanced.example").expect("balanced url"),
-                kind: SourceKind::Domains,
-                enabled: true,
-                profile: "balanced".to_string(),
-                verification_strictness: "balanced".to_string(),
-            },
-            "balanced.example",
+        let policy = built(&[laptop], &mut ScopeAllocator::new());
+        let scope = policy.scope_for(ip("192.168.1.10"));
+        assert_eq!(scope.id, SCOPE_HOUSEHOLD);
+        assert!(scope.filtering);
+        assert!(scope.rules.is_none());
+        assert_eq!(
+            evaluate(&policy, scope, "ads.example"),
+            Verdict::Block(Reason::List, 0)
         );
-
-        let catalog =
-            build_runtime_policy_catalog(&[shared, balanced], HashSet::new(), BlockMode::NullIp);
-        let balanced_policy = catalog
-            .profile_policies
-            .get("balanced")
-            .expect("balanced profile policy");
-
-        assert!(matches!(
-            balanced_policy.evaluate("shared.example").kind,
-            DecisionKind::Blocked(_)
-        ));
-        assert!(matches!(
-            balanced_policy.evaluate("balanced.example").kind,
-            DecisionKind::Blocked(_)
-        ));
     }
 
-    /// The pre-activation safety net has to see through the protected tier: a
-    /// catalog compiled with a protected set answers `Allowed` for those names no
-    /// matter what its rules say, so a check that trusted the compiled engines
-    /// would never fire. It also has to look at every profile, because a profile
-    /// built from a subset of the sources can lose the allow rule that rescued a
-    /// name in the global set.
     #[test]
-    fn protected_domain_regressions_sees_through_protected_tier_and_checks_profiles() {
-        let source = |name: &str, profile: &str, body: &str| {
-            parse_source(
-                SourceDefinition {
-                    id: Uuid::new_v4(),
-                    name: name.to_string(),
-                    url: Url::parse(&format!("data:text/plain,{name}")).expect("url"),
-                    kind: SourceKind::Adblock,
-                    enabled: true,
-                    profile: profile.to_string(),
-                    verification_strictness: "balanced".to_string(),
-                },
-                body,
-            )
-        };
-        let protected = HashSet::from(["apple.com".to_string()]);
-
-        // Only the balanced profile carries the block; the allow that rescues it
-        // globally lives in a strict-only source.
-        let catalog = build_runtime_policy_catalog(
-            &[
-                source("balanced", "balanced", "||apple.com^"),
-                source("strict", "strict", "@@||apple.com^"),
-            ],
-            protected.clone(),
-            BlockMode::NullIp,
+    fn bypassed_devices_resolve_unfiltered() {
+        let console = device("Console", "192.168.1.20", "custom", "bypass", &[]);
+        let policy = built(&[console], &mut ScopeAllocator::new());
+        let scope = policy.scope_for(ip("192.168.1.20"));
+        assert_eq!(scope.id, SCOPE_UNFILTERED);
+        assert_eq!(
+            evaluate(&policy, scope, "ads.example"),
+            Verdict::Allow(Reason::Unfiltered)
         );
+    }
+
+    #[test]
+    fn allowed_domains_become_device_allow_rules() {
+        let laptop = device(
+            "Laptop",
+            "192.168.1.10",
+            "custom",
+            "inherit",
+            &["*.Ads.Example."],
+        );
+        let policy = built(&[laptop], &mut ScopeAllocator::new());
+        let scope = policy.scope_for(ip("192.168.1.10"));
         assert!(
-            matches!(
-                catalog
-                    .profile_policies
-                    .get("balanced")
-                    .expect("balanced profile")
-                    .evaluate("apple.com")
-                    .kind,
-                DecisionKind::Allowed
-            ),
-            "the compiled engine hides the regression behind the protected tier"
+            scope.id > SCOPE_UNFILTERED,
+            "a device with rules gets its own scope"
+        );
+        for name in ["ads.example", "cdn.ads.example"] {
+            assert_eq!(
+                evaluate(&policy, scope, name),
+                Verdict::Allow(Reason::DeviceRule),
+                "{name}"
+            );
+        }
+        // The rule is the device's alone.
+        assert_eq!(
+            evaluate(&policy, policy.scope_for(ip("192.168.1.99")), "ads.example"),
+            Verdict::Block(Reason::List, 0)
+        );
+    }
+
+    #[test]
+    fn devices_with_identical_rules_share_a_scope_and_an_edit_gets_a_fresh_one() {
+        let mut scopes = ScopeAllocator::new();
+        let phone = device("Phone", "192.168.1.11", "custom", "inherit", &["a.example"]);
+        let tablet = device(
+            "Tablet",
+            "192.168.1.12",
+            "custom",
+            "inherit",
+            &["a.example"],
+        );
+        let policy = built(&[phone.clone(), tablet.clone()], &mut scopes);
+        let shared = policy.scope_for(ip("192.168.1.11")).id;
+        assert_eq!(policy.scope_for(ip("192.168.1.12")).id, shared);
+
+        // Editing the tablet moves it to a new id; the phone keeps its cache.
+        let edited = device(
+            "Tablet",
+            "192.168.1.12",
+            "custom",
+            "inherit",
+            &["b.example"],
+        );
+        let policy = built(&[phone, edited], &mut scopes);
+        assert_eq!(policy.scope_for(ip("192.168.1.11")).id, shared);
+        let moved = policy.scope_for(ip("192.168.1.12")).id;
+        assert_ne!(moved, shared);
+        assert!(moved > shared);
+    }
+
+    #[test]
+    fn a_list_rebuild_never_reuses_a_scope_id() {
+        // After a reset the same signature must not land on an id a cached answer may
+        // still carry: the cache is dropped with the lists, but an in-flight miss can
+        // still insert under the old policy after the swap.
+        let mut scopes = ScopeAllocator::new();
+        let phone = device("Phone", "192.168.1.11", "custom", "inherit", &["a.example"]);
+        let before = built(std::slice::from_ref(&phone), &mut scopes)
+            .scope_for(ip("192.168.1.11"))
+            .id;
+        scopes.reset();
+        let after = built(&[phone], &mut scopes)
+            .scope_for(ip("192.168.1.11"))
+            .id;
+        assert!(after > before, "{after} should be above {before}");
+    }
+
+    #[test]
+    fn the_policy_is_compiled_from_every_enabled_source_in_id_order() {
+        let sources = [
+            source(7, "later", true, "data:text/plain,later.example"),
+            source(3, "earlier", true, "data:text/plain,earlier.example"),
+            source(5, "off", false, "data:text/plain,off.example"),
+        ];
+        let lists = HashMap::from([
+            (sources[0].id, domains("later.example")),
+            (sources[1].id, domains("earlier.example\nmore.example")),
+            (sources[2].id, domains("off.example")),
+        ]);
+        let build = build_policy(
+            &sources,
+            &lists,
+            &[],
+            &mut ScopeAllocator::new(),
+            BlockMode::NxDomain,
+        );
+        let policy = build.policy;
+        assert_eq!(policy.index.names(), ["earlier".into(), "later".into()]);
+        assert_eq!(policy.all_mask, 0b11);
+        assert_eq!(build.rule_count, 3);
+        assert_eq!(policy.block_mode, BlockMode::NxDomain);
+        let household = policy.scope(SCOPE_HOUSEHOLD);
+        assert_eq!(
+            evaluate(&policy, household, "later.example"),
+            Verdict::Block(Reason::List, 1)
         );
         assert_eq!(
-            protected_domain_regressions(&catalog, &protected),
-            vec!["protected domain blocked in balanced policy: apple.com".to_string()]
+            evaluate(&policy, household, "off.example"),
+            Verdict::Allow(Reason::NoMatch),
+            "a disabled list contributes nothing"
         );
+        assert!(build.notes.is_empty(), "{:?}", build.notes);
+    }
 
-        let clean = build_runtime_policy_catalog(
-            &[source("shared", "shared", "||ads.example^")],
-            protected.clone(),
+    #[test]
+    fn an_enabled_source_without_a_body_is_a_note_not_a_failure() {
+        let sources = [
+            source(1, "fetched", true, "data:text/plain,a.example"),
+            source(2, "pending", true, "https://lists.example/pending.txt"),
+        ];
+        let lists = HashMap::from([(sources[0].id, domains("a.example"))]);
+        let build = build_policy(
+            &sources,
+            &lists,
+            &[],
+            &mut ScopeAllocator::new(),
             BlockMode::NullIp,
         );
-        assert!(protected_domain_regressions(&clean, &protected).is_empty());
+        assert_eq!(build.policy.all_mask, 0b1);
+        assert_eq!(build.notes.len(), 1, "{:?}", build.notes);
+        assert!(build.notes[0].starts_with("pending: not compiled"));
+    }
+
+    #[test]
+    fn a_list_blocking_a_protected_name_is_a_note_not_a_rejection() {
+        let sources = [source(1, "overreach", true, "data:text/plain,pool.ntp.org")];
+        let lists = HashMap::from([(sources[0].id, domains("pool.ntp.org\nads.example"))]);
+        let build = build_policy(
+            &sources,
+            &lists,
+            &[],
+            &mut ScopeAllocator::new(),
+            BlockMode::NullIp,
+        );
+        assert_eq!(build.rule_count, 2);
+        assert_eq!(
+            build.notes,
+            vec![
+                "pool.ntp.org is on overreach; it stays reachable because it is a protected name"
+                    .to_string()
+            ]
+        );
+        assert_eq!(
+            evaluate(
+                &build.policy,
+                build.policy.scope(SCOPE_HOUSEHOLD),
+                "0.pool.ntp.org"
+            ),
+            Verdict::Allow(Reason::Protected)
+        );
+    }
+
+    #[test]
+    fn query_frames_carry_the_verdict_and_the_device_name() {
+        let entry = LogEntry {
+            ts: 1_700_000_000,
+            client: ip("192.168.1.10"),
+            domain: Arc::from("ads.example"),
+            qtype: 1,
+            verdict: Verdict::Block(Reason::Cname, 0),
+        };
+        let observed_at =
+            chrono::DateTime::from_timestamp(i64::from(entry.ts), 0).expect("timestamp in range");
+        let frame = query_frame(&entry, Some("Laptop".to_string()), observed_at);
+        assert_eq!(frame.domain, "ads.example");
+        assert_eq!(frame.client, "192.168.1.10");
+        assert_eq!(frame.device_name.as_deref(), Some("Laptop"));
+        assert!(frame.blocked);
+        assert_eq!(frame.reason.as_deref(), Some("cname"));
+        assert!(frame.observed_at.starts_with("2023-11-14T22:13:20"));
+    }
+
+    /// A control plane over an in-memory database and a runtime whose upstream is never
+    /// asked anything.
+    async fn test_state() -> ServerState {
+        let storage = Storage::connect("sqlite://:memory:")
+            .await
+            .expect("in-memory storage");
+        let resolver = build_resolver(&["127.0.0.1:1".to_string()]).expect("resolver");
+        let (dns_runtime, _log_rx) =
+            DnsRuntime::new(resolver, Arc::new(Policy::empty(BlockMode::NullIp)));
+        let (_shutdown_tx, shutdown) = tokio::sync::watch::channel(false);
+        ServerState {
+            api_state: ApiState {
+                readiness: Arc::default(),
+            },
+            storage: Arc::new(storage),
+            dns_runtime,
+            lists: Arc::new(RwLock::new(HashMap::new())),
+            scopes: Arc::new(Mutex::new(ScopeAllocator::new())),
+            rebuild_lock: Arc::new(tokio::sync::Mutex::new(())),
+            device_names: Arc::new(RwLock::new(HashMap::new())),
+            recent_dns_activity: Arc::new(Mutex::new(VecDeque::new())),
+            events: EventBus::new(),
+            shutdown,
+            rate_limiter: Arc::new(RateLimiter::new(100, 60)),
+            dns_udp_bind_addr: "127.0.0.1:0".parse().expect("bind address"),
+            advertised_dns_port: 53,
+            advertised_dns_targets: Vec::new(),
+        }
+    }
+
+    /// The scheduler only fetches the sources whose interval has elapsed. That used to
+    /// be all the policy was compiled from, so every other list silently fell out of
+    /// force until its own turn came round.
+    #[tokio::test]
+    async fn a_refresh_compiles_every_enabled_source_not_only_the_fetched_ones() {
+        let state = test_state().await;
+        let ads = source(
+            1,
+            "ads",
+            true,
+            "data:text/plain,ads.example%0Atracker.example",
+        );
+        let promos = source(2, "promos", true, "data:text/plain,promo.example");
+        for record in [&ads, &promos] {
+            state.storage.insert_source(record).await.expect("insert");
+        }
+
+        let first = refresh_sources_once(&state, "test", None)
+            .await
+            .expect("first refresh");
+        assert_eq!(first.outcome, RefreshOutcome::Activated);
+        assert_eq!(first.rule_count, Some(3));
+
+        let due = HashSet::from([promos.id]);
+        let second = refresh_sources_once(&state, "test", Some(&due))
+            .await
+            .expect("second refresh");
+        assert_eq!(second.outcome, RefreshOutcome::Activated);
+        assert_eq!(second.rule_count, Some(3));
+
+        let policy = state.dns_runtime.current_policy();
+        assert_eq!(policy.index.names(), ["ads".into(), "promos".into()]);
+        let household = policy.scope(SCOPE_HOUSEHOLD);
+        assert_eq!(
+            evaluate(&policy, household, "tracker.example"),
+            Verdict::Block(Reason::List, 0)
+        );
+        assert_eq!(
+            evaluate(&policy, household, "promo.example"),
+            Verdict::Block(Reason::List, 1)
+        );
+    }
+
+    /// Serve one list body over loopback HTTP, released only when `release` is notified, so
+    /// a refresh can be parked in the middle of its download.
+    async fn parked_list_server(body: &'static str, release: Arc<tokio::sync::Notify>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind list server");
+        let addr = listener.local_addr().expect("list server address");
+        let app = Router::new().route(
+            "/list.txt",
+            get(move || {
+                let release = Arc::clone(&release);
+                async move {
+                    release.notified().await;
+                    body
+                }
+            }),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}/list.txt")
+    }
+
+    /// A refresh snapshots the sources before its downloads and installs after them. A list
+    /// added in between — the scheduler is mid-download when someone clicks Add — must
+    /// survive the older refresh finishing, or it stays out of force until its own interval.
+    #[tokio::test]
+    async fn a_list_added_during_a_refresh_survives_that_refresh_finishing() {
+        let state = test_state().await;
+        let release = Arc::new(tokio::sync::Notify::new());
+        let slow_url = parked_list_server("slow.example\n", Arc::clone(&release)).await;
+        let slow = source(1, "slow", true, &slow_url);
+        state.storage.insert_source(&slow).await.expect("insert");
+
+        let parked = tokio::spawn({
+            let state = state.clone();
+            let only_slow = HashSet::from([slow.id]);
+            async move { refresh_sources_once(&state, "scheduled", Some(&only_slow)).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !parked.is_finished(),
+            "the refresh should be parked on its download"
+        );
+
+        let added = source(2, "added", true, "data:text/plain,added.example");
+        state.storage.insert_source(&added).await.expect("insert");
+        let only_added = HashSet::from([added.id]);
+        let activated = refresh_sources_once(&state, "blocklist-update", Some(&only_added))
+            .await
+            .expect("refresh of the added list");
+        assert_eq!(activated.outcome, RefreshOutcome::Activated);
+
+        release.notify_one();
+        let finished = parked
+            .await
+            .expect("refresh task")
+            .expect("the parked refresh completes");
+        assert_eq!(finished.outcome, RefreshOutcome::Activated);
+        assert_eq!(finished.rule_count, Some(2));
+
+        let policy = state.dns_runtime.current_policy();
+        assert_eq!(policy.index.names(), ["slow".into(), "added".into()]);
+        assert!(
+            !finished
+                .notes
+                .iter()
+                .any(|note| note.starts_with("added: not compiled")),
+            "{:?}",
+            finished.notes
+        );
+    }
+
+    #[tokio::test]
+    async fn a_list_that_fails_verification_rejects_the_refresh_and_keeps_the_policy() {
+        let state = test_state().await;
+        let ads = source(1, "ads", true, "data:text/plain,ads.example");
+        let mut broken = source(
+            2,
+            "broken",
+            true,
+            "data:text/plain,||ads.example^$third-party",
+        );
+        broken.kind = "adblock".to_string();
+        for record in [&ads, &broken] {
+            state.storage.insert_source(record).await.expect("insert");
+        }
+
+        let only_ads = HashSet::from([ads.id]);
+        let first = refresh_sources_once(&state, "test", Some(&only_ads))
+            .await
+            .expect("first refresh");
+        assert_eq!(first.outcome, RefreshOutcome::Activated);
+        assert!(
+            first
+                .notes
+                .iter()
+                .any(|note| note.starts_with("broken: not compiled")),
+            "{:?}",
+            first.notes
+        );
+
+        let rejected = refresh_sources_once(&state, "test", None)
+            .await
+            .expect("second refresh");
+        assert_eq!(rejected.outcome, RefreshOutcome::Rejected);
+        assert_eq!(rejected.rule_count, None);
+        assert!(
+            rejected.notes[0].starts_with("broken: "),
+            "{:?}",
+            rejected.notes
+        );
+
+        // Nothing moved: the good list is still in force and the bad body was not kept.
+        let policy = state.dns_runtime.current_policy();
+        assert_eq!(policy.index.names(), ["ads".into()]);
+        assert!(!read_recover(&state.lists).contains_key(&broken.id));
+    }
+
+    #[tokio::test]
+    async fn a_device_edit_recompiles_scopes_without_refetching() {
+        let state = test_state().await;
+        let ads = source(1, "ads", true, "data:text/plain,ads.example");
+        state.storage.insert_source(&ads).await.expect("insert");
+        refresh_sources_once(&state, "test", None)
+            .await
+            .expect("refresh");
+        // Take the source off the network: a rebuild that fetched would now fail.
+        let mut offline = ads.clone();
+        offline.url = "https://lists.example/unreachable.txt".to_string();
+        state.storage.insert_source(&offline).await.expect("update");
+        let laptop = device(
+            "Laptop",
+            "192.168.1.10",
+            "custom",
+            "inherit",
+            &["ads.example"],
+        );
+        state.storage.upsert_device(&laptop).await.expect("device");
+
+        install_policy(&state, Rebuild::Devices)
+            .await
+            .expect("device rebuild");
+
+        let policy = state.dns_runtime.current_policy();
+        assert_eq!(policy.index.names(), ["ads".into()]);
+        assert_eq!(
+            evaluate(&policy, policy.scope_for(ip("192.168.1.10")), "ads.example"),
+            Verdict::Allow(Reason::DeviceRule)
+        );
+        assert_eq!(
+            read_recover(&state.device_names).get(&ip("192.168.1.10")),
+            Some(&"Laptop".to_string())
+        );
     }
 
     #[test]

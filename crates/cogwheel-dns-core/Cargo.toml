@@ -9,11 +9,11 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
-chrono.workspace = true
 hickory-proto.workspace = true
 hickory-resolver.workspace = true
 moka.workspace = true
 serde.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 cogwheel-policy = { path = "../cogwheel-policy" }

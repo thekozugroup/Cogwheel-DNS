@@ -28,9 +28,15 @@
 //! cleartext, because it looks encrypted; there is no mode here that skips
 //! verification.
 
+use anyhow::{Context, Result};
+use hickory_resolver::TokioResolver;
+use hickory_resolver::config::{ConnectionConfig, NameServerConfig, ResolverConfig, ResolverOpts};
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
 
 /// Port used when a cleartext upstream does not name one.
@@ -252,6 +258,126 @@ impl fmt::Display for UpstreamEndpoint {
     }
 }
 
+/// The options every upstream resolver is built with.
+///
+/// Pinned rather than left to hickory's defaults because three of them decide
+/// how this resolver behaves when the upstream is unwell, and the defaults are
+/// tuned for a client library, not a forwarder in front of a household:
+///
+/// - `timeout` 2 s and `attempts` 2 bound a dead upstream to four seconds
+///   before the miss falls back to a stale answer or SERVFAIL, instead of the
+///   default ten.
+/// - `cache_size` 0 switches hickory's own LRU off. There is one cache in this
+///   process, the runtime's, and it is the one that applies the TTL clamp;
+///   a second cache underneath it would hand back answers the clamp never saw.
+/// - `try_tcp_on_error` retries over TCP when UDP fails, which is how a
+///   truncated or filtered UDP path still resolves.
+/// - `preserve_intermediates` keeps CNAME records in `Lookup::answers()`. The
+///   CNAME re-check reads the aliases out of the answer it already has; without
+///   this flag it would need a second round trip per name.
+pub fn resolver_options() -> ResolverOpts {
+    // Field-by-field because `ResolverOpts` is `#[non_exhaustive]`; a struct literal with
+    // `..Default::default()` is refused across crates.
+    let mut options = ResolverOpts::default();
+    options.timeout = Duration::from_secs(2);
+    options.attempts = 2;
+    options.cache_size = 0;
+    options.try_tcp_on_error = true;
+    options.preserve_intermediates = true;
+    options
+}
+
+/// Build the upstream resolver from the configured server specifications.
+///
+/// # Errors
+///
+/// Returns an error when a specification does not parse or the resolver
+/// cannot be constructed.
+pub fn build_resolver(servers: &[String]) -> Result<TokioResolver> {
+    let mut name_servers = Vec::new();
+    let mut encrypted = 0usize;
+
+    for server in servers {
+        let endpoint = UpstreamEndpoint::parse(server)
+            .with_context(|| format!("invalid upstream server: {server}"))?;
+
+        // hickory 0.26 models an upstream as one address carrying a list of connections, rather
+        // than one entry per protocol. The port moved onto the connection, so it has to be copied
+        // across from the configured address or every upstream would silently fall back to 53.
+        let connections = match endpoint.protocol {
+            UpstreamProtocol::Udp => {
+                let mut udp = ConnectionConfig::udp();
+                udp.port = endpoint.addr.port();
+                let mut tcp = ConnectionConfig::tcp();
+                tcp.port = endpoint.addr.port();
+                vec![udp, tcp]
+            }
+            // No cleartext fallback is added alongside an encrypted transport, and that is the
+            // whole point. A fallback would mean that anything making TLS fail -- a captive
+            // portal, a middlebox, an expired certificate -- silently downgrades every query in
+            // the house back onto the wire in plaintext, which is precisely the outcome the
+            // operator configured this to avoid. If DoT is broken, resolution should fail
+            // visibly and get fixed, not quietly succeed in the clear.
+            UpstreamProtocol::Tls => {
+                let server_name = endpoint
+                    .server_name
+                    .clone()
+                    .context("DoT upstream without a certificate name reached the resolver")?;
+                let mut tls = ConnectionConfig::tls(Arc::from(server_name.as_str()));
+                tls.port = endpoint.addr.port();
+                encrypted += 1;
+                vec![tls]
+            }
+            UpstreamProtocol::Https => {
+                let server_name = endpoint
+                    .server_name
+                    .clone()
+                    .context("DoH upstream without a certificate name reached the resolver")?;
+                let path = endpoint.path.clone().map(|path| Arc::from(path.as_str()));
+                let mut https = ConnectionConfig::https(Arc::from(server_name.as_str()), path);
+                https.port = endpoint.addr.port();
+                encrypted += 1;
+                vec![https]
+            }
+        };
+
+        tracing::info!(
+            upstream = %endpoint,
+            protocol = ?endpoint.protocol,
+            encrypted = endpoint.is_encrypted(),
+            "configured upstream resolver"
+        );
+        name_servers.push(NameServerConfig::new(endpoint.addr.ip(), true, connections));
+    }
+
+    // Said once, plainly, rather than left for the operator to infer. Cleartext is still the
+    // default because it is what works on every network without configuration, but running a
+    // tracker blocker while handing the full browsing history of the house to whoever carries
+    // the packets deserves to be stated rather than assumed.
+    if encrypted == 0 {
+        tracing::warn!(
+            "all upstream resolvers are cleartext DNS on port 53; every domain this network \
+             looks up is visible to the local network and to the ISP. Configure DNS-over-TLS \
+             with e.g. COGWHEEL_UPSTREAM__SERVERS=tls://1.1.1.1#cloudflare-dns.com"
+        );
+    } else if encrypted < name_servers.len() {
+        // Mixing is a real footgun: hickory will happily use whichever responds, so a single
+        // cleartext entry in the list quietly leaks a share of the queries.
+        tracing::warn!(
+            encrypted,
+            total = name_servers.len(),
+            "some upstream resolvers are encrypted and some are cleartext; queries will be \
+             spread across both, so a share of them still travel in plaintext"
+        );
+    }
+
+    let config = ResolverConfig::from_parts(None, vec![], name_servers);
+    TokioResolver::builder_with_config(config, TokioRuntimeProvider::default())
+        .with_options(resolver_options())
+        .build()
+        .context("build upstream resolver")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,5 +518,28 @@ mod tests {
                 "round trip of {spec} via {rendered}"
             );
         }
+    }
+
+    #[test]
+    fn a_resolver_builds_from_the_shipped_default_and_refuses_a_bad_spec() {
+        let servers = ["1.1.1.1:53".to_string(), "1.0.0.1:53".to_string()];
+        assert!(build_resolver(&servers).is_ok());
+        let error = build_resolver(&["tls://cloudflare-dns.com".to_string()]).expect_err("refuse");
+        assert!(
+            error.to_string().contains("invalid upstream server"),
+            "{error}"
+        );
+    }
+
+    /// The four options that change how an outage feels are pinned on purpose;
+    /// a hickory default drifting under us must show up here, not on a Pi.
+    #[test]
+    fn resolver_options_are_pinned() {
+        let options = resolver_options();
+        assert_eq!(options.timeout, Duration::from_secs(2));
+        assert_eq!(options.attempts, 2);
+        assert_eq!(options.cache_size, 0);
+        assert!(options.try_tcp_on_error);
+        assert!(options.preserve_intermediates);
     }
 }
