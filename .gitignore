@@ -4,3 +4,6 @@
 /.DS_Store
 /data
 /coverage
+
+# Scratch handoff notes between workflow agents; derived, never source.
+/.contracts/
