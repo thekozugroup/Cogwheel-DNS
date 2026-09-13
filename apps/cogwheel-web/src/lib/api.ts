@@ -1,11 +1,10 @@
 /**
  * The Cogwheel control-plane HTTP contract, as the web app uses it.
  *
- * Field naming mirrors the wire exactly: every `/api/v1` JSON handler
- * serialises Rust structs verbatim (snake_case fields, PascalCase enums),
- * while the SSE query frame is camelCase. Renaming either side here would only
- * hide the seam, so the types match the wire and the UI layer does the
- * translating.
+ * Twenty-two routes, no more: two health probes, one SSE stream and nineteen
+ * JSON calls. Field names mirror the wire exactly (snake_case everywhere
+ * except the SSE frame, which is camelCase), so nothing here has to translate
+ * between two vocabularies — the UI layer does its own naming at the use site.
  */
 
 const API_BASE =
@@ -33,7 +32,19 @@ export function errorMessage(error: unknown): string {
 
 type RequestOptions = { signal?: AbortSignal };
 
-async function request(path: string, init: RequestInit, options?: RequestOptions): Promise<Response> {
+/** Errors are `{ "error": "<plain sentence>" }`; fall back to the status line. */
+function describeFailure(body: string, response: Response): string {
+  try {
+    const parsed = JSON.parse(body) as { error?: unknown };
+    if (typeof parsed.error === "string" && parsed.error) return parsed.error;
+  } catch {
+    /* Not JSON — a proxy or the SPA fallback answered instead of the handler. */
+  }
+  return `${response.status} ${response.statusText}`;
+}
+
+/** Every JSON handler wraps its payload in `{ data: T }`. */
+async function json<T>(path: string, init: RequestInit = {}, options?: RequestOptions): Promise<T> {
   let response: Response;
   try {
     response = await fetch(`${API_BASE}${path}`, {
@@ -53,208 +64,300 @@ async function request(path: string, init: RequestInit, options?: RequestOptions
   }
 
   if (!response.ok) {
-    // Style-A handlers answer with an empty body, so fall back to the status line.
-    const detail = (await response.text().catch(() => "")).trim();
-    throw new ApiError(detail || `${response.status} ${response.statusText}`, response.status, path);
+    const body = (await response.text().catch(() => "")).trim();
+    throw new ApiError(describeFailure(body, response), response.status, path);
   }
 
-  return response;
-}
-
-/** Every JSON handler wraps its payload in `{ data: T }`. */
-async function fetchJson<T>(path: string, init: RequestInit = {}, options?: RequestOptions): Promise<T> {
-  const response = await request(path, init, options);
   const payload = (await response.json()) as { data: T };
   return payload.data;
 }
 
-/** `pause`/`resume` return HTTP 200 with an empty body, breaking the envelope. */
-async function fetchVoid(path: string, init: RequestInit = {}, options?: RequestOptions): Promise<void> {
-  await request(path, init, options);
+const body = (value: unknown): RequestInit["body"] => JSON.stringify(value);
+
+/** Drops undefined entries so an unset filter never becomes the string "undefined". */
+function query(params: Record<string, string | number | boolean | undefined>): string {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined) search.set(key, String(value));
+  }
+  const encoded = search.toString();
+  return encoded ? `?${encoded}` : "";
 }
 
-const post = (body?: unknown): RequestInit => ({
-  method: "POST",
-  ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-});
-
 /* ------------------------------------------------------------------------- */
-/* `/api/v1` types — snake_case, matching the Rust serialisation.              */
+/* Wire types                                                                 */
 /* ------------------------------------------------------------------------- */
 
-export type DnsRuntimeSnapshot = {
+/** Which evaluation step decided a query. Mirrors `cogwheel_policy::Reason`. */
+export type Reason =
+  | "no_match"
+  | "device_rule"
+  | "household_rule"
+  | "protected"
+  | "list_allow"
+  | "list"
+  | "cname"
+  | "paused"
+  | "unfiltered";
+
+export type ListKind = "hosts" | "domains" | "adblock";
+export type RuleAction = "allow" | "block";
+
+export type HealthStatus = { status: string };
+
+export type Readiness = {
+  status: string;
+  subsystems: { storage: boolean; policy: boolean; dns_listeners: boolean };
+};
+
+export type RuntimeCounters = {
   queries_total: number;
   blocked_total: number;
   cache_hits_total: number;
   cache_expired_total: number;
-  upstream_failures_total: number;
   /** Expired answers served because the upstream failed. */
   stale_served_total: number;
+  upstream_failures_total: number;
   cname_blocks_total: number;
-  /** Queries answered SERVFAIL or left out of the log because the runtime was saturated. */
+  /** Misses refused because the runtime was saturated; answered SERVFAIL. */
   dropped_total: number;
+  log_dropped_total: number;
   cache_hit_latency_avg_ns: number;
-  cache_hit_samples: number;
   cache_miss_latency_avg_ns: number;
-  cache_miss_samples: number;
 };
 
-export type SourceRecord = {
-  id: string;
-  name: string;
-  url: string;
-  kind: string;
-  enabled: boolean;
-  refresh_interval_minutes: number;
-  profile: string;
-  verification_strictness: string;
+export type HourBucket = { hour: number; queries: number; blocked: number };
+
+export type Overview = {
+  protection: { paused_until: number | null };
+  runtime: RuntimeCounters;
+  last_24h: {
+    queries: number;
+    blocked: number;
+    /** Oldest first; always 24 entries, zero-filled. */
+    per_hour: HourBucket[];
+    active_clients: number;
+    named_devices: number;
+    unnamed_clients: number;
+  };
+  lists: {
+    enabled: number;
+    total: number;
+    rules_loaded: number;
+    last_ok_at: number | null;
+    /** False until at least one list body has been fetched or found in the cache. */
+    downloaded: boolean;
+  };
+  top_blocked: DomainCount[];
+  top_queried: DomainCount[];
+  connect: { targets: string[]; port: number };
 };
 
-export type BlocklistStatus = {
-  id: string;
-  name: string;
-  last_refresh_attempt_at: string | null;
-  due_for_refresh: boolean;
+export type DomainCount = { domain: string; count: number };
+
+export type PauseState = { paused_until: number | null };
+
+export type QueryRow = {
+  id: number;
+  ts: number;
+  client: string;
+  device_id: string | null;
+  device_name: string | null;
+  domain: string;
+  qtype: number;
+  blocked: boolean;
+  reason: Reason;
+  /** The list that decided it, for `list`, `list_allow` and `cname`. */
+  list: string | null;
 };
 
-export type DeviceRecord = {
+export type QueryPage = {
+  rows: QueryRow[];
+  /** Keyset cursor for the next older page, or null at the end of the log. */
+  next_before: number | null;
+  /** False when COGWHEEL_RETENTION__HISTORY_DAYS=0: only the live stream exists. */
+  logging: boolean;
+};
+
+export type QueryFilters = {
+  limit?: number;
+  before?: number;
+  client?: string;
+  unnamed?: boolean;
+  blocked?: boolean;
+  q?: string;
+};
+
+/** `GET /api/v1/events/stream`, event `query`. The one camelCase payload. */
+export type StreamQueryEvent = {
+  ts: number;
+  client: string;
+  deviceName: string | null;
+  domain: string;
+  qtype: number;
+  blocked: boolean;
+  reason: Reason;
+  list: string | null;
+};
+
+export type DeviceRule = { id: number; domain: string; action: RuleAction };
+
+export type Device = {
   id: string;
   name: string;
   ip_address: string;
-  policy_mode: "global" | "custom";
-  blocklist_profile_override: string | null;
-  protection_override: "inherit" | "bypass";
-  allowed_domains: string[];
+  /** False = this device resolves everything, and is still logged. */
+  filtering: boolean;
+  all_lists: boolean;
+  /** Source ids, meaningful only when `all_lists` is false. */
+  lists: string[];
+  rules: DeviceRule[];
+  queries_24h: number;
+  blocked_24h: number;
+  last_seen_at: number | null;
 };
 
-export type BlockProfileListRecord = {
+export type UnnamedClient = {
+  ip: string;
+  queries_24h: number;
+  blocked_24h: number;
+  last_seen_at: number;
+};
+
+export type DeviceList = { devices: Device[]; unnamed_clients: UnnamedClient[] };
+
+export type DeviceInput = {
+  name: string;
+  ip_address: string;
+  filtering?: boolean;
+  all_lists?: boolean;
+  lists?: string[];
+};
+
+export type Rule = {
+  id: number;
+  domain: string;
+  action: RuleAction;
+  /** Null = everyone. */
+  device_id: string | null;
+  device_name: string | null;
+  created_at: number;
+};
+
+export type RuleInput = { domain: string; action: RuleAction; device_id?: string };
+
+export type ListSource = {
   id: string;
   name: string;
   url: string;
-  kind: string;
-  family: string;
+  kind: ListKind;
+  enabled: boolean;
+  rule_count: number;
+  last_ok_at: number | null;
+  last_fetched_at: number | null;
+  last_error: string | null;
+  /** Advisory, e.g. "contains 2 protected names (ignored)". */
+  note: string | null;
+  due: boolean;
 };
 
-export type BlockProfileRecord = {
+export type Preset = { name: string; url: string; kind: ListKind };
+
+export type ListCatalogue = { lists: ListSource[]; presets: Preset[] };
+
+export type ListInput = { name: string; url: string; kind: ListKind; enabled?: boolean };
+
+export type ListPatch = { name?: string; url?: string; kind?: ListKind; enabled?: boolean };
+
+export type FetchOutcome = "updated" | "unchanged" | "rejected" | "failed";
+
+export type ListCreated = { list: ListSource; outcome: FetchOutcome; note: string | null };
+
+export type RefreshResult = {
   id: string;
-  emoji: string;
   name: string;
-  description: string;
-  blocklists: BlockProfileListRecord[];
-  allowlists: string[];
-  updated_at: string;
+  outcome: FetchOutcome;
+  rule_count: number;
+  note: string | null;
 };
 
-export type DomainInsightEntry = { domain: string; count: number };
-
-export type DomainInsights = {
-  top_queried_domains: DomainInsightEntry[];
-  top_blocked_domains: DomainInsightEntry[];
-  observed_queries: number;
-};
-
-export type DashboardSummary = {
-  /** Derived server-side as Paused / Protected. */
-  protection_status: string;
-  protection_paused_until: string | null;
-  source_count: number;
-  enabled_source_count: number;
-  device_count: number;
-  /** The DNS runtime's counters since the process started. */
-  runtime: DnsRuntimeSnapshot;
-  domain_insights: DomainInsights;
-};
-
-export type SettingsSummary = {
-  blocklists: SourceRecord[];
-  blocklist_statuses: BlocklistStatus[];
-  block_profiles: BlockProfileRecord[];
-  devices: DeviceRecord[];
-};
-
-export type ResolverAccessStatus = {
-  hostname: string | null;
-  dns_targets: string[];
-  notes: string[];
-};
-
-export type RefreshResponse = {
-  outcome: string;
-  notes: string[];
-};
-
-/* ------------------------------------------------------------------------- */
-/* Server-sent events (`GET /api/v1/events/stream`) — `query` frames only.    */
-/* ------------------------------------------------------------------------- */
-
-export type StreamQueryEvent = {
+export type CheckResult = {
   domain: string;
-  client: string;
-  deviceName?: string | null;
-  blocked: boolean;
-  reason?: string | null;
-  observedAt: string;
-  latencyMs?: number | null;
+  verdict: "allow" | "block";
+  reason: Reason;
+  list: string | null;
+  scope: "household" | "device" | "unfiltered" | "paused";
+  device_name: string | null;
 };
 
-export const eventsStreamUrl = `${API_BASE}/api/v1/events/stream`;
+export type Upstream = { spec: string; protocol: string; encrypted: boolean };
+
+export type Settings = {
+  version: string;
+  upstreams: Upstream[];
+  block_mode: string;
+  http_bind: string;
+  dns_udp_bind: string;
+  dns_tcp_bind: string;
+  advertised_targets: string[];
+  advertised_port: number;
+  refresh_interval_secs: number;
+  retention: { history_days: number; max_rows: number; prune_interval_secs: number };
+  db_path: string;
+  db_size_bytes: number;
+  lists_dir: string;
+  protected_suffixes: string[];
+  schema_version: number;
+};
 
 /* ------------------------------------------------------------------------- */
-/* Client                                                                     */
+/* Client — one method per route in §3, in route order.                       */
 /* ------------------------------------------------------------------------- */
 
 export const api = {
-  /* --- Read ---------------------------------------------------------------- */
-  dashboard: (options?: RequestOptions) => fetchJson<DashboardSummary>("/api/v1/dashboard", {}, options),
-  settings: (options?: RequestOptions) => fetchJson<SettingsSummary>("/api/v1/settings", {}, options),
-  runtimeSnapshot: (options?: RequestOptions) =>
-    fetchJson<DnsRuntimeSnapshot>("/api/v1/runtime", {}, options),
-  resolverAccess: (options?: RequestOptions) =>
-    fetchJson<ResolverAccessStatus>("/api/v1/resolver-access", {}, options),
-  devices: (options?: RequestOptions) => fetchJson<DeviceRecord[]>("/api/v1/devices", {}, options),
-  sources: (options?: RequestOptions) => fetchJson<SourceRecord[]>("/api/v1/sources", {}, options),
+  /* 1–2 Health */
+  live: (options?: RequestOptions) => json<HealthStatus>("/health/live", {}, options),
+  ready: (options?: RequestOptions) => json<Readiness>("/health/ready", {}, options),
 
-  /* --- Runtime ------------------------------------------------------------- */
-  pauseRuntime: (minutes: number) => fetchVoid("/api/v1/runtime/pause", post({ minutes })),
-  resumeRuntime: () => fetchVoid("/api/v1/runtime/resume", post()),
+  /* 3–5 Overview and pause */
+  overview: (options?: RequestOptions) => json<Overview>("/api/v1/overview", {}, options),
+  pause: (minutes: number) =>
+    json<PauseState>("/api/v1/runtime/pause", { method: "POST", body: body({ minutes }) }),
+  resume: () => json<PauseState>("/api/v1/runtime/resume", { method: "POST" }),
 
-  /* --- Sources / blocklists ------------------------------------------------ */
-  refreshSources: () => fetchJson<RefreshResponse>("/api/v1/sources/refresh", post()),
-  upsertBlocklist: (input: {
-    id?: string;
-    name: string;
-    url: string;
-    kind: string;
-    enabled: boolean;
-    refresh_interval_minutes?: number;
-    profile?: string;
-    verification_strictness?: string;
-  }) => fetchJson<RefreshResponse>("/api/v1/settings/blocklists", post({ ...input, refresh_now: true })),
-  setBlocklistEnabled: (id: string, enabled: boolean) =>
-    fetchJson<RefreshResponse>("/api/v1/settings/blocklists/state", post({ id, enabled, refresh_now: true })),
-  deleteBlocklist: (id: string) =>
-    fetchJson<RefreshResponse>("/api/v1/settings/blocklists/delete", post({ id, refresh_now: true })),
+  /* 6–8 Query log */
+  queries: (filters: QueryFilters = {}, options?: RequestOptions) =>
+    json<QueryPage>(`/api/v1/queries${query(filters)}`, {}, options),
+  clearQueries: () => json<{ deleted: number }>("/api/v1/queries", { method: "DELETE" }),
+  eventsStreamUrl: () => `${API_BASE}/api/v1/events/stream`,
 
-  /* --- Block profiles ------------------------------------------------------ */
-  upsertBlockProfile: (input: {
-    id?: string;
-    emoji: string;
-    name: string;
-    description?: string;
-    blocklists: BlockProfileListRecord[];
-    allowlists: string[];
-  }) => fetchJson<BlockProfileRecord[]>("/api/v1/settings/block-profiles", post(input)),
-  deleteBlockProfile: (id: string) =>
-    fetchJson<BlockProfileRecord[]>("/api/v1/settings/block-profiles/delete", post({ id })),
+  /* 9–12 Devices */
+  devices: (options?: RequestOptions) => json<DeviceList>("/api/v1/devices", {}, options),
+  createDevice: (input: DeviceInput) =>
+    json<Device>("/api/v1/devices", { method: "POST", body: body(input) }),
+  updateDevice: (id: string, input: DeviceInput) =>
+    json<Device>(`/api/v1/devices/${id}`, { method: "PUT", body: body(input) }),
+  deleteDevice: (id: string) =>
+    json<{ deleted: boolean }>(`/api/v1/devices/${id}`, { method: "DELETE" }),
 
-  /* --- Devices ------------------------------------------------------------- */
-  upsertDevice: (input: {
-    id?: string;
-    name: string;
-    ip_address: string;
-    policy_mode?: DeviceRecord["policy_mode"];
-    blocklist_profile_override?: string | null;
-    protection_override?: DeviceRecord["protection_override"];
-    allowed_domains?: string[];
-  }) => fetchJson<DeviceRecord>("/api/v1/devices", post(input)),
+  /* 13–15 Rules */
+  rules: (deviceId?: string, options?: RequestOptions) =>
+    json<Rule[]>(`/api/v1/rules${query({ device_id: deviceId })}`, {}, options),
+  createRule: (input: RuleInput) => json<Rule>("/api/v1/rules", { method: "POST", body: body(input) }),
+  deleteRule: (id: number) => json<{ deleted: boolean }>(`/api/v1/rules/${id}`, { method: "DELETE" }),
+
+  /* 16–20 Lists */
+  lists: (options?: RequestOptions) => json<ListCatalogue>("/api/v1/lists", {}, options),
+  createList: (input: ListInput) =>
+    json<ListCreated>("/api/v1/lists", { method: "POST", body: body(input) }),
+  updateList: (id: string, patch: ListPatch) =>
+    json<ListSource>(`/api/v1/lists/${id}`, { method: "PUT", body: body(patch) }),
+  deleteList: (id: string) => json<{ deleted: boolean }>(`/api/v1/lists/${id}`, { method: "DELETE" }),
+  refreshLists: (id?: string) =>
+    json<RefreshResult[]>("/api/v1/lists/refresh", { method: "POST", body: body({ id }) }),
+
+  /* 21–22 Check and settings */
+  check: (domain: string, client?: string, options?: RequestOptions) =>
+    json<CheckResult>(`/api/v1/check${query({ domain, client })}`, {}, options),
+  settings: (options?: RequestOptions) => json<Settings>("/api/v1/settings", {}, options),
 };

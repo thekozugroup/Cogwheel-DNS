@@ -2,7 +2,7 @@ import React from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { RotateCwIcon, WifiOffIcon } from "lucide-react";
 import { useCogwheel } from "@/data/context";
-import { ALL_NAV } from "@/lib/nav";
+import { PRIMARY_NAV } from "@/lib/nav";
 import { formatRelative } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -27,7 +27,7 @@ function Shortcuts() {
       const modifier = event.metaKey || event.ctrlKey;
 
       if (modifier) {
-        const destination = ALL_NAV.find((item) => item.digit === event.key);
+        const destination = PRIMARY_NAV.find((item) => item.digit === event.key);
         if (destination) {
           event.preventDefault();
           navigate(destination.to);
@@ -66,7 +66,7 @@ function StaleBanner() {
       <WifiOffIcon aria-hidden className="size-4 shrink-0 text-warning-foreground" />
       <p className="min-w-0 flex-1 text-foreground text-xs">
         <span className="font-medium">Showing last-known data.</span>{" "}
-        {lastUpdatedAt ? `Last successful update ${formatRelative(new Date(lastUpdatedAt).toISOString())}.` : null}{" "}
+        {lastUpdatedAt ? `Last successful update ${formatRelative(Math.floor(lastUpdatedAt / 1000))}.` : null}{" "}
         {error ? <span className="text-muted-foreground">{error}</span> : null}
       </p>
       <Button onClick={() => void reload()} size="sm" variant="outline">

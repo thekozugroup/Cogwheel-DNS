@@ -14,12 +14,12 @@ import { ConfirmDialog } from "@/components/app/confirm-dialog";
  * the failure mode this whole product has to avoid.
  */
 export function SnoozeControl() {
-  const { data, busy, error } = useCogwheel();
+  const { data, busy, error, lastUpdatedAt } = useCogwheel();
   const { pause, resume } = useProtectionActions();
   const remaining = usePauseCountdown();
   const [pending, setPending] = React.useState<number | null>(null);
 
-  const state = protectionState(data.dashboard, Boolean(error) && data.dashboard.protection_status === "Loading");
+  const state = protectionState(data.overview.protection.paused_until, Boolean(error) && lastUpdatedAt === null);
   const pausing = busy === "pause-runtime";
   const resuming = busy === "resume-runtime";
 
@@ -67,7 +67,7 @@ export function SnoozeControl() {
 
       <ConfirmDialog
         confirmLabel={`Pause for ${pending ?? 0} minutes`}
-        consequence="Every device on the network resolves unfiltered until the window expires or you resume manually. The pause is held in memory, so a restart of the appliance also ends it."
+        consequence="Every device on the network resolves unfiltered until the window expires or you resume manually. The pause is stored, so a restart does not end it early."
         description={`Blocking stops for ${pending ?? 0} minutes across the whole network, not just this browser.`}
         destructive
         onConfirm={async () => {

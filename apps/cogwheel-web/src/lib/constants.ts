@@ -1,108 +1,86 @@
-import type {
-  BlockProfileListRecord,
-  BlockProfileRecord,
-  DashboardSummary,
-  DnsRuntimeSnapshot,
-  ResolverAccessStatus,
-  SettingsSummary,
-} from "@/lib/api";
+import type { DeviceList, ListCatalogue, Overview, Rule, Settings } from "@/lib/api";
 
 /**
  * Neutral defaults so screens can render structure before the first response
  * lands, instead of null-checking every field at every use site.
  */
 
-export const emptyRuntimeSnapshot: DnsRuntimeSnapshot = {
-  queries_total: 0,
-  blocked_total: 0,
-  cache_hits_total: 0,
-  cache_expired_total: 0,
-  upstream_failures_total: 0,
-  stale_served_total: 0,
-  cname_blocks_total: 0,
-  dropped_total: 0,
-  cache_hit_latency_avg_ns: 0,
-  cache_hit_samples: 0,
-  cache_miss_latency_avg_ns: 0,
-  cache_miss_samples: 0,
-};
-
-export const emptyDashboard: DashboardSummary = {
-  protection_status: "Loading",
-  protection_paused_until: null,
-  source_count: 0,
-  enabled_source_count: 0,
-  device_count: 0,
-  runtime: emptyRuntimeSnapshot,
-  domain_insights: { top_queried_domains: [], top_blocked_domains: [], observed_queries: 0 },
-};
-
-export const emptySettings: SettingsSummary = {
-  blocklists: [],
-  blocklist_statuses: [],
-  block_profiles: [],
-  devices: [],
-};
-
-export const emptyResolverAccess: ResolverAccessStatus = {
-  hostname: null,
-  dns_targets: [],
-  notes: [],
-};
-
-export const emptyBlockProfileDraft: BlockProfileRecord = {
-  id: "",
-  emoji: "",
-  name: "",
-  description: "",
-  blocklists: [],
-  allowlists: [],
-  updated_at: new Date(0).toISOString(),
-};
-
-/**
- * The four presets the backend canonicalises against
- * (`normalize_block_profile_lists`). Core and NSFW families are mutually
- * exclusive: picking the big list drops the small one and vice versa.
- */
-export const oisdProfileOptions: BlockProfileListRecord[] = [
-  { id: "oisd-small", name: "OISD Small", url: "https://small.oisd.nl", kind: "preset", family: "core-small" },
-  { id: "oisd-big", name: "OISD Big", url: "https://big.oisd.nl", kind: "preset", family: "core-full" },
-  {
-    id: "oisd-nsfw-small",
-    name: "OISD NSFW Small",
-    url: "https://nsfw-small.oisd.nl",
-    kind: "preset",
-    family: "nsfw-small",
+export const emptyOverview: Overview = {
+  protection: { paused_until: null },
+  runtime: {
+    queries_total: 0,
+    blocked_total: 0,
+    cache_hits_total: 0,
+    cache_expired_total: 0,
+    stale_served_total: 0,
+    upstream_failures_total: 0,
+    cname_blocks_total: 0,
+    dropped_total: 0,
+    log_dropped_total: 0,
+    cache_hit_latency_avg_ns: 0,
+    cache_miss_latency_avg_ns: 0,
   },
-  { id: "oisd-nsfw", name: "OISD NSFW", url: "https://nsfw.oisd.nl", kind: "preset", family: "nsfw-full" },
-];
-
-export const MUTUALLY_EXCLUSIVE_PRESETS: Record<string, string> = {
-  "oisd-big": "oisd-small",
-  "oisd-small": "oisd-big",
-  "oisd-nsfw": "oisd-nsfw-small",
-  "oisd-nsfw-small": "oisd-nsfw",
+  last_24h: {
+    queries: 0,
+    blocked: 0,
+    per_hour: [],
+    active_clients: 0,
+    named_devices: 0,
+    unnamed_clients: 0,
+  },
+  lists: { enabled: 0, total: 0, rules_loaded: 0, last_ok_at: null, downloaded: false },
+  top_blocked: [],
+  top_queried: [],
+  connect: { targets: [], port: 53 },
 };
+
+export const emptySettings: Settings = {
+  version: "",
+  upstreams: [],
+  block_mode: "",
+  http_bind: "",
+  dns_udp_bind: "",
+  dns_tcp_bind: "",
+  advertised_targets: [],
+  advertised_port: 53,
+  refresh_interval_secs: 0,
+  retention: { history_days: 0, max_rows: 0, prune_interval_secs: 0 },
+  db_path: "",
+  db_size_bytes: 0,
+  lists_dir: "",
+  protected_suffixes: [],
+  schema_version: 0,
+};
+
+export const emptyLists: ListCatalogue = { lists: [], presets: [] };
+
+export const emptyDevices: DeviceList = { devices: [], unnamed_clients: [] };
+
+export const emptyRules: Rule[] = [];
 
 /**
  * localStorage keys for the last-known snapshot. The suffix is bumped whenever
- * a cached shape changes incompatibly (the dashboard lost `runtime_health` and
- * gained `runtime`), so a browser that cached the previous build never renders
- * the old shape and trips the error boundary before the first poll answers.
+ * a cached shape changes incompatibly, so a browser holding the previous build's
+ * cache never renders the old shape and trips the error boundary before the
+ * first poll answers.
  */
 export const CACHE_KEYS = {
-  dashboard: "cogwheel_dashboard_cache_v2",
-  settings: "cogwheel_settings_cache_v2",
-  resolverAccess: "cogwheel_resolver_access_cache_v2",
+  overview: "cogwheel_overview_cache_v3",
+  settings: "cogwheel_settings_cache_v3",
+  lists: "cogwheel_lists_cache_v3",
+  devices: "cogwheel_devices_cache_v3",
+  rules: "cogwheel_rules_cache_v3",
 } as const;
 
 export const THEME_STORAGE_KEY = "cogwheel-theme";
 
-/** Poll cadence for the shared control-plane snapshot. */
+/** Poll cadence for the live part of the snapshot. */
 export const REFRESH_INTERVAL_MS = 5_000;
 
-/** Rows kept in the live activity buffer before the oldest are dropped. */
+/** Rows the Activity screen holds before the oldest are dropped. */
 export const ACTIVITY_BUFFER_LIMIT = 500;
+
+/** Rows fetched per page of query-log history. */
+export const ACTIVITY_PAGE_SIZE = 200;
 
 export const SNOOZE_OPTIONS = [5, 15, 60] as const;

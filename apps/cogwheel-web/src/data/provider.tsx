@@ -3,8 +3,10 @@ import { api, errorMessage } from "@/lib/api";
 import {
   CACHE_KEYS,
   REFRESH_INTERVAL_MS,
-  emptyDashboard,
-  emptyResolverAccess,
+  emptyDevices,
+  emptyLists,
+  emptyOverview,
+  emptyRules,
   emptySettings,
 } from "@/lib/constants";
 import { notify } from "@/lib/toast";
@@ -17,15 +19,19 @@ import {
 } from "@/data/context";
 
 const INITIAL: ControlPlaneSnapshot = {
-  dashboard: emptyDashboard,
+  overview: emptyOverview,
   settings: emptySettings,
-  resolverAccess: emptyResolverAccess,
+  lists: emptyLists,
+  devices: emptyDevices,
+  rules: emptyRules,
 };
 
 const CACHE_KEY_BY_FIELD: Record<keyof ControlPlaneSnapshot, string> = {
-  dashboard: CACHE_KEYS.dashboard,
+  overview: CACHE_KEYS.overview,
   settings: CACHE_KEYS.settings,
-  resolverAccess: CACHE_KEYS.resolverAccess,
+  lists: CACHE_KEYS.lists,
+  devices: CACHE_KEYS.devices,
+  rules: CACHE_KEYS.rules,
 };
 
 function readCache<T>(key: string): T | null {
@@ -65,17 +71,19 @@ type Loader = { field: keyof ControlPlaneSnapshot; load: (signal: AbortSignal) =
 
 /** Everything, used on first paint, manual refresh and after every mutation. */
 const FULL_LOADERS: Loader[] = [
-  { field: "dashboard", load: (signal) => api.dashboard({ signal }) },
+  { field: "overview", load: (signal) => api.overview({ signal }) },
   { field: "settings", load: (signal) => api.settings({ signal }) },
-  { field: "resolverAccess", load: (signal) => api.resolverAccess({ signal }) },
+  { field: "lists", load: (signal) => api.lists({ signal }) },
+  { field: "devices", load: (signal) => api.devices({ signal }) },
+  { field: "rules", load: (signal) => api.rules(undefined, { signal }) },
 ];
 
 /**
- * The poll set. Only the dashboard is genuinely live; settings and the
- * resolver-access report (which shells out to `hostname` on the appliance)
- * refresh on mount, on demand, and after any mutation.
+ * The poll set. Only the overview moves on its own; lists, devices, rules and
+ * the env-only settings change when the operator changes them, so they refresh
+ * on mount, on demand and after every mutation instead of every five seconds.
  */
-const LIVE_FIELDS = new Set<keyof ControlPlaneSnapshot>(["dashboard"]);
+const LIVE_FIELDS = new Set<keyof ControlPlaneSnapshot>(["overview"]);
 const LIVE_LOADERS = FULL_LOADERS.filter((loader) => LIVE_FIELDS.has(loader.field));
 
 export function CogwheelProvider({ children }: { children: React.ReactNode }) {

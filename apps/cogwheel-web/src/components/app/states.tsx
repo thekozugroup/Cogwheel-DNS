@@ -124,43 +124,6 @@ export function LoadingSkeleton({
   );
 }
 
-/**
- * Guards a region that renders an `EmptyState` when it has no rows.
- *
- * An empty state must mean "there is nothing", never "we don't know yet" or
- * "the fetch failed" — asserting a household has zero block profiles while the
- * first poll is still in flight is a lie the operator has no way to detect.
- * The precedence here is deliberately identical to `DataTable`'s so the two
- * behave the same way on the same screen.
- */
-export function AsyncRegion({
-  loading,
-  error = null,
-  isEmpty,
-  onRetry,
-  errorTitle = "Could not load this section",
-  skeleton = "text",
-  skeletonRows,
-  empty,
-  children,
-}: {
-  loading: boolean;
-  error?: string | null;
-  isEmpty: boolean;
-  onRetry?: () => void;
-  errorTitle?: string;
-  skeleton?: "table" | "cards" | "text";
-  skeletonRows?: number;
-  /** Rendered only once loading has finished without error and there is nothing. */
-  empty: React.ReactNode;
-  children: React.ReactNode;
-}) {
-  if (loading && isEmpty) return <LoadingSkeleton rows={skeletonRows} variant={skeleton} />;
-  if (error && isEmpty) return <ErrorState detail={error} onRetry={onRetry} title={errorTitle} />;
-  if (isEmpty) return <>{empty}</>;
-  return <>{children}</>;
-}
-
 /** Banner for degraded-but-usable states, e.g. a failed poll over cached data. */
 export function NoticeBanner({
   tone = "warn",

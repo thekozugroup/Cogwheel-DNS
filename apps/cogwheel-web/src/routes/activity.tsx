@@ -1,129 +1,309 @@
 import React from "react";
-import { ActivityIcon, PauseIcon, PlayIcon, RadioIcon, Trash2Icon } from "lucide-react";
-import { formatCount, formatTime } from "@/lib/format";
-import { ACTIVITY_BUFFER_LIMIT } from "@/lib/constants";
-import { useEventStream, type ActivityRow } from "@/hooks/use-event-stream";
+import { useNavigate } from "react-router-dom";
+import { ActivityIcon, Trash2Icon } from "lucide-react";
+import { api, errorMessage, type QueryRow, type StreamQueryEvent } from "@/lib/api";
+import { checkSentence, qtypeLabel, reasonLabel } from "@/lib/derive";
+import { formatClock, formatCount } from "@/lib/format";
+import { notify } from "@/lib/toast";
+import { ACTIVITY_BUFFER_LIMIT, ACTIVITY_PAGE_SIZE } from "@/lib/constants";
 import { useCogwheel } from "@/data/context";
+import { useQueryStream } from "@/hooks/use-event-stream";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
+import { SegmentGroup, SegmentGroupItem, SegmentGroupItemText } from "@/components/ui/segment-group";
 import { PageHeader, PageSections, PageShell } from "@/components/app/page";
 import { SectionCard } from "@/components/app/section-card";
 import { DataTable, type Column } from "@/components/app/data-table";
 import { SelectField } from "@/components/app/select-field";
 import { TextField } from "@/components/app/text-field";
-import { EmptyState, NoticeBanner } from "@/components/app/states";
-import { StatusIndicator, StatusPill } from "@/components/app/status-indicator";
+import { RowMenu } from "@/components/app/row-menu";
+import { StatusPill } from "@/components/app/status-indicator";
+import { ConfirmDialog } from "@/components/app/confirm-dialog";
+import { NoticeBanner } from "@/components/app/states";
 
-type VerdictFilter = "all" | "blocked" | "allowed";
+type Verdict = "all" | "blocked" | "allowed";
 
-const STREAM_TONE = {
-  open: { tone: "good" as const, label: "Live", detail: "Receiving events as they happen." },
-  connecting: { tone: "idle" as const, label: "Connecting", detail: "Opening the event stream…" },
-  reconnecting: {
-    tone: "warn" as const,
-    label: "Reconnecting",
-    detail: "The stream dropped. Retrying with a growing delay.",
-  },
-  paused: { tone: "idle" as const, label: "Paused", detail: "New rows are buffered until you resume." },
-};
+/** A log row and a live frame rendered as one thing. Live frames have no log id. */
+type Row = Omit<QueryRow, "id"> & { key: string };
+
+let liveSequence = 0;
+
+function fromFrame(frame: StreamQueryEvent): Row {
+  liveSequence += 1;
+  return {
+    key: `live-${liveSequence}`,
+    ts: frame.ts,
+    client: frame.client,
+    device_id: null,
+    device_name: frame.deviceName,
+    domain: frame.domain,
+    qtype: frame.qtype,
+    blocked: frame.blocked,
+    reason: frame.reason,
+    list: frame.list,
+  };
+}
 
 export function ActivityScreen() {
-  const { data } = useCogwheel();
-  const [paused, setPaused] = React.useState(false);
-  const [verdict, setVerdict] = React.useState<VerdictFilter>("all");
+  const { data, mutate, reload } = useCogwheel();
+  const navigate = useNavigate();
+
+  const [live, setLive] = React.useState(true);
   const [device, setDevice] = React.useState("all");
+  const [verdict, setVerdict] = React.useState<Verdict>("all");
   const [search, setSearch] = React.useState("");
 
-  const stream = useEventStream(paused);
+  const [rows, setRows] = React.useState<Row[]>([]);
+  const [nextBefore, setNextBefore] = React.useState<number | null>(null);
+  const [logging, setLogging] = React.useState(true);
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState<string | null>(null);
+  const [clearing, setClearing] = React.useState(false);
+  const [why, setWhy] = React.useState<string | null>(null);
 
-  const clients = React.useMemo(() => {
-    const seen = new Map<string, string>();
-    for (const device of data.settings.devices) seen.set(device.ip_address, device.name);
-    for (const row of stream.rows) {
-      if (!seen.has(row.client)) seen.set(row.client, row.deviceName ?? row.client);
+  const filters = React.useMemo(
+    () => ({
+      client: device !== "all" && device !== "unnamed" ? device : undefined,
+      unnamed: device === "unnamed" ? true : undefined,
+      blocked: verdict === "all" ? undefined : verdict === "blocked",
+      q: search.trim() || undefined,
+    }),
+    [device, search, verdict],
+  );
+
+  // History reload. Debounced because the search field drives it keystroke by
+  // keystroke, and every filter is answered by the server, not in the browser.
+  React.useEffect(() => {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      setLoading(true);
+      api
+        .queries({ ...filters, limit: ACTIVITY_PAGE_SIZE }, { signal: controller.signal })
+        .then((page) => {
+          setRows(page.rows.map((row) => ({ ...row, key: `log-${row.id}` })));
+          setNextBefore(page.next_before);
+          setLogging(page.logging);
+          setError(null);
+        })
+        .catch((cause) => {
+          if (cause instanceof DOMException && cause.name === "AbortError") return;
+          setError(errorMessage(cause));
+        })
+        .finally(() => setLoading(false));
+    }, 250);
+
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [filters]);
+
+  const onFrame = React.useCallback(
+    (frame: StreamQueryEvent) => {
+      if (filters.client && frame.client !== filters.client) return;
+      if (filters.blocked !== undefined && frame.blocked !== filters.blocked) return;
+      if (filters.q && !frame.domain.toLowerCase().includes(filters.q.toLowerCase())) return;
+
+      setRows((current) => {
+        // The writer flushes to SQLite every 5 s, so a frame and its log row can
+        // both arrive; the newest 50 rows are the only window where they overlap.
+        const duplicate = current
+          .slice(0, 50)
+          .some((row) => row.ts === frame.ts && row.client === frame.client && row.domain === frame.domain);
+        if (duplicate) return current;
+        return [fromFrame(frame), ...current].slice(0, ACTIVITY_BUFFER_LIMIT);
+      });
+    },
+    [filters],
+  );
+
+  const stream = useQueryStream(live, onFrame);
+
+  const loadOlder = async () => {
+    if (nextBefore === null) return;
+    try {
+      const page = await api.queries({ ...filters, before: nextBefore, limit: ACTIVITY_PAGE_SIZE });
+      setRows((current) => [...current, ...page.rows.map((row) => ({ ...row, key: `log-${row.id}` }))]);
+      setNextBefore(page.next_before);
+    } catch (cause) {
+      notify.error("Could not load older rows", errorMessage(cause));
     }
-    return [...seen.entries()];
-  }, [data.settings.devices, stream.rows]);
+  };
 
-  const filtered = React.useMemo(() => {
-    const needle = search.trim().toLowerCase();
-    return stream.rows.filter((row) => {
-      if (device !== "all" && row.client !== device) return false;
-      if (verdict === "blocked" && !row.blocked) return false;
-      if (verdict === "allowed" && row.blocked) return false;
-      if (needle && !row.domain.toLowerCase().includes(needle)) return false;
-      return true;
+  const clearLog = async () => {
+    const result = await mutate({
+      key: "clear-log",
+      action: () => api.clearQueries(),
+      after: "light",
+      successTitle: "Query log cleared",
+      successDetail: (outcome) => `${formatCount(outcome.deleted)} rows deleted.`,
+      failureTitle: "Could not clear the log",
     });
-  }, [device, search, stream.rows, verdict]);
+    if (result) {
+      setRows([]);
+      setNextBefore(null);
+    }
+  };
 
-  const streamColumns: Column<ActivityRow>[] = [
+  const addRule = (domain: string, action: "allow" | "block", deviceId?: string) =>
+    mutate({
+      key: `rule-${domain}`,
+      action: () => api.createRule({ domain, action, device_id: deviceId }),
+      successTitle: action === "allow" ? "Allow rule saved" : "Block rule saved",
+      successDetail: domain,
+      failureTitle: "Could not save the rule",
+    });
+
+  const explain = async (row: Row) => {
+    try {
+      setWhy(checkSentence(await api.check(row.domain, row.client)));
+    } catch (cause) {
+      notify.error("Could not check that domain", errorMessage(cause));
+    }
+  };
+
+  const columns: Column<Row>[] = [
     {
-      key: "time",
+      key: "ts",
       header: "Time",
-      render: (row) => <span className="tabular text-muted-foreground text-xs">{formatTime(row.observedAt)}</span>,
-      sortValue: (row) => row.observedAt,
+      render: (row) => <span className="tabular text-muted-foreground text-xs">{formatClock(row.ts)}</span>,
     },
     {
       key: "domain",
       header: "Domain",
-      render: (row) => <span className="font-mono text-xs">{row.domain}</span>,
+      render: (row) => (
+        <span className="font-mono text-xs" title={row.domain}>
+          {row.domain}
+        </span>
+      ),
     },
     {
-      key: "client",
+      key: "device",
       header: "Device",
-      render: (row) => row.deviceName ?? row.client,
-      hideOnStack: false,
+      render: (row) =>
+        row.device_name ? (
+          row.device_name
+        ) : (
+          <span className="flex items-center gap-2">
+            <span className="font-mono text-xs">{row.client}</span>
+            <span className="text-muted-foreground text-xs">unnamed</span>
+          </span>
+        ),
+    },
+    {
+      key: "qtype",
+      header: "Type",
+      hideBelow: "xl",
+      render: (row) => <span className="text-muted-foreground text-xs">{qtypeLabel(row.qtype)}</span>,
     },
     {
       key: "verdict",
       header: "Verdict",
-      render: (row) =>
-        row.blocked ? <StatusPill label="Blocked" tone="bad" /> : <StatusPill label="Allowed" tone="good" />,
+      render: (row) => (
+        <span className="flex flex-wrap items-center gap-2">
+          <StatusPill label={row.blocked ? "Blocked" : "Allowed"} tone={row.blocked ? "bad" : "good"} />
+          <span className="text-muted-foreground text-xs">{reasonLabel(row.reason, row.list)}</span>
+        </span>
+      ),
     },
     {
-      key: "detail",
-      header: "Detail",
+      key: "actions",
+      header: "",
       align: "end",
       hideOnStack: true,
-      render: (row) => <span className="text-muted-foreground text-xs">{row.reason ?? "—"}</span>,
+      render: (row) => {
+        const named = data.devices.devices.find((entry) => entry.ip_address === row.client);
+        return (
+          <RowMenu
+            actions={[
+              { value: "allow", label: "Allow for everyone" },
+              { value: "block", label: "Block for everyone" },
+              ...(named
+                ? [
+                    { value: "allow-device", label: `Allow on ${named.name}` },
+                    { value: "block-device", label: `Block on ${named.name}` },
+                  ]
+                : [{ value: "name", label: "Name this device…" }]),
+              { value: "why", label: "Why?" },
+            ]}
+            label={`Actions for ${row.domain}`}
+            onSelect={(value) => {
+              if (value === "allow") void addRule(row.domain, "allow");
+              else if (value === "block") void addRule(row.domain, "block");
+              else if (value === "allow-device") void addRule(row.domain, "allow", named?.id);
+              else if (value === "block-device") void addRule(row.domain, "block", named?.id);
+              else if (value === "name") navigate(`/devices?ip=${encodeURIComponent(row.client)}`);
+              else void explain(row);
+            }}
+          />
+        );
+      },
     },
   ];
-
-  const status = STREAM_TONE[stream.status];
 
   return (
     <PageShell>
       <PageHeader
-        actions={
-          <>
-            <Button onClick={() => setPaused((current) => !current)} variant={paused ? "default" : "outline"}>
-              {paused ? <PlayIcon aria-hidden /> : <PauseIcon aria-hidden />}
-              {paused ? "Resume stream" : "Pause stream"}
-            </Button>
-            <Button disabled={stream.rows.length === 0} onClick={stream.clear} variant="outline">
-              <Trash2Icon aria-hidden />
-              Clear
-            </Button>
-          </>
-        }
-        description="Every query the resolver answers, streamed live. The buffer holds the most recent 500 rows."
+        description="Every query the resolver answered, newest first."
         title="Activity"
       />
 
       <PageSections>
-        {stream.error && stream.status === "reconnecting" ? (
-          <NoticeBanner detail={stream.error} title="Live stream unavailable" tone="warn" />
+        {logging ? null : (
+          <NoticeBanner
+            detail="Only the live stream is shown. Set a non-zero value and restart to keep history."
+            title="Query logging is off (COGWHEEL_RETENTION__HISTORY_DAYS=0)"
+            tone="warn"
+          />
+        )}
+
+        {why ? (
+          <NoticeBanner
+            actions={
+              <Button onClick={() => setWhy(null)} size="sm" variant="outline">
+                Dismiss
+              </Button>
+            }
+            title={why}
+            tone="neutral"
+          />
         ) : null}
 
         <SectionCard
-          actions={<StatusIndicator description={status.detail} label={status.label} tone={status.tone} />}
-          description={`Showing ${formatCount(filtered.length)} of ${formatCount(stream.rows.length)} buffered rows (cap ${ACTIVITY_BUFFER_LIMIT}).`}
-          title="Live query stream"
+          actions={
+            <span className="flex items-center gap-2 text-sm">
+              <Switch
+                aria-label="Live"
+                checked={live}
+                onCheckedChange={(details) => setLive(details.checked)}
+              />
+              Live
+              {live ? (
+                <span className="text-muted-foreground text-xs">
+                  {stream.status === "open" ? "connected" : stream.status}
+                </span>
+              ) : null}
+            </span>
+          }
+          description={`${formatCount(rows.length)} rows shown.`}
+          footer={
+            <div className="flex flex-wrap items-center gap-2">
+              <Button disabled={nextBefore === null} onClick={() => void loadOlder()} variant="outline">
+                Load older
+              </Button>
+              <Button onClick={() => setClearing(true)} variant="destructive">
+                <Trash2Icon aria-hidden />
+                Clear log
+              </Button>
+            </div>
+          }
+          title="Queries"
         >
-          <div className="mb-4 grid gap-3 sm:grid-cols-3">
+          <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             <TextField
               label="Domain contains"
               onChange={setSearch}
-              placeholder="Filter by domain"
+              placeholder="example.com"
               searchTarget
               value={search}
             />
@@ -132,64 +312,66 @@ export function ActivityScreen() {
               onChange={setDevice}
               options={[
                 { value: "all", label: "All devices" },
-                ...clients.map(([ip, name]) => ({
-                  value: ip,
-                  label: name === ip ? ip : `${name} (${ip})`,
+                ...data.devices.devices.map((entry) => ({
+                  value: entry.ip_address,
+                  label: `${entry.name} (${entry.ip_address})`,
                 })),
+                { value: "unnamed", label: "Unnamed clients" },
               ]}
               value={device}
             />
-            <SelectField
-              label="Verdict"
-              onChange={(next) => setVerdict(next as VerdictFilter)}
-              options={[
-                { value: "all", label: "All verdicts" },
-                { value: "blocked", label: "Blocked only" },
-                { value: "allowed", label: "Allowed only" },
-              ]}
-              value={verdict}
-            />
+            <div className="flex flex-col justify-end gap-2">
+              <span className="font-medium text-foreground text-sm">Verdict</span>
+              <SegmentGroup
+                className="rounded-lg border border-border p-0.5"
+                onValueChange={(details) => {
+                  if (details.value) setVerdict(details.value as Verdict);
+                }}
+                value={verdict}
+              >
+                {(["all", "blocked", "allowed"] as const).map((option) => (
+                  <SegmentGroupItem className="flex-1 px-3 py-1.5" key={option} value={option}>
+                    <SegmentGroupItemText className="text-sm capitalize">{option}</SegmentGroupItemText>
+                  </SegmentGroupItem>
+                ))}
+              </SegmentGroup>
+            </div>
           </div>
 
-          {paused && stream.pendingCount > 0 ? (
-            <NoticeBanner
-              actions={
-                <Button onClick={() => setPaused(false)} size="sm" variant="outline">
-                  Resume and merge
-                </Button>
-              }
-              className="mb-4"
-              detail="They will be merged into the list when you resume."
-              title={`${formatCount(stream.pendingCount)} row(s) arrived while paused`}
-              tone="neutral"
-            />
+          {stream.error && live ? (
+            <NoticeBanner className="mb-4" title={stream.error} tone="warn" />
           ) : null}
 
-          {/* Announced politely so a screen reader is told about new rows
-              without the list stealing focus mid-read. */}
-          <div aria-label="Live query stream" aria-live="polite" role="log">
-            {stream.rows.length === 0 && stream.status !== "reconnecting" ? (
-              <EmptyState
-                description="Queries appear the moment a device resolves through Cogwheel. If nothing arrives, check the connection instructions on Overview."
-                icon={RadioIcon}
-                title="Waiting for the first query"
-              />
-            ) : (
-              <DataTable
-                columns={streamColumns}
-                stackBelow="xl"
-                empty={{
-                  icon: ActivityIcon,
-                  title: "No rows match these filters",
-                  description: "Widen the domain filter, device or verdict to see buffered traffic.",
-                }}
-                rowKey={(row) => row.id}
-                rows={filtered}
-              />
-            )}
+          <div aria-live="polite" role="log">
+            <DataTable
+              columns={columns}
+              empty={{
+                icon: ActivityIcon,
+                title: "No queries yet",
+                description:
+                  "Point a device's DNS at the address on Overview, then reload a page on it — the queries land here within seconds.",
+              }}
+              error={error}
+              loading={loading}
+              onRetry={() => void reload()}
+              rowKey={(row) => row.key}
+              rows={rows}
+              stackBelow="2xl"
+            />
           </div>
         </SectionCard>
       </PageSections>
+
+      <ConfirmDialog
+        confirmLabel="Clear log"
+        consequence="The 24-hour counters on Overview and Devices are kept — they are stored separately from the log."
+        description="Every stored query row is deleted. This cannot be undone."
+        destructive
+        onConfirm={clearLog}
+        onOpenChange={setClearing}
+        open={clearing}
+        title="Clear the query log?"
+      />
     </PageShell>
   );
 }

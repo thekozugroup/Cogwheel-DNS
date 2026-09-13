@@ -1,0 +1,4 @@
+# Python bytecode caches, and this directory's own output -- the oisd-small.txt
+# fetched per the README, and whatever run.py writes to --out/--db.
+__pycache__/
+*.pyc

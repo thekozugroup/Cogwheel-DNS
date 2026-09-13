@@ -24,11 +24,12 @@ export function StatTile({
 }: {
   label: string;
   value: React.ReactNode;
-  delta?: string;
+  /** Nodes are allowed so a tile can link onward without a second row. */
+  delta?: React.ReactNode;
   tone?: StatTone;
   /** The word behind the dot. Required for any tone other than neutral. */
   toneLabel?: string;
-  hint?: string;
+  hint?: React.ReactNode;
   footer?: React.ReactNode;
   className?: string;
 }) {

@@ -16,8 +16,8 @@ const ActivityScreen = React.lazy(() =>
 const DevicesScreen = React.lazy(() =>
   import("@/routes/devices").then((module) => ({ default: module.DevicesScreen })),
 );
-const ProtectionScreen = React.lazy(() =>
-  import("@/routes/protection").then((module) => ({ default: module.ProtectionScreen })),
+const ListsScreen = React.lazy(() =>
+  import("@/routes/lists").then((module) => ({ default: module.ListsScreen })),
 );
 const SettingsScreen = React.lazy(() =>
   import("@/routes/settings").then((module) => ({ default: module.SettingsScreen })),
@@ -60,10 +60,10 @@ export function App() {
         <Route
           element={
             <Lazy>
-              <ProtectionScreen />
+              <ListsScreen />
             </Lazy>
           }
-          path="protection"
+          path="lists"
         />
         <Route
           element={

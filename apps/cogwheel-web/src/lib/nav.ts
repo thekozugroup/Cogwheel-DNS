@@ -1,4 +1,4 @@
-import { ActivityIcon, LaptopIcon, LayoutDashboardIcon, SettingsIcon, ShieldIcon } from "lucide-react";
+import { ActivityIcon, LaptopIcon, LayoutDashboardIcon, ListIcon, SettingsIcon } from "lucide-react";
 import type React from "react";
 
 export type NavItem = {
@@ -27,7 +27,7 @@ export const PRIMARY_NAV: NavItem[] = [
     shortcut: "⌘2",
     digit: "2",
     icon: ActivityIcon,
-    description: "Live query stream",
+    description: "Every query, live or from the log",
   },
   {
     to: "/devices",
@@ -35,15 +35,15 @@ export const PRIMARY_NAV: NavItem[] = [
     shortcut: "⌘3",
     digit: "3",
     icon: LaptopIcon,
-    description: "Named devices and per-device policy",
+    description: "Names by IP, per-device lists and rules",
   },
   {
-    to: "/protection",
-    label: "Protection",
+    to: "/lists",
+    label: "Lists",
     shortcut: "⌘4",
     digit: "4",
-    icon: ShieldIcon,
-    description: "Blocklists and block profiles",
+    icon: ListIcon,
+    description: "Subscriptions and household rules",
   },
   {
     to: "/settings",
@@ -51,8 +51,6 @@ export const PRIMARY_NAV: NavItem[] = [
     shortcut: "⌘5",
     digit: "5",
     icon: SettingsIcon,
-    description: "What the appliance stores, and where the rest is configured",
+    description: "How the appliance is configured",
   },
 ];
-
-export const ALL_NAV = PRIMARY_NAV;

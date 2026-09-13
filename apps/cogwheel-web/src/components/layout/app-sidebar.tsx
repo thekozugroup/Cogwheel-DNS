@@ -1,5 +1,5 @@
 import { NavLink, useLocation } from "react-router-dom";
-import { ActivityIcon, CogIcon, HardDriveIcon } from "lucide-react";
+import { ActivityIcon, CogIcon, ListIcon } from "lucide-react";
 import { PRIMARY_NAV, type NavItem } from "@/lib/nav";
 import { formatCount } from "@/lib/format";
 import { protectionState } from "@/lib/derive";
@@ -48,16 +48,18 @@ function NavRow({ item, onNavigate }: { item: NavItem; onNavigate: () => void })
 }
 
 export function AppSidebar() {
-  const { data, error, phase } = useCogwheel();
+  const { data, error, lastUpdatedAt } = useCogwheel();
   const { isMobile, setOpenMobile } = useSidebar();
 
   const closeOnMobile = () => {
     if (isMobile) setOpenMobile(false);
   };
 
-  const offline = Boolean(error) && phase === "ready" && data.dashboard.protection_status === "Loading";
-  const state = protectionState(data.dashboard, offline);
-  const snapshot = data.dashboard.runtime;
+  // "Unreachable" means we have never had an answer, not that one poll missed;
+  // a single failed poll is the StaleBanner's job, not the status line's.
+  const offline = Boolean(error) && lastUpdatedAt === null;
+  const state = protectionState(data.overview.protection.paused_until, offline);
+  const day = data.overview.last_24h;
 
   const statusVariant =
     state.tone === "good"
@@ -106,11 +108,11 @@ export function AppSidebar() {
           </p>
           <p className="tabular flex items-center gap-2 text-muted-foreground text-xs">
             <ActivityIcon aria-hidden className="size-3.5" />
-            {formatCount(snapshot.queries_total)} queries · {formatCount(snapshot.blocked_total)} blocked
+            {formatCount(day.queries)} queries · {formatCount(day.blocked)} blocked (24 h)
           </p>
           <p className="tabular flex items-center gap-2 text-muted-foreground text-xs">
-            <HardDriveIcon aria-hidden className="size-3.5" />
-            {formatCount(data.dashboard.enabled_source_count)} enabled blocklists
+            <ListIcon aria-hidden className="size-3.5" />
+            {formatCount(data.overview.lists.enabled)} enabled lists
           </p>
         </div>
 

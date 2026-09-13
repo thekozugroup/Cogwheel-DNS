@@ -1,11 +1,13 @@
 import { createContext, useContext } from "react";
-import type { DashboardSummary, ResolverAccessStatus, SettingsSummary } from "@/lib/api";
+import type { DeviceList, ListCatalogue, Overview, Rule, Settings } from "@/lib/api";
 
 /** One snapshot of everything the control plane exposes as read state. */
 export type ControlPlaneSnapshot = {
-  dashboard: DashboardSummary;
-  settings: SettingsSummary;
-  resolverAccess: ResolverAccessStatus;
+  overview: Overview;
+  settings: Settings;
+  lists: ListCatalogue;
+  devices: DeviceList;
+  rules: Rule[];
 };
 
 export type LoadPhase = "loading" | "ready";

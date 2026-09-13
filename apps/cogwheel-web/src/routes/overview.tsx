@@ -1,107 +1,76 @@
 import React from "react";
-import { ActivityIcon, HardDriveIcon, PlayIcon, RotateCwIcon, ShieldOffIcon } from "lucide-react";
-import { api } from "@/lib/api";
-import { blockedRatio, protectionState } from "@/lib/derive";
-import { formatCompact, formatCount, formatDuration, formatPercent } from "@/lib/format";
+import { Link } from "react-router-dom";
+import { CheckIcon, CopyIcon, PlayIcon, RotateCwIcon, ShieldOffIcon } from "lucide-react";
+import { api, type DomainCount } from "@/lib/api";
+import { checkSentence, looksIpv6, protectionState } from "@/lib/derive";
+import { formatCompact, formatCount, formatDuration, formatShare } from "@/lib/format";
+import { notify } from "@/lib/toast";
+import { cn } from "@/lib/utils";
 import { useCogwheel } from "@/data/context";
 import { Button } from "@/components/ui/button";
+import { Status } from "@/components/ui/status";
 import { PageHeader, PageSections, PageShell } from "@/components/app/page";
 import { SectionCard } from "@/components/app/section-card";
 import { StatTile } from "@/components/app/stat-tile";
-import { StatusIndicator } from "@/components/app/status-indicator";
-import { DataTable, type Column } from "@/components/app/data-table";
-import { EmptyState, LoadingSkeleton } from "@/components/app/states";
+import { RowMenu } from "@/components/app/row-menu";
+import { EmptyState, LoadingSkeleton, NoticeBanner } from "@/components/app/states";
 import { usePauseCountdown, useProtectionActions } from "@/hooks/use-protection";
-import type { DomainInsightEntry } from "@/lib/api";
 
-const IPV4 = /^\d{1,3}(\.\d{1,3}){3}$/;
-
-/** Same heuristic the previous UI used: a colon and no dot means IPv6. */
-const looksIpv6 = (target: string) => target.includes(":") && !target.includes(".");
+/** Three hints cover every platform in the house; more is a manual, not a page. */
+const PLATFORMS = [
+  { name: "Android", steps: "Wi-Fi settings → modify network → IP settings Static → DNS 1." },
+  { name: "iPhone, iPad and Mac", steps: "Wi-Fi → the info icon → Configure DNS → Manual." },
+  { name: "Windows", steps: "Network & Internet → Hardware properties → DNS server assignment → Edit." },
+];
 
 export function OverviewScreen() {
-  const { data, phase, error, busy, mutate, reload } = useCogwheel();
+  const { data, phase, busy, mutate, reload } = useCogwheel();
   const { resume } = useProtectionActions();
   const remaining = usePauseCountdown();
+  const [why, setWhy] = React.useState<string | null>(null);
 
+  const overview = data.overview;
+  const day = overview.last_24h;
+  const state = protectionState(overview.protection.paused_until, false);
   const loading = phase === "loading";
-  const dashboard = data.dashboard;
-  const snapshot = dashboard.runtime;
-  const state = protectionState(dashboard, false);
 
-  const domainColumns = (countHeader: string, tone: "neutral" | "blocked"): Column<DomainInsightEntry>[] => [
-    {
-      key: "domain",
-      header: "Domain",
-      render: (row) => <span className="font-mono text-xs">{row.domain}</span>,
-      sortValue: (row) => row.domain,
-    },
-    {
-      key: "count",
-      header: countHeader,
-      align: "end",
-      render: (row) => (
-        <span className={tone === "blocked" ? "tabular font-medium" : "tabular"}>
-          {formatCount(row.count)}
-        </span>
-      ),
-      sortValue: (row) => row.count,
-    },
-  ];
-
-  const refreshSources = () =>
+  const refreshLists = () =>
     mutate({
-      key: "refresh-sources",
-      action: () => api.refreshSources(),
-      successTitle: "Sources refreshed",
-      successDetail: (result) => result.notes[0] ?? `Outcome: ${result.outcome}.`,
-      failureTitle: "Could not refresh sources",
+      key: "refresh-lists",
+      action: () => api.refreshLists(),
+      successTitle: "Lists refreshed",
+      successDetail: (results) => `${results.length} list(s) checked.`,
+      failureTitle: "Could not refresh lists",
     });
 
-  // If the server reports no advertised targets, fall back to whatever address the operator is
-  // already reaching this page on — that is almost always the resolver's address too, and it is
-  // always true for the person reading it, unlike a hardcoded hostname.
-  const primaryTarget =
-    data.resolverAccess.dns_targets[0] ?? window.location.hostname;
-  const ipv4Target = data.resolverAccess.dns_targets.find((target) => IPV4.test(target)) ?? primaryTarget;
-  const ipv6Target = data.resolverAccess.dns_targets.find(looksIpv6);
+  const addRule = (domain: string, action: "allow" | "block") =>
+    mutate({
+      key: `rule-${domain}`,
+      action: () => api.createRule({ domain, action }),
+      successTitle: action === "allow" ? "Allowed for everyone" : "Blocked for everyone",
+      successDetail: `${domain} — the rule beats every list.`,
+      failureTitle: "Could not save the rule",
+    });
 
-  const platforms = [
-    {
-      platform: "Android",
-      target: ipv4Target,
-      instructions: ipv6Target
-        ? "Wi-Fi settings → modify network → IP settings Static, then set DNS 1. Also add the IPv6 resolver below on dual-stack networks. Do not use Android Private DNS unless Cogwheel is serving DNS-over-TLS."
-        : "Wi-Fi settings → modify network → IP settings Static, then set DNS 1. Do not use Android Private DNS unless Cogwheel is serving DNS-over-TLS.",
-    },
-    {
-      platform: "iPhone / iPad",
-      target: primaryTarget,
-      instructions: "Wi-Fi → tap the info icon → Configure DNS → Manual.",
-    },
-    {
-      platform: "Mac",
-      target: primaryTarget,
-      instructions: "System Settings → Wi-Fi → Details → DNS, then add this resolver.",
-    },
-    {
-      platform: "Windows",
-      target: primaryTarget,
-      instructions: "Network & Internet → Hardware properties → DNS server assignment → Edit.",
-    },
-  ];
+  const explain = async (domain: string) => {
+    try {
+      setWhy(checkSentence(await api.check(domain)));
+    } catch {
+      notify.error("Could not check that domain", "The control plane did not answer.");
+    }
+  };
 
   return (
     <PageShell>
       <PageHeader
         actions={
           <>
-            <Button isLoading={busy === "refresh-sources"} onClick={() => void refreshSources()} variant="outline">
+            <Button isLoading={busy === "refresh-lists"} onClick={() => void refreshLists()} variant="outline">
               <RotateCwIcon aria-hidden />
-              Refresh sources
+              Refresh lists
             </Button>
             <Button onClick={() => void reload()} variant="outline">
-              Reload data
+              Reload
             </Button>
           </>
         }
@@ -116,7 +85,7 @@ export function OverviewScreen() {
           <div className="grid gap-6 sm:grid-cols-2 xl:grid-cols-4">
             <StatTile
               footer={
-                state.paused && remaining > 0 ? (
+                state.paused ? (
                   <Button
                     className="w-full"
                     isLoading={busy === "resume-runtime"}
@@ -125,161 +94,268 @@ export function OverviewScreen() {
                     variant="outline"
                   >
                     <PlayIcon aria-hidden />
-                    Resume now
+                    Resume
                   </Button>
                 ) : null
+              }
+              hint={
+                overview.lists.downloaded ? undefined : (
+                  <span className="flex items-center gap-1.5 text-warning-foreground">
+                    <Status size="sm" variant="warning" />
+                    Lists not downloaded yet
+                  </span>
+                )
               }
               label="Protection"
               tone={state.tone === "idle" ? "neutral" : state.tone}
               toneLabel={state.label}
-              value={
-                state.paused && remaining > 0 ? (
-                  <span className="tabular">Paused {formatDuration(remaining)}</span>
-                ) : (
-                  state.label
-                )
+              value={state.paused ? `Paused ${formatDuration(remaining)}` : "Protected"}
+            />
+            <StatTile
+              hint={`since last restart: ${formatCount(overview.runtime.queries_total)}`}
+              label="Queries (24 h)"
+              value={formatCompact(day.queries)}
+            />
+            <StatTile
+              delta={`${formatShare(day.blocked, day.queries)} of queries`}
+              label="Blocked (24 h)"
+              value={formatCompact(day.blocked)}
+            />
+            <StatTile
+              delta={
+                <Link className="hover:underline" to="/devices">
+                  {formatCount(day.named_devices)} named · {formatCount(day.unnamed_clients)} unnamed
+                </Link>
               }
-            />
-            <StatTile
-              delta={`${formatCount(data.settings.blocklists.length)} configured sources`}
-              label="Enabled sources"
-              value={formatCount(dashboard.enabled_source_count)}
-            />
-            <StatTile
-              delta={`${formatPercent(blockedRatio(dashboard), 2)} of ${formatCompact(snapshot.queries_total)} queries`}
-              hint="Observed by this node since it started"
-              label="Blocked queries"
-              value={formatCompact(snapshot.blocked_total)}
-            />
-            <StatTile
-              delta={`${formatCount(data.settings.devices.length)} named`}
-              hint="Currently visible to the control plane"
               label="Devices"
-              value={formatCount(dashboard.device_count)}
+              value={formatCount(day.active_clients)}
             />
           </div>
         )}
 
-        <div className="grid gap-6 xl:grid-cols-2">
-          <SectionCard
-            description="Busiest destinations seen by this resolver."
-            title="Top queried domains"
-          >
-            <DataTable
-              columns={domainColumns("Queries", "neutral")}
-              empty={{
-                icon: ActivityIcon,
-                title: "No query activity yet",
-                description:
-                  "Activity appears once devices begin sending traffic through Cogwheel. Check the connection instructions below.",
-              }}
-              error={error}
-              loading={loading}
-              onRetry={() => void reload()}
-              rowKey={(row) => row.domain}
-              rows={dashboard.domain_insights.top_queried_domains}
-            />
-          </SectionCard>
+        <SectionCard
+          description={`${formatCount(day.queries)} queries, ${formatCount(day.blocked)} blocked.`}
+          title="Last 24 hours"
+        >
+          <HourStrip buckets={day.per_hour} />
+        </SectionCard>
 
-          <SectionCard description="Where filtering is engaging most." title="Top blocked domains">
-            <DataTable
-              columns={domainColumns("Blocked", "blocked")}
-              empty={{
-                icon: ShieldOffIcon,
-                title: "Nothing blocked yet",
-                description:
-                  "When filtering engages, the busiest blocked destinations will appear here.",
-              }}
-              error={error}
-              loading={loading}
-              onRetry={() => void reload()}
-              rowKey={(row) => row.domain}
-              rows={dashboard.domain_insights.top_blocked_domains}
-            />
-          </SectionCard>
+        {why ? (
+          <NoticeBanner
+            actions={
+              <Button onClick={() => setWhy(null)} size="sm" variant="outline">
+                Dismiss
+              </Button>
+            }
+            title={why}
+            tone="neutral"
+          />
+        ) : null}
+
+        <div className="grid gap-6 xl:grid-cols-2">
+          <DomainCard
+            emptyTitle="Nothing blocked yet"
+            emptyDescription="Blocked destinations appear once devices resolve through Cogwheel."
+            onAllow={(domain) => void addRule(domain, "allow")}
+            onBlock={(domain) => void addRule(domain, "block")}
+            onWhy={(domain) => void explain(domain)}
+            rows={overview.top_blocked}
+            title="Top blocked"
+          />
+          <DomainCard
+            emptyTitle="No queries yet"
+            emptyDescription="Point a device at the address below and its traffic shows up here."
+            onAllow={(domain) => void addRule(domain, "allow")}
+            onBlock={(domain) => void addRule(domain, "block")}
+            onWhy={(domain) => void explain(domain)}
+            rows={overview.top_queried}
+            title="Top queried"
+          />
         </div>
 
         <SectionCard
-          description="Point a device's DNS setting at one of these addresses."
-          title="How to connect devices"
+          description="Set this as the DNS server on a device, or hand it out over DHCP."
+          title="Connect your devices"
         >
-          {data.resolverAccess.dns_targets.length === 0 ? (
-            <EmptyState
-              description="Resolver targets appear here once the control plane reports reachable DNS addresses."
-              icon={HardDriveIcon}
-              title="No resolver targets reported"
-            />
-          ) : (
-            <div className="space-y-5">
-              <dl className="grid gap-6 sm:grid-cols-2">
-                {data.resolverAccess.dns_targets.map((target) => (
-                  <div
-                    className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2"
-                    key={target}
-                  >
-                    <dt className="text-muted-foreground text-xs">
-                      {looksIpv6(target) ? "DNS server (IPv6)" : "DNS server"}
-                    </dt>
-                    <dd className="truncate font-mono text-foreground text-sm">{target}</dd>
-                  </div>
-                ))}
-              </dl>
-
-              {data.resolverAccess.notes.length > 0 ? (
-                <p className="text-muted-foreground text-sm">{data.resolverAccess.notes.join(" ")}</p>
-              ) : null}
-
-              <div className="space-y-2">
-                <h3 className="font-medium text-foreground text-sm">Per-platform steps</h3>
-                <ul className="grid gap-6 sm:grid-cols-2">
-                  {platforms.map((entry) => (
-                    <li className="rounded-lg border border-border p-3" key={entry.platform}>
-                      <p className="font-medium text-foreground text-sm">{entry.platform}</p>
-                      <p className="mt-1 text-muted-foreground text-sm">{entry.instructions}</p>
-                      <p className="mt-2 font-mono text-foreground text-xs">{entry.target}</p>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            </div>
-          )}
+          <Targets port={overview.connect.port} targets={overview.connect.targets} />
         </SectionCard>
-
-        <SectionCard description="Counters reported by the DNS runtime." title="Resolver summary">
-          <dl className="divide-y divide-border">
-            <SummaryRow label="Protection">
-              <StatusIndicator label={state.label} tone={state.tone} />
-            </SummaryRow>
-            <SummaryRow label="Cache hits">
-              <span className="tabular">{formatCount(snapshot.cache_hits_total)}</span>
-            </SummaryRow>
-            <SummaryRow label="Stale served">
-              <span className="tabular">{formatCount(snapshot.stale_served_total)}</span>
-            </SummaryRow>
-            <SummaryRow label="Upstream failures">
-              <span className="tabular">{formatCount(snapshot.upstream_failures_total)}</span>
-            </SummaryRow>
-          </dl>
-        </SectionCard>
-
-        <p className="text-muted-foreground text-xs">
-          {loading
-            ? "Loading control plane data…"
-            : `${formatCount(dashboard.enabled_source_count)} enabled blocklists and ${formatCount(
-                data.settings.devices.length,
-              )} named devices.`}
-          {error ? " (showing last-known values)" : null}
-        </p>
       </PageSections>
     </PageShell>
   );
 }
 
-function SummaryRow({ label, children }: { label: string; children: React.ReactNode }) {
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Twenty-four plain divs. A chart library is three hundred kilobytes to draw
+ * stacked bars with no axes, no tooltip and no interaction.
+ */
+function HourStrip({ buckets }: { buckets: { hour: number; queries: number; blocked: number }[] }) {
+  if (buckets.length === 0) {
+    return <p className="text-muted-foreground text-sm">No traffic recorded in the last 24 hours.</p>;
+  }
+
+  const peak = Math.max(1, ...buckets.map((bucket) => bucket.queries));
+
   return (
-    <div className="flex items-center justify-between gap-3 py-2">
-      <dt className="text-muted-foreground text-sm">{label}</dt>
-      <dd className="text-foreground text-sm">{children}</dd>
+    <div>
+      <div className="flex h-32 items-end gap-1">
+        {buckets.map((bucket) => {
+          const total = Math.round((bucket.queries / peak) * 100);
+          const blocked = bucket.queries === 0 ? 0 : Math.round((bucket.blocked / bucket.queries) * 100);
+
+          return (
+            <div
+              className="flex h-full flex-1 flex-col justify-end"
+              key={bucket.hour}
+              title={`${formatCount(bucket.queries)} queries, ${formatCount(bucket.blocked)} blocked`}
+            >
+              {/* Blocked is stacked at the foot of the hour's own bar, so the
+                  dark portion reads as a share of that hour, not of the day. */}
+              <div
+                className="flex w-full flex-col justify-end overflow-hidden rounded-sm bg-neutral-200 dark:bg-neutral-700"
+                style={{ height: `${Math.max(total, bucket.queries > 0 ? 2 : 1)}%` }}
+              >
+                <div
+                  className="w-full bg-neutral-900 dark:bg-neutral-100"
+                  style={{ height: `${blocked}%` }}
+                />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="mt-2 flex gap-1">
+        {buckets.map((bucket, index) => (
+          <span className="tabular flex-1 text-center text-muted-foreground text-xs" key={bucket.hour}>
+            {index % 6 === 0 ? new Date(bucket.hour * 1000).getHours() : ""}
+          </span>
+        ))}
+      </div>
+
+      <p className="mt-3 flex flex-wrap items-center gap-4 text-muted-foreground text-xs">
+        <span className="flex items-center gap-1.5">
+          <span className="size-2.5 rounded-sm bg-neutral-900 dark:bg-neutral-100" />
+          Blocked
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="size-2.5 rounded-sm bg-neutral-200 dark:bg-neutral-700" />
+          Answered
+        </span>
+      </p>
+    </div>
+  );
+}
+
+function DomainCard({
+  title,
+  rows,
+  emptyTitle,
+  emptyDescription,
+  onAllow,
+  onBlock,
+  onWhy,
+}: {
+  title: string;
+  rows: DomainCount[];
+  emptyTitle: string;
+  emptyDescription: string;
+  onAllow: (domain: string) => void;
+  onBlock: (domain: string) => void;
+  onWhy: (domain: string) => void;
+}) {
+  return (
+    <SectionCard title={title}>
+      {rows.length === 0 ? (
+        <EmptyState description={emptyDescription} icon={ShieldOffIcon} title={emptyTitle} />
+      ) : (
+        <ul className="divide-y divide-border">
+          {rows.map((row) => (
+            <li className="flex items-center gap-3 py-1.5" key={row.domain}>
+              <span className="min-w-0 flex-1 truncate font-mono text-xs" title={row.domain}>
+                {row.domain}
+              </span>
+              <span className="tabular shrink-0 text-sm">{formatCount(row.count)}</span>
+              <RowMenu
+                actions={[
+                  { value: "allow", label: "Allow for everyone" },
+                  { value: "block", label: "Block for everyone" },
+                  { value: "why", label: "Why?" },
+                ]}
+                label={`Actions for ${row.domain}`}
+                onSelect={(value) => {
+                  if (value === "allow") onAllow(row.domain);
+                  else if (value === "block") onBlock(row.domain);
+                  else onWhy(row.domain);
+                }}
+              />
+            </li>
+          ))}
+        </ul>
+      )}
+    </SectionCard>
+  );
+}
+
+function Targets({ targets, port }: { targets: string[]; port: number }) {
+  const [copied, setCopied] = React.useState<string | null>(null);
+
+  if (targets.length === 0) {
+    return (
+      <EmptyState
+        description="The appliance could not work out its own address. Set COGWHEEL_SERVER__ADVERTISED_DNS_TARGETS and restart."
+        icon={ShieldOffIcon}
+        title="No address to advertise"
+      />
+    );
+  }
+
+  const copy = async (target: string) => {
+    try {
+      await navigator.clipboard.writeText(target);
+      setCopied(target);
+      window.setTimeout(() => setCopied(null), 2_000);
+    } catch {
+      notify.error("Could not copy", "Select the address and copy it by hand.");
+    }
+  };
+
+  return (
+    <div className="space-y-5">
+      <ul className="grid gap-3 sm:grid-cols-2">
+        {targets.map((target) => (
+          <li
+            className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2"
+            key={target}
+          >
+            <span className="min-w-0">
+              <span className="block text-muted-foreground text-xs">
+                {looksIpv6(target) ? "IPv6" : "IPv4"} · port {port}
+              </span>
+              <span className="block truncate font-mono text-foreground text-sm">{target}</span>
+            </span>
+            <Button
+              aria-label={`Copy ${target}`}
+              className={cn("shrink-0")}
+              onClick={() => void copy(target)}
+              size="icon-sm"
+              variant="ghost"
+            >
+              {copied === target ? <CheckIcon aria-hidden /> : <CopyIcon aria-hidden />}
+            </Button>
+          </li>
+        ))}
+      </ul>
+
+      <ul className="grid gap-3 sm:grid-cols-3">
+        {PLATFORMS.map((platform) => (
+          <li className="rounded-lg border border-border p-3" key={platform.name}>
+            <p className="font-medium text-foreground text-sm">{platform.name}</p>
+            <p className="mt-1 text-muted-foreground text-sm">{platform.steps}</p>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
