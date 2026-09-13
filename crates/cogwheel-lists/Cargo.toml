@@ -17,4 +17,3 @@ tracing.workspace = true
 url.workspace = true
 uuid.workspace = true
 cogwheel-policy = { path = "../cogwheel-policy" }
-cogwheel-services = { path = "../cogwheel-services" }

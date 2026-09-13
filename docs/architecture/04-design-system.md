@@ -316,101 +316,52 @@ Cogwheel                         ← wordmark + cogwheel mark, links to Overview
   Overview            ⌘1
   Activity            ⌘2         ← live query stream
   Devices             ⌘3
-  Protection          ⌘4         ← blocklists, services, profiles
-  Classifier          ⌘5         ← Grease-AI
-  Insights            ⌘6         ← reports, top domains
+  Protection          ⌘4         ← blocklists and block profiles
+  Settings            ⌘5         ← read-only summary
 ─────────────────────────────
-  Settings            ⌘,
-  System                         ← diagnostics, sync, backup, audit
-─────────────────────────────
-  [status dot] Protection active
-  [theme toggle]  [⌘K hint]
+  [snooze control]  Protection active / paused for mm:ss
+  [theme toggle]
 ```
 
-Routes (`react-router-dom`, already a dependency):
+Routes (`react-router-dom`):
 
 | Route | Screen | Primary endpoints |
 | --- | --- | --- |
-| `/` | Overview | `GET /api/v1/dashboard`, `GET /api/v1/runtime/health` |
-| `/activity` | Live query stream | `GET /api/v1/events/stream` (SSE), `GET /api/v1/security-events` |
+| `/` | Overview | `GET /api/v1/dashboard`, `GET /api/v1/resolver-access`, `POST /api/v1/sources/refresh` |
+| `/activity` | Live query stream | `GET /api/v1/events/stream` (SSE) |
 | `/devices` | Devices | `GET/POST /api/v1/devices` |
-| `/protection` | Blocklists / services / profiles | `/api/v1/settings/blocklists*`, `/api/v1/services*`, `/api/v1/settings/profiles*`, `/api/v1/sources*` |
-| `/classifier` | Classifier | `/api/v1/classifier*` |
-| `/insights` | Reports | `GET /api/v1/dashboard`, `/api/v1/rulesets` |
-| `/settings` | Settings (grouped) | `/api/v1/settings`, notifications, upstream, threat-intel |
-| `/system` | Diagnostics, sync, backup, audit | `/api/v1/runtime*`, `/api/v1/sync*`, `/api/v1/backup*`, `/api/v1/audit-events`, `/api/v1/tailscale*`, `/api/v1/latency-budget`, `/api/v1/load-test` |
+| `/protection` | Blocklists and profiles | `GET /api/v1/settings`, `/api/v1/settings/blocklists*`, `/api/v1/settings/block-profiles*` |
+| `/settings` | Read-only summary | `GET /api/v1/settings` |
 
-**Nothing in `03-web-current.md`'s feature inventory may be dropped.** Every control in the old
-five-tab UI maps to a home above; work through that inventory explicitly and account for each item.
+The sidebar snooze control uses `POST /api/v1/runtime/pause` and `/resume`. The
+full contract for each endpoint is in `01-backend-api.md`; the screen-by-screen
+inventory is in `03-web-current.md`.
 
 ---
 
-## 5. New backend contract (classifier)
+## 5. Live stream contract
 
-The classifier rewrite (`crates/cogwheel-classifier`) changes the API. Implement the UI against
-this contract; the server side is being built to match.
-
-### `GET /api/v1/classifier`
+`GET /api/v1/events/stream` is a server-sent-events endpoint with one event
+name, `query`. Each frame is a `StreamQueryEvent` in camelCase:
 
 ```ts
-type ClassifierStatus = {
-  settings: { mode: "off" | "monitor" | "protect"; sensitivity: "low" | "balanced" | "high" };
-  model: {
-    version: number;
-    trainedAt: string;            // RFC3339
-    rocAuc: number;               // 0..1
-    prAuc: number;
-    residentBytes: number;
-    thresholds: { low: number; balanced: number; high: number };
-    falsePositiveRate: { low: number; balanced: number; high: number };
-    recall: { low: number; balanced: number; high: number };
-  };
-  stats: {
-    scored: number; cacheHits: number; cacheMisses: number;
-    dropped: number; blocked: number; protectedOverrides: number; cachedEntries: number;
-  };
-  activeThreshold: number;
+type StreamQueryEvent = {
+  domain: string;
+  client: string;              // source IP, or "unknown"
+  deviceName: string | null;   // reserved; the server sends null today
+  blocked: boolean;
+  reason: string | null;       // reserved; the server sends null today
+  observedAt: string;          // RFC 3339
 };
 ```
 
-### `POST /api/v1/classifier/settings`
-Body `{ mode, sensitivity }` → returns the updated `ClassifierStatus`.
-
-### `POST /api/v1/classifier/inspect`
-Body `{ domain: string }` →
-
-```ts
-type Inspection = {
-  domain: string;                 // normalised
-  probability: number;            // 0..1
-  protected: boolean;             // shielded by the allowlist
-  decision: "allow" | "block";
-  activeThreshold: number;
-  blocklistMatch: string | null;  // rule/source that already covers it, if any
-  contributions: { label: string; kind: "dense" | "ngram"; value: number }[];
-};
-```
-
-This powers the **"Why was this blocked?"** inspector. `contributions` are exact signed
-contributions to the score — render positive values as pushing toward "ad domain" and negative as
-pushing away, sorted by magnitude.
-
-### `GET /api/v1/classifier/detections?limit=50`
-Recent classifier detections: `{ domain, probability, decision, protected, observedAt, client }[]`.
-
-### `GET /api/v1/events/stream` (SSE)
-Server-sent events. Event names: `query`, `detection`, `health`. Reconnect with backoff; show a
-clear "reconnecting" state. Cap client-side buffer at 500 rows.
-
-### Honest first-sighting copy
-
-The classifier scores **asynchronously**. The first query for a new domain resolves before a
-verdict exists; enforcement begins on subsequent queries. The Classifier screen must say this
-plainly — do not imply real-time blocking of first contact.
-
-Likewise, surface the model's real numbers from `model.rocAuc` / `falsePositiveRate` rather than
-marketing language. The sensitivity selector should read, for each option, the *measured* false
-positive rate and recall.
+The server sends a `keep-alive` comment every 15 s, refuses the 33rd concurrent
+subscriber with 503, and drops frames for a subscriber that falls more than 256
+frames behind rather than slowing resolution. The client
+(`src/hooks/use-event-stream.ts`) manages the connection itself: reconnect with
+backoff (1 s → 30 s), show `connecting` / `open` / `reconnecting` / `paused`
+explicitly, buffer at most 500 rows, and hold new rows while paused so a frozen
+list can be read.
 
 ---
 
@@ -431,15 +382,14 @@ Build these once in `src/components/app/` and use them everywhere.
 | `ErrorState` | `{ title, detail?, onRetry }` |
 | `ConfirmDialog` | `{ title, description, confirmLabel, destructive?, onConfirm }` — must name the exact target |
 | `FormField` | `{ label, hint?, error?, children }` |
-| `MetricSparkline` | `{ data, tone? }` — monochrome |
 
 ---
 
 ## 7. Accessibility contract
 
 - Every interactive element has a visible focus ring: `focus-visible:ring-2 ring-[--ring] ring-offset-2`.
-- Full keyboard operation. Sidebar, tables, dialogs and the command palette are all reachable and
-  escapable by keyboard alone.
+- Full keyboard operation. Sidebar, tables and dialogs are all reachable and escapable by
+  keyboard alone.
 - **Colour is never the only signal.** A red dot is always accompanied by text ("Blocked") and/or a
   distinct icon. Screen-reader labels state the status in words.
 - Contrast: body text ≥ 4.5:1, large text ≥ 3:1, in both themes. The 400 accents are never used as
@@ -455,16 +405,14 @@ Build these once in `src/components/app/` and use them everywhere.
 
 | Feature | Behaviour |
 | --- | --- |
-| Command palette | `⌘K` / `Ctrl+K`. Navigate to any screen, run primary actions (pause protection, refresh lists, inspect a domain), search devices and blocklists. Built on Shark `command`. |
-| Domain inspector | Paste any domain → verdict, score, exact contributions, blocklist match, and an allow/block action. Reachable from the palette and from any domain row. |
-| Live activity | SSE stream with pause/resume, filter by device and by verdict, and click-through to the inspector. |
+| Live activity | SSE stream with pause/resume and filters by device, verdict and domain text. |
 | Snooze protection | Pause blocking for 5/15/60 minutes with a visible countdown in the sidebar and a one-click resume. Uses `POST /api/v1/runtime/pause` and `/resume`. |
 | Theme | Light / dark / system. Persisted to `localStorage`, applied via `data-theme` on `<html>` before first paint to avoid a flash. Do **not** use `next-themes`. |
 | Toasts | Every mutation confirms or reports failure, with the failure reason from the API. |
 | Optimistic updates | Toggles apply immediately and roll back visibly on error. |
 | Deep links | Every screen and every dialog worth sharing has a URL. |
-| Keyboard shortcuts | `⌘1..6` navigate, `⌘K` palette, `⌘,` settings, `/` focus search, `?` shortcut help. |
-| Offline resilience | Poll failures degrade to a banner, not a blank page; last-known data stays on screen and is marked stale. |
+| Keyboard shortcuts | `⌘1..5` navigate, `/` focuses the screen's search field. |
+| Offline behaviour | Poll failures degrade to a banner, not a blank page; last-known data stays on screen and is marked stale. |
 | Responsive | Works to 375px. Sidebar becomes a sheet; tables become stacked cards. No horizontal body scroll. |
 
 ---
@@ -476,5 +424,5 @@ Build these once in `src/components/app/` and use them everywhere.
 - No `tailwind.config.ts`, no PostCSS config, no `@radix-ui/*`, no `next-themes` remaining.
 - No chromatic value anywhere except `red-400`, `yellow-400`, `green-400`.
 - Every screen implements loading, empty, error and populated states.
-- Every feature in `03-web-current.md` has a home.
+- Every screen in `03-web-current.md` renders its loading, empty, error and populated states.
 - Sidebar navigation present and keyboard-operable.

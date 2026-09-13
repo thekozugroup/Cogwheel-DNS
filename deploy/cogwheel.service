@@ -7,10 +7,6 @@
 #
 # Expected layout (all created by scripts/install-native.sh):
 #   /usr/local/bin/cogwheel-server        the binary
-#   /usr/local/bin/.cogwheel_tailscale_state.json
-#                                         Tailscale exit-node rollback state.
-#                                         The server derives this path from its
-#                                         own location; see ReadWritePaths=.
 #   /usr/local/share/cogwheel/web         built web assets (COGWHEEL_WEB_DIST_DIR)
 #   /etc/cogwheel/cogwheel.env            configuration
 #   /var/lib/cogwheel                     SQLite database (StateDirectory)
@@ -62,24 +58,7 @@ NoNewPrivileges=yes
 # ProtectSystem=strict makes the entire filesystem hierarchy read-only.
 # StateDirectory= creates /var/lib/cogwheel owned by User=/Group= and makes it
 # writable -- that is where the database and everything else the server owns
-# lives.
-#
-# It is NOT the only writable path the server needs, despite what you would
-# expect from a unit this clean. The Tailscale exit-node endpoint
-# (POST /api/v1/tailscale/exit-node) saves its rollback state next to the
-# binary: get_tailscale_state_path() in apps/cogwheel-server resolves
-# dirname(current_exe()) + "/.cogwheel_tailscale_state.json", which for this
-# unit is /usr/local/bin/.cogwheel_tailscale_state.json. The path is not
-# configurable -- there is no environment variable for it -- so under
-# ProtectSystem=strict that write fails with EROFS and the endpoint returns an
-# error on a system that is otherwise working.
-#
-# The hole is punched for that ONE FILE, not for /usr/local/bin: the directory
-# stays read-only, so nothing here can create, rename or replace a binary in
-# it. install-native.sh pre-creates the file owned by cogwheel:cogwheel. The
-# leading '-' means a hand-installed unit whose file does not exist still
-# starts (it just keeps the old EROFS behaviour on that one endpoint) rather
-# than failing to start altogether.
+# lives. It is the only writable path the server needs.
 # ---------------------------------------------------------------------------
 ProtectSystem=strict
 ProtectHome=yes
@@ -88,7 +67,6 @@ PrivateDevices=yes
 StateDirectory=cogwheel
 StateDirectoryMode=0750
 WorkingDirectory=/var/lib/cogwheel
-ReadWritePaths=-/usr/local/bin/.cogwheel_tailscale_state.json
 UMask=0077
 
 ProtectKernelTunables=yes

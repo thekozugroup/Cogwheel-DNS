@@ -549,7 +549,7 @@ jobs:
           attested to the image itself.
 
           See [DEPLOYMENT.md](https://github.com/${GITHUB_REPOSITORY}/blob/${TAG}/DEPLOYMENT.md)
-          for upgrades, backup/restore and troubleshooting.
+          for upgrades, troubleshooting and backing up the data volume.
           NOTES
 
           # Create-or-update rather than create.

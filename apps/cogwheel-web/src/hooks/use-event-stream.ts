@@ -1,24 +1,16 @@
 import React from "react";
-import {
-  eventsStreamUrl,
-  type StreamDetectionEvent,
-  type StreamHealthEvent,
-  type StreamQueryEvent,
-} from "@/lib/api";
+import { eventsStreamUrl, type StreamQueryEvent } from "@/lib/api";
 import { ACTIVITY_BUFFER_LIMIT } from "@/lib/constants";
 
 export type StreamStatus = "connecting" | "open" | "reconnecting" | "paused";
 
-export type ActivityRow =
-  | ({ kind: "query"; id: string } & StreamQueryEvent)
-  | ({ kind: "detection"; id: string } & StreamDetectionEvent);
+export type ActivityRow = { id: string } & StreamQueryEvent;
 
 export type StreamState = {
   rows: ActivityRow[];
   status: StreamStatus;
   /** Rows that arrived while paused and will be merged in on resume. */
   pendingCount: number;
-  health: StreamHealthEvent | null;
   /** Populated when the stream has never connected, so the screen can explain why. */
   error: string | null;
 };
@@ -48,7 +40,6 @@ const nextId = () => `row-${(sequence += 1)}`;
 export function useEventStream(paused: boolean): StreamState & { clear: () => void } {
   const [rows, setRows] = React.useState<ActivityRow[]>([]);
   const [status, setStatus] = React.useState<StreamStatus>("connecting");
-  const [health, setHealth] = React.useState<StreamHealthEvent | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [pendingCount, setPendingCount] = React.useState(0);
 
@@ -100,17 +91,7 @@ export function useEventStream(paused: boolean): StreamState & { clear: () => vo
 
       source.addEventListener("query", (event) => {
         const payload = parse<StreamQueryEvent>((event as MessageEvent<string>).data);
-        if (payload) append({ kind: "query", id: nextId(), ...payload });
-      });
-
-      source.addEventListener("detection", (event) => {
-        const payload = parse<StreamDetectionEvent>((event as MessageEvent<string>).data);
-        if (payload) append({ kind: "detection", id: nextId(), ...payload });
-      });
-
-      source.addEventListener("health", (event) => {
-        const payload = parse<StreamHealthEvent>((event as MessageEvent<string>).data);
-        if (payload) setHealth(payload);
+        if (payload) append({ id: nextId(), ...payload });
       });
 
       source.addEventListener("error", () => {
@@ -144,5 +125,5 @@ export function useEventStream(paused: boolean): StreamState & { clear: () => vo
     setRows([]);
   }, []);
 
-  return { rows, status, pendingCount, health, error, clear };
+  return { rows, status, pendingCount, error, clear };
 }

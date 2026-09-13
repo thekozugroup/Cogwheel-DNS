@@ -1,12 +1,11 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use cogwheel_classifier::{ClassifierEngine, ClassifierSettings, Decision};
 use cogwheel_policy::{
     BlockMode, DecisionKind, PolicyEngine, RuleAction, RulesetArtifact, normalize_domain,
 };
-use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
+use hickory_proto::op::{Message, OpCode, ResponseCode};
 use hickory_proto::rr::rdata::{A, AAAA};
-use hickory_proto::rr::{Name, RData, Record, RecordType};
+use hickory_proto::rr::{RData, Record, RecordType};
 use hickory_resolver::TokioResolver;
 use moka::future::Cache;
 use serde::Serialize;
@@ -26,7 +25,6 @@ pub struct DnsRuntimeConfig {
     pub tcp_bind_addr: SocketAddr,
 }
 
-type ClassificationObserver = Arc<dyn Fn(ClassificationEvent) + Send + Sync>;
 type QueryActivityObserver = Arc<dyn Fn(QueryActivityEvent) + Send + Sync>;
 
 #[derive(Clone)]
@@ -36,32 +34,11 @@ pub struct DnsRuntime {
     allow_all_policy: Arc<RwLock<Arc<PolicyEngine>>>,
     profile_policies: Arc<RwLock<HashMap<String, Arc<PolicyEngine>>>>,
     devices_by_ip: Arc<RwLock<HashMap<IpAddr, DevicePolicyConfig>>>,
-    classifier: Arc<ClassifierEngine>,
-    classification_observer: Arc<RwLock<Option<ClassificationObserver>>>,
     query_activity_observer: Arc<RwLock<Option<QueryActivityObserver>>>,
     global_pause_until: Arc<RwLock<Option<DateTime<Utc>>>>,
     cache: Cache<String, CachedLookup>,
     fallback_cache: Cache<String, CachedLookup>,
     stats: Arc<DnsRuntimeStats>,
-}
-
-/// A classifier verdict worth surfacing to the control plane.
-#[derive(Debug, Clone, Serialize)]
-pub struct ClassificationEvent {
-    /// Normalised hostname.
-    pub domain: String,
-    /// Client that triggered the lookup, if known.
-    pub client_ip: Option<String>,
-    /// Calibrated probability the domain is an ad/tracker host.
-    pub score: f32,
-    /// Whether the protected-domain allowlist shielded it from enforcement.
-    pub protected: bool,
-    /// Whether the active settings actually blocked it.
-    pub blocked: bool,
-    /// Human-readable evidence, strongest first.
-    pub reasons: Vec<String>,
-    /// When the verdict was produced.
-    pub observed_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -150,8 +127,6 @@ pub struct DnsRuntimeStats {
     cache_hit_samples: AtomicU64,
     cache_miss_latency_total_ns: AtomicU64,
     cache_miss_samples: AtomicU64,
-    classifier_latency_total_ns: AtomicU64,
-    classifier_latency_samples: AtomicU64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -168,8 +143,6 @@ pub struct DnsRuntimeSnapshot {
     pub cache_hit_samples: u64,
     pub cache_miss_latency_avg_ns: u64,
     pub cache_miss_samples: u64,
-    pub classifier_latency_avg_ns: u64,
-    pub classifier_latency_samples: u64,
 }
 
 /// Read an `RwLock`, recovering the value even when the lock is poisoned.
@@ -184,23 +157,14 @@ fn read_recover<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
 }
 
 impl DnsRuntime {
-    /// Build a runtime around a resolver, a policy engine and a classifier engine.
-    ///
-    /// The classifier is passed in already constructed so the caller owns the scoring worker's
-    /// lifetime; this crate never spawns a thread of its own.
-    pub fn new(
-        resolver: TokioResolver,
-        policy: Arc<PolicyEngine>,
-        classifier: Arc<ClassifierEngine>,
-    ) -> Self {
+    /// Build a runtime around a resolver and a policy engine.
+    pub fn new(resolver: TokioResolver, policy: Arc<PolicyEngine>) -> Self {
         Self {
             resolver,
             policy: Arc::new(RwLock::new(policy.clone())),
             allow_all_policy: Arc::new(RwLock::new(build_allow_all_policy(&policy))),
             profile_policies: Arc::new(RwLock::new(HashMap::new())),
             devices_by_ip: Arc::new(RwLock::new(HashMap::new())),
-            classifier,
-            classification_observer: Arc::new(RwLock::new(None)),
             query_activity_observer: Arc::new(RwLock::new(None)),
             global_pause_until: Arc::new(RwLock::new(None)),
             // The per-entry deadline in `CachedLookup` is what enforces each
@@ -263,25 +227,9 @@ impl DnsRuntime {
         self.cache.invalidate_all();
     }
 
-    /// The classifier's current mode and sensitivity.
-    pub fn classifier_settings(&self) -> ClassifierSettings {
-        self.classifier.settings()
-    }
-
-    /// Replace the classifier's mode and sensitivity.
-    pub fn replace_classifier_settings(&self, settings: ClassifierSettings) {
-        self.classifier.set_settings(settings);
-    }
-
-    /// The classifier engine, for the API surface.
-    pub fn classifier(&self) -> &Arc<ClassifierEngine> {
-        &self.classifier
-    }
-
-    pub fn set_classification_observer(&self, observer: ClassificationObserver) {
-        if let Ok(mut guard) = self.classification_observer.write() {
-            *guard = Some(observer);
-        }
+    /// The policy engine currently answering unscoped queries.
+    pub fn current_policy(&self) -> Arc<PolicyEngine> {
+        read_recover(&self.policy).clone()
     }
 
     pub fn set_query_activity_observer(&self, observer: QueryActivityObserver) {
@@ -293,10 +241,6 @@ impl DnsRuntime {
     pub fn snapshot(&self) -> DnsRuntimeSnapshot {
         let cache_hit_samples = self.stats.cache_hit_samples.load(Ordering::Relaxed);
         let cache_miss_samples = self.stats.cache_miss_samples.load(Ordering::Relaxed);
-        let classifier_samples = self
-            .stats
-            .classifier_latency_samples
-            .load(Ordering::Relaxed);
         DnsRuntimeSnapshot {
             upstream_failures_total: self.stats.upstream_failures_total.load(Ordering::Relaxed),
             fallback_served_total: self.stats.fallback_served_total.load(Ordering::Relaxed),
@@ -316,22 +260,7 @@ impl DnsRuntime {
                 cache_miss_samples,
             ),
             cache_miss_samples,
-            classifier_latency_avg_ns: average_atomic_ns(
-                &self.stats.classifier_latency_total_ns,
-                classifier_samples,
-            ),
-            classifier_latency_samples: classifier_samples,
         }
-    }
-
-    pub async fn probe_domain(
-        &self,
-        domain: &str,
-        record_type: RecordType,
-    ) -> Result<ResponseCode> {
-        let request = build_probe_request(domain, record_type)?;
-        let response = self.handle_wire_query(&request.to_vec()?, None).await?;
-        Ok(response.metadata.response_code)
     }
 
     pub async fn serve(self: Arc<Self>, config: DnsRuntimeConfig) -> Result<()> {
@@ -451,24 +380,8 @@ impl DnsRuntime {
         let name = query.name().to_utf8();
         let domain = name.trim_end_matches('.').to_ascii_lowercase();
 
-        // Classifier enforcement is a bounded hash lookup against already-computed verdicts —
-        // measured at ~38 ns, versus ~7 us for an inference. It runs *before* the DNS cache so a
-        // verdict takes effect immediately rather than waiting for the cached answer to expire.
-        // Inference itself never happens here; see `cogwheel_classifier::engine`.
-        let classifier_start = Instant::now();
-        let classifier_blocks = self.classifier.decide(&domain) == Decision::Block;
-        self.record_classifier_latency(classifier_start.elapsed().as_nanos());
-
         let (engine, cache_scope, forced_block_mode) = self.policy_for_client(client_addr, &domain);
         let cache_key = policy_cache_key(&cache_scope, &domain);
-
-        if classifier_blocks && forced_block_mode.is_none() {
-            let response = build_blocked_response(&request, BlockMode::NullIp);
-            self.stats.blocked_total.fetch_add(1, Ordering::Relaxed);
-            self.emit_query_activity(&domain, client_addr, true);
-            self.record_cache_miss_latency(query_start.elapsed().as_nanos());
-            return Ok(response);
-        }
 
         // An entry past its deadline is a miss, not a hit. moka's own
         // time_to_live is a coarse memory ceiling; this is what actually
@@ -487,14 +400,6 @@ impl DnsRuntime {
                 .fetch_add(1, Ordering::Relaxed);
             self.cache.invalidate(&cache_key).await;
         }
-
-        // Only submit on a cache miss: a hit means we have seen this name recently and either
-        // already scored it or already queued it. `observe` is a non-blocking enqueue that drops
-        // rather than ever making a DNS answer wait.
-        self.classifier.observe_with_client(
-            &domain,
-            client_addr.map(|addr| addr.ip().to_string()).as_deref(),
-        );
 
         if let Some(block_mode) = forced_block_mode {
             let response = build_blocked_response(&request, block_mode);
@@ -597,15 +502,6 @@ impl DnsRuntime {
         Ok(response)
     }
 
-    fn record_classifier_latency(&self, elapsed_ns: u128) {
-        self.stats
-            .classifier_latency_total_ns
-            .fetch_add(saturating_ns(elapsed_ns), Ordering::Relaxed);
-        self.stats
-            .classifier_latency_samples
-            .fetch_add(1, Ordering::Relaxed);
-    }
-
     fn record_cache_hit_latency(&self, elapsed_ns: u128) {
         self.stats
             .cache_hit_latency_total_ns
@@ -620,50 +516,6 @@ impl DnsRuntime {
         self.stats
             .cache_miss_samples
             .fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Bridge classifier verdicts to the classification observer.
-    ///
-    /// Verdicts are produced by the background scoring worker, not by the request path, so this
-    /// installs a hook on the engine rather than being called inline. Call once after construction.
-    pub fn install_classifier_bridge(&self) {
-        let observer_slot = Arc::clone(&self.classification_observer);
-        let engine = Arc::clone(&self.classifier);
-        let thresholds = engine.model().thresholds();
-        self.classifier
-            .set_verdict_hook(Arc::new(move |host, client, verdict| {
-                // Only surface verdicts that clear the most permissive operating point; anything
-                // below it is noise the control plane has no use for.
-                if verdict.probability < thresholds.high {
-                    return;
-                }
-                let blocked = engine.settings().mode
-                    == cogwheel_classifier::ClassifierMode::Protect
-                    && !verdict.protected
-                    && verdict.probability >= engine.active_threshold();
-                let Ok(guard) = observer_slot.read() else {
-                    return;
-                };
-                let Some(observer) = guard.clone() else {
-                    return;
-                };
-                drop(guard);
-                observer(ClassificationEvent {
-                    domain: host.to_string(),
-                    client_ip: client.map(str::to_string),
-                    score: verdict.probability,
-                    protected: verdict.protected,
-                    blocked,
-                    reasons: engine
-                        .explain(host, 5)
-                        .into_iter()
-                        .map(|contribution| {
-                            format!("{} ({:+.3})", contribution.label, contribution.value)
-                        })
-                        .collect(),
-                    observed_at: verdict.scored_at,
-                });
-            }));
     }
 
     fn emit_query_activity(&self, domain: &str, client_addr: Option<SocketAddr>, blocked: bool) {
@@ -841,15 +693,6 @@ fn domain_matches_override(domain: &str, candidate: &str) -> bool {
             .is_some_and(|prefix| prefix.ends_with('.'))
 }
 
-fn build_probe_request(domain: &str, record_type: RecordType) -> Result<Message> {
-    // Probes are synthesised locally and never leave the process, so a fixed id of 0 is safe and
-    // keeps the request byte-for-byte reproducible.
-    let mut message = Message::new(0, MessageType::Query, OpCode::Query);
-    message.metadata.recursion_desired = true;
-    message.add_query(Query::query(Name::from_ascii(domain)?, record_type));
-    Ok(message)
-}
-
 fn response_for_request(request: &Message, cached: &Message) -> Message {
     let mut response = cached.clone();
     response.metadata.id = request.metadata.id;
@@ -932,6 +775,8 @@ fn build_ip_response(request: &Message, ipv4: Option<Ipv4Addr>, ipv6: Option<Ipv
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hickory_proto::op::{MessageType, Query};
+    use hickory_proto::rr::Name;
 
     fn response_with_ttls(ttls: &[u32]) -> Message {
         let mut message = Message::query();
@@ -1002,43 +847,7 @@ mod tests {
         assert!(entry.expires_at > Instant::now());
         assert!(entry.expires_at <= Instant::now() + MAX_CACHE_TTL);
     }
-    use cogwheel_classifier::{
-        Allowlist, ClassifierMode, ClassifierSettings, EngineConfig, ScoringWorker, Sensitivity,
-    };
-    use hickory_resolver::config::ResolverConfig;
-    use hickory_resolver::net::runtime::TokioRuntimeProvider;
     use std::fs;
-    use std::sync::Mutex;
-
-    /// Build a runtime wired to the shipped classifier model.
-    ///
-    /// Constructing the resolver performs no I/O — nothing here touches the network. `build` is
-    /// fallible in 0.26 only because it may assemble a TLS client config, which this plaintext
-    /// configuration never asks for.
-    fn test_runtime(mode: ClassifierMode) -> (DnsRuntime, ScoringWorker) {
-        let resolver = TokioResolver::builder_with_config(
-            ResolverConfig::from_parts(None, vec![], vec![]),
-            TokioRuntimeProvider::default(),
-        )
-        .build()
-        .expect("resolver builds without I/O");
-        let policy = Arc::new(PolicyEngine::new(RulesetArtifact::new(
-            Vec::new(),
-            HashSet::new(),
-            BlockMode::NullIp,
-        )));
-        let model = cogwheel_classifier::embedded_model().expect("embedded model must parse");
-        let (engine, worker) = cogwheel_classifier::ClassifierEngine::new(
-            model,
-            Allowlist::builtin(),
-            ClassifierSettings {
-                mode,
-                sensitivity: Sensitivity::High,
-            },
-            EngineConfig::default(),
-        );
-        (DnsRuntime::new(resolver, policy, Arc::new(engine)), worker)
-    }
 
     #[test]
     fn runtime_snapshot_starts_at_zero() {
@@ -1056,8 +865,6 @@ mod tests {
             cache_hit_samples: 0,
             cache_miss_latency_avg_ns: 0,
             cache_miss_samples: 0,
-            classifier_latency_avg_ns: 0,
-            classifier_latency_samples: 0,
         };
         assert_eq!(
             snapshot,
@@ -1074,8 +881,6 @@ mod tests {
                 cache_hit_samples: 0,
                 cache_miss_latency_avg_ns: 0,
                 cache_miss_samples: 0,
-                classifier_latency_avg_ns: 0,
-                classifier_latency_samples: 0,
             }
         );
     }
@@ -1099,14 +904,6 @@ mod tests {
     }
 
     #[test]
-    fn build_probe_request_sets_expected_question() {
-        let request = build_probe_request("example.com", RecordType::A).expect("probe request");
-        assert_eq!(request.metadata.message_type, MessageType::Query);
-        assert_eq!(request.queries.len(), 1);
-        assert_eq!(request.queries[0].query_type(), RecordType::A);
-    }
-
-    #[test]
     fn cached_response_adopts_request_id() {
         let request = Message::new(42, MessageType::Query, OpCode::Query);
         let cached = Message::response(7, OpCode::Query);
@@ -1117,86 +914,14 @@ mod tests {
 
     #[test]
     fn error_response_uses_original_request_id() {
-        let request = build_probe_request("example.com", RecordType::A).expect("probe request");
+        let mut request = Message::new(17, MessageType::Query, OpCode::Query);
+        request.add_query(Query::query(
+            Name::from_ascii("example.com").expect("valid test name"),
+            RecordType::A,
+        ));
         let response = error_response_for_payload(&request.to_vec().expect("wire request"));
         assert_eq!(response.metadata.id, request.metadata.id);
         assert_eq!(response.metadata.response_code, ResponseCode::ServFail);
-    }
-
-    /// The classifier scores asynchronously, so client attribution has to survive the trip through
-    /// the scoring queue. This asserts the whole bridge: observe with a client, let the worker
-    /// score, and confirm the observer receives an event that still knows who asked.
-    #[test]
-    fn classification_bridge_preserves_client_ip_across_the_async_hop() {
-        let (runtime, worker) = test_runtime(ClassifierMode::Protect);
-        runtime.install_classifier_bridge();
-
-        let received: Arc<Mutex<Vec<ClassificationEvent>>> = Arc::new(Mutex::new(Vec::new()));
-        runtime.set_classification_observer(Arc::new({
-            let received = Arc::clone(&received);
-            move |event| {
-                if let Ok(mut guard) = received.lock() {
-                    guard.push(event);
-                }
-            }
-        }));
-
-        // A hostname the shipped model scores well above the aggressive threshold.
-        runtime
-            .classifier()
-            .observe_with_client("ads.example.com", Some("192.168.1.4"));
-        worker.run_batch(4096);
-
-        let events = received.lock().expect("observer results");
-        let event = events
-            .iter()
-            .find(|event| event.domain == "ads.example.com")
-            .expect("classification event should have been emitted");
-        assert_eq!(event.client_ip.as_deref(), Some("192.168.1.4"));
-        assert!(
-            event.score > 0.5,
-            "expected a high score, got {}",
-            event.score
-        );
-        assert!(
-            !event.reasons.is_empty(),
-            "explanations should accompany the event"
-        );
-    }
-
-    /// Enforcement must consult only the verdict cache. Before a verdict exists the query resolves
-    /// normally; once the worker has scored, the same name is blocked.
-    #[test]
-    fn enforcement_waits_for_an_async_verdict_rather_than_blocking_the_query() {
-        let (runtime, worker) = test_runtime(ClassifierMode::Protect);
-        let classifier = runtime.classifier();
-
-        assert_eq!(
-            classifier.decide("ads.example.com"),
-            Decision::Allow,
-            "first sighting must resolve rather than stall for a verdict"
-        );
-
-        classifier.observe("ads.example.com");
-        worker.run_batch(4096);
-
-        assert_eq!(
-            classifier.decide("ads.example.com"),
-            Decision::Block,
-            "once scored, the same name must be enforced"
-        );
-    }
-
-    #[test]
-    fn monitor_mode_reports_without_enforcing() {
-        let (runtime, worker) = test_runtime(ClassifierMode::Monitor);
-        runtime.classifier().observe("ads.example.com");
-        worker.run_batch(4096);
-        assert_eq!(
-            runtime.classifier().decide("ads.example.com"),
-            Decision::Allow
-        );
-        assert!(runtime.classifier().lookup("ads.example.com").is_some());
     }
 
     #[test]
@@ -1240,12 +965,6 @@ mod tests {
         let dns_core_manifest =
             fs::read_to_string(format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR")))
                 .expect("read dns core manifest");
-        let classifier_manifest = fs::read_to_string(format!(
-            "{}/../cogwheel-classifier/Cargo.toml",
-            env!("CARGO_MANIFEST_DIR")
-        ))
-        .expect("read classifier manifest");
-
         let forbidden_dependencies = [
             "reqwest",
             "ureq",
@@ -1261,10 +980,6 @@ mod tests {
             assert!(
                 !dns_core_manifest.contains(&format!("{dependency} =")),
                 "cogwheel-dns-core should not depend on {dependency}; the DNS hot path must stay deterministic and LLM-independent"
-            );
-            assert!(
-                !classifier_manifest.contains(&format!("{dependency} =")),
-                "cogwheel-classifier should not depend on {dependency}; classifier inference must remain local and deterministic"
             );
         }
     }

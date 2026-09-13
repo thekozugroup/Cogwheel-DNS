@@ -1,38 +1,22 @@
 use anyhow::{Context, Result};
-use axum::extract::{FromRef, Query, State};
+use axum::extract::{FromRef, State};
 use axum::http::HeaderMap;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use cogwheel_api::{
-    ApiEnvelope, ApiState, AppConfig, RuntimeGuardConfig, UpstreamEndpoint, UpstreamProtocol,
-    router,
-};
-use cogwheel_classifier::ClassifierSettings;
+use cogwheel_api::{ApiEnvelope, ApiState, AppConfig, UpstreamEndpoint, UpstreamProtocol, router};
 use cogwheel_dns_core::{
-    ClassificationEvent, DevicePolicyConfig, DnsRuntime, DnsRuntimeConfig, DnsRuntimeSnapshot,
-    QueryActivityEvent,
+    DevicePolicyConfig, DnsRuntime, DnsRuntimeConfig, DnsRuntimeSnapshot, QueryActivityEvent,
 };
 use cogwheel_lists::{
     ParsedSource, SourceDefinition, SourceKind, build_policy_engine, fetch_and_parse_source,
-    parse_source, synthetic_source, verify_candidate,
+    parse_source, verify_candidate,
 };
-use cogwheel_policy::{BlockMode, DecisionKind, PolicyEngine};
-use cogwheel_services::{
-    ServiceManifest, ServiceToggleMode, ServiceToggleSnapshot, built_in_service_manifests,
-    compile_service_rule_layer,
-};
-use cogwheel_storage::{
-    AuditEvent, DeviceRecord, DeviceServiceOverrideRecord, NotificationDeliveryRecord,
-    RulesetRecord, SecurityEventRecord, SourceRecord, Storage, SyncEnvelope,
-};
+use cogwheel_policy::{BlockMode, DecisionKind, PolicyEngine, RulesetArtifact};
+use cogwheel_storage::{DeviceRecord, SourceRecord, Storage};
 use futures::StreamExt;
 use hickory_resolver::TokioResolver;
 use hickory_resolver::config::{ConnectionConfig, NameServerConfig, ResolverConfig, ResolverOpts};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
-use hickory_resolver::proto::rr::RecordType;
-use prometheus_client::metrics::counter::Counter;
-use prometheus_client::registry::Registry;
-use reqwest::Client;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -52,16 +36,19 @@ struct ServerState {
     api_state: ApiState,
     storage: Arc<Storage>,
     dns_runtime: Arc<DnsRuntime>,
-    http_client: Client,
-    notification_settings: Arc<RwLock<NotificationSettings>>,
-    threat_intel_settings: Arc<RwLock<ThreatIntelSettings>>,
-    federated_learning_settings: Arc<RwLock<FederatedLearningSettings>>,
     recent_dns_activity: Arc<Mutex<VecDeque<DomainActivityRecord>>>,
     events: EventBus,
     shutdown: tokio::sync::watch::Receiver<bool>,
     protected_domains: Arc<HashSet<String>>,
-    runtime_guard: RuntimeGuardConfig,
-    sync_seen_nonces: Arc<Mutex<HashMap<String, chrono::DateTime<chrono::Utc>>>>,
+    /// The policy engine displaced by the most recent activation.
+    ///
+    /// Compiled policies are no longer written to storage, so this one-deep,
+    /// in-memory slot is all the history there is. Its only reader is
+    /// [`PolicySummary::previous_hash`] on the dashboard: nothing rolls back to
+    /// it, because a candidate that would regress a protected name is refused
+    /// before activation (`protected_domain_regressions`) rather than reverted
+    /// after. `None` until the first activation.
+    previous_policy: Arc<RwLock<Option<Arc<PolicyEngine>>>>,
     rate_limiter: Arc<RateLimiter>,
     dns_udp_bind_addr: SocketAddr,
     advertised_dns_port: u16,
@@ -112,92 +99,37 @@ struct RuntimePolicyCatalog {
     profile_policies: HashMap<String, Arc<PolicyEngine>>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct ThreatIntelProviderConfig {
-    id: String,
-    display_name: String,
-    enabled: bool,
-    feed_url: Option<String>,
-    api_key_configured: bool,
-    update_interval_minutes: u32,
-    last_sync_at: Option<chrono::DateTime<chrono::Utc>>,
-    last_error: Option<String>,
-    capabilities: Vec<String>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct ThreatIntelSettings {
-    providers: Vec<ThreatIntelProviderConfig>,
-    recommendations: Vec<String>,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-struct ThreatIntelProviderUpdate {
-    id: String,
-    enabled: bool,
-    feed_url: Option<String>,
-    update_interval_minutes: u32,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct FederatedLearningSettings {
-    enabled: bool,
-    coordinator_url: Option<String>,
-    node_id: String,
-    round_interval_hours: u32,
-    last_round_at: Option<chrono::DateTime<chrono::Utc>>,
-    last_model_version: Option<String>,
-    privacy_mode: String,
-    raw_log_export_enabled: bool,
-    recommendations: Vec<String>,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-struct FederatedLearningUpdate {
-    enabled: bool,
-    coordinator_url: Option<String>,
-    round_interval_hours: u32,
-}
-
-#[derive(serde::Serialize)]
-struct RulesetSummary {
-    id: Uuid,
-    hash: String,
-    status: String,
-    created_at: chrono::DateTime<chrono::Utc>,
-}
-
 #[derive(serde::Serialize)]
 struct RefreshResponse {
+    /// `activated`, `rejected` or `saved` (saved without a refresh).
     outcome: String,
-    ruleset: Option<RulesetSummary>,
-    notes: Vec<String>,
-}
-
-#[derive(serde::Serialize)]
-struct RuntimeHealthResponse {
-    snapshot: DnsRuntimeSnapshot,
-    degraded: bool,
+    /// Content hash of the policy now in force, when this refresh activated one.
+    hash: Option<String>,
+    /// Rules in that policy, when this refresh activated one.
+    rule_count: Option<usize>,
     notes: Vec<String>,
 }
 
 #[derive(serde::Serialize)]
 struct DashboardSummary {
+    /// `Paused` or `Protected`.
     protection_status: String,
     protection_paused_until: Option<chrono::DateTime<chrono::Utc>>,
-    active_ruleset: Option<RulesetSummary>,
+    policy: PolicySummary,
     source_count: usize,
     enabled_source_count: usize,
-    service_toggle_count: usize,
     device_count: usize,
-    runtime_health: RuntimeHealthResponse,
-    latest_audit_events: Vec<AuditEvent>,
-    recent_security_events: Vec<SecurityEventRecord>,
-    recent_notification_deliveries: Vec<NotificationDeliveryEvent>,
-    notification_health: NotificationHealthSummary,
-    notification_failure_analytics: NotificationFailureAnalytics,
-    security_summary: SecuritySummary,
+    runtime: DnsRuntimeSnapshot,
     domain_insights: DomainInsights,
+}
+
+/// The policy in force and the one step of history kept in memory.
+#[derive(serde::Serialize)]
+struct PolicySummary {
+    hash: String,
+    rule_count: usize,
+    /// Hash of the policy the last activation replaced, if there has been one.
+    previous_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -220,128 +152,12 @@ struct DomainActivityRecord {
     observed_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
-struct NotificationDeliveryEvent {
-    status: String,
-    event_type: String,
-    severity: String,
-    title: String,
-    summary: String,
-    target: String,
-    domain: String,
-    device_name: Option<String>,
-    client_ip: String,
-    attempts: usize,
-    created_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct NotificationHealthSummary {
-    delivered_count: usize,
-    failed_count: usize,
-    last_delivery_at: Option<chrono::DateTime<chrono::Utc>>,
-    last_failure_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct NotificationFailureAnalytics {
-    success_rate_percent: f32,
-    top_failed_domains: Vec<NotificationFailureDomain>,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct NotificationFailureDomain {
-    domain: String,
-    failure_count: usize,
-}
-
-#[derive(Debug, Clone)]
-struct NotificationWebhookEvent {
-    event_type: String,
-    severity: String,
-    title: String,
-    summary: String,
-    domain: Option<String>,
-    device_name: Option<String>,
-    client_ip: Option<String>,
-    details: Vec<String>,
-    created_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct NotificationTestResult {
-    outcome: String,
-    target: String,
-}
-
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-struct NotificationTestPreset {
-    name: String,
-    domain: String,
-    severity: String,
-    device_name: String,
-    dry_run: bool,
-}
-
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-struct DashboardQuery {
-    notification_window: Option<usize>,
-    notification_history_window: Option<usize>,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct SecuritySummary {
-    medium_count: usize,
-    high_count: usize,
-    critical_count: usize,
-    top_devices: Vec<DeviceSecuritySummary>,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct DeviceSecuritySummary {
-    label: String,
-    event_count: usize,
-    highest_severity: String,
-}
-
 #[derive(serde::Serialize)]
 struct SettingsSummary {
     blocklists: Vec<SourceRecord>,
     blocklist_statuses: Vec<BlocklistStatusView>,
     block_profiles: Vec<BlockProfileRecord>,
     devices: Vec<DeviceRecord>,
-    services: Vec<ServiceToggleView>,
-    classifier: ClassifierSettings,
-    notifications: NotificationSettings,
-    notification_test_presets: Vec<NotificationTestPreset>,
-    runtime_guard: RuntimeGuardConfig,
-}
-
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-struct NotificationSettings {
-    enabled: bool,
-    webhook_url: Option<String>,
-    min_severity: String,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-struct UpdateNotificationSettingsRequest {
-    enabled: bool,
-    webhook_url: Option<String>,
-    min_severity: String,
-}
-
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-struct TestNotificationRequest {
-    domain: Option<String>,
-    severity: Option<String>,
-    device_name: Option<String>,
-    dry_run: Option<bool>,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-struct UpdateNotificationPresetsRequest {
-    presets: Vec<NotificationTestPreset>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -350,12 +166,6 @@ struct BlocklistStatusView {
     name: String,
     last_refresh_attempt_at: Option<chrono::DateTime<chrono::Utc>>,
     due_for_refresh: bool,
-}
-
-#[derive(Debug, Clone)]
-struct RuntimeRegressionReport {
-    degraded: bool,
-    notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -392,27 +202,6 @@ impl SourceRefreshState {
             last_refresh_attempt_at: refreshed_at,
         });
     }
-}
-
-#[derive(serde::Serialize)]
-struct ServiceToggleView {
-    manifest: ServiceManifest,
-    mode: ServiceToggleMode,
-}
-
-#[derive(serde::Deserialize)]
-struct UpdateServiceToggleRequest {
-    service_id: String,
-    mode: ServiceToggleMode,
-}
-
-#[derive(serde::Deserialize)]
-struct UpdateClassifierSettingsRequest {
-    mode: cogwheel_classifier::ClassifierMode,
-    /// Sensitivity replaces the old raw `threshold` field. A user should not have to reason about
-    /// what `0.87` means; the concrete threshold comes from the model's calibration.
-    #[serde(default)]
-    sensitivity: cogwheel_classifier::Sensitivity,
 }
 
 #[derive(serde::Deserialize)]
@@ -485,51 +274,15 @@ struct UpsertDeviceRequest {
     blocklist_profile_override: Option<String>,
     protection_override: Option<String>,
     allowed_domains: Option<Vec<String>>,
-    service_overrides: Option<Vec<DeviceServiceOverrideRecord>>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct SyncStatePayloadV1 {
-    version: u32,
-    revision: u64,
-    profile: String,
-    exported_at: chrono::DateTime<chrono::Utc>,
-    blocklists: Vec<SourceRecord>,
-    devices: Vec<DeviceRecord>,
-    classifier: ClassifierSettings,
-    notifications: NotificationSettings,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
-enum SyncProfile {
-    Full,
-    SettingsOnly,
-    ReadOnlyFollower,
-}
-
-impl SyncProfile {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::Full => "full",
-            Self::SettingsOnly => "settings-only",
-            Self::ReadOnlyFollower => "read-only-follower",
-        }
-    }
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-struct ImportSyncEnvelopeRequest {
-    envelope: SyncEnvelope,
-}
-
-/// The response every ruleset is compiled to give for a blocked name.
+/// The response every policy is compiled to give for a blocked name.
 ///
-/// A `OnceLock` rather than a value threaded through the call graph: rulesets
+/// A `OnceLock` rather than a value threaded through the call graph: policies
 /// are rebuilt from three unrelated places -- startup, a blocklist refresh, and
 /// a policy rebuild -- and the alternative is passing the same immutable value
 /// down three chains that have no other use for it. It is written once, before
-/// any ruleset is built, and never changes for the life of the process.
+/// any policy is built, and never changes for the life of the process.
 static BLOCK_MODE: std::sync::OnceLock<BlockMode> = std::sync::OnceLock::new();
 
 /// The configured block response, or the historical default before startup has
@@ -628,8 +381,8 @@ async fn main() -> Result<()> {
 
     let config = AppConfig::load()?;
 
-    // Resolved before the first ruleset is compiled, because the block response
-    // is baked into the ruleset artifact rather than consulted per query.
+    // Resolved before the first policy is compiled, because the block response
+    // is baked into the compiled policy rather than consulted per query.
     let block_mode = resolve_block_mode(&config.blocking);
     tracing::info!(mode = ?config.blocking.mode, response = ?block_mode, "blocked names will be answered with this");
     let _ = BLOCK_MODE.set(block_mode);
@@ -663,30 +416,19 @@ async fn main() -> Result<()> {
         "ads.example.com\ntracker.example.com",
     );
 
-    // Seeded from the classifier's CRITICAL tier, not from one hardcoded name.
-    //
-    // The 52-entry protected list guarded classifier verdicts only, while the
-    // blocklist path -- which does most of the actual blocking -- was protected
-    // by exactly one exact-match domain. So a list that happened to cover an
-    // OCSP responder, an NTP pool or a captive-portal check could take a device
-    // off the network in a way that looks nothing like a DNS problem, and the
-    // safety net that existed to prevent precisely that did not apply.
-    //
-    // Only the critical subset is promoted here. The broader entries (banking,
-    // OS vendors, government) stay classifier-only on purpose: a blocklist
-    // entry covering those is a choice someone made, and silently overruling it
-    // would be its own kind of surprise.
+    // The suffixes a subscribed list is never allowed to block: resolver
+    // bootstrap, captive-portal checks, NTP and the CAs' status endpoints. See
+    // `cogwheel_policy::PROTECTED_SUFFIXES` for why exactly these and no more.
     let protected_domains = Arc::new(
-        cogwheel_classifier::Allowlist::critical()
-            .suffixes()
+        cogwheel_policy::PROTECTED_SUFFIXES
             .iter()
-            .cloned()
+            .map(|suffix| (*suffix).to_string())
             .collect::<HashSet<String>>(),
     );
     let verification = verify_candidate(std::slice::from_ref(&parsed), &protected_domains);
     anyhow::ensure!(
         verification.passed,
-        "default ruleset failed verification: {:?}",
+        "default policy failed verification: {:?}",
         verification.notes
     );
 
@@ -695,39 +437,6 @@ async fn main() -> Result<()> {
         protected_domains.as_ref().clone(),
         configured_block_mode(),
     ));
-    storage
-        .record_ruleset(&RulesetRecord {
-            id: policy.artifact().id,
-            hash: policy.artifact().hash.clone(),
-            status: "active".to_string(),
-            created_at: policy.artifact().created_at,
-            artifact_json: serde_json::to_string(policy.artifact())?,
-        })
-        .await?;
-    storage.activate_ruleset(policy.artifact().id).await?;
-    storage
-        .record_audit_event(&AuditEvent {
-            id: Uuid::new_v4(),
-            event_type: "ruleset.activated".to_string(),
-            payload: serde_json::json!({
-                "ruleset_id": policy.artifact().id,
-                "hash": policy.artifact().hash,
-                "reason": "bootstrap",
-            })
-            .to_string(),
-            created_at: chrono::Utc::now(),
-        })
-        .await?;
-
-    let mut registry = Registry::default();
-    let startup_counter: Counter<u64> = Counter::default();
-    registry.register(
-        "cogwheel_startups_total",
-        "Number of server startups",
-        startup_counter.clone(),
-    );
-    startup_counter.inc();
-    let registry = Arc::new(registry);
     // Broadcast shutdown to everything that would otherwise outlive the signal: the DNS accept
     // loops, and every open SSE stream. Without this, `with_graceful_shutdown` waits forever for
     // an SSE connection that never ends on its own.
@@ -739,119 +448,10 @@ async fn main() -> Result<()> {
     readiness.mark_storage_ready();
 
     let resolver = build_resolver(&config.upstream.servers)?;
-    let classifier_settings = load_classifier_settings(&storage).await?;
-    let notification_settings = Arc::new(RwLock::new(load_notification_settings(&storage).await?));
     let recent_dns_activity = Arc::new(Mutex::new(VecDeque::with_capacity(4096)));
-    let http_client = Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .context("build notification client")?;
-    // Build the classifier engine from the model embedded in the binary, then hand its scoring
-    // worker a dedicated OS thread. The worker is deliberately not a tokio task: scoring is a
-    // CPU-bound loop and putting it on the async runtime would let it compete with the DNS
-    // listeners for executor time on a 4-core Pi.
-    let classifier_model =
-        cogwheel_classifier::embedded_model().context("load embedded classifier model")?;
-    tracing::info!(
-        roc_auc = classifier_model.quality().roc_auc,
-        resident_bytes = classifier_model.resident_bytes(),
-        mode = classifier_settings.mode.as_str(),
-        sensitivity = classifier_settings.sensitivity.as_str(),
-        "classifier model loaded"
-    );
-    let (classifier_engine, scoring_worker) = cogwheel_classifier::ClassifierEngine::new(
-        classifier_model,
-        cogwheel_classifier::Allowlist::builtin(),
-        classifier_settings,
-        cogwheel_classifier::EngineConfig::default(),
-    );
-    let classifier_engine = Arc::new(classifier_engine);
-    // Restore a previously promoted adaptation. It is re-validated by `Delta::from_hex` on the way
-    // in — magic, geometry, checksum and the logit budget — because the row came off a disk that may
-    // have lost power mid-write. A delta that fails any of those is dropped with a warning rather
-    // than applied or fatal: the base model is untouched, so the appliance keeps working exactly as
-    // shipped, which is the whole reason adaptation was built as a separate object.
-    if let Some(stored) = load_classifier_adaptation(&storage).await? {
-        match cogwheel_classifier::Delta::from_hex(&stored.delta_hex) {
-            Ok(delta) => {
-                tracing::info!(
-                    trained_at = stored.trained_at,
-                    example_count = stored.example_count,
-                    roc_auc = stored.roc_auc,
-                    ngram_entries = delta.ngram_entries(),
-                    "classifier adaptation restored"
-                );
-                classifier_engine.set_active_delta(Some(Arc::new(delta)));
-            }
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    "stored classifier adaptation failed validation; staying on the base model"
-                );
-            }
-        }
-    }
-    std::thread::Builder::new()
-        .name("cogwheel-classifier".to_string())
-        .spawn(move || {
-            scoring_worker.run();
-            // `run` only returns when every engine handle is dropped, i.e. at shutdown. Reaching
-            // here at any other time means scoring has silently stopped, which is invisible from
-            // the outside because DNS keeps working -- so say so loudly.
-            tracing::warn!("classifier scoring worker exited; domains will no longer be scored");
-        })
-        .context("spawn classifier scoring worker")?;
-
-    let dns_runtime = Arc::new(DnsRuntime::new(
-        resolver,
-        policy,
-        Arc::clone(&classifier_engine),
-    ));
-    dns_runtime.install_classifier_bridge();
+    let dns_runtime = Arc::new(DnsRuntime::new(resolver, policy));
     let events = EventBus::new();
 
-    // The classifier's scoring worker runs on a plain OS thread, deliberately: scoring is CPU-bound
-    // and must not compete with the DNS listeners for executor time. That thread has no tokio
-    // runtime context, so `tokio::spawn` inside this observer would panic and permanently kill the
-    // worker on the very first domain that scores high enough to be reported. Capture an explicit
-    // handle here, while we are still on the runtime, and spawn through it instead.
-    let runtime_handle = tokio::runtime::Handle::current();
-
-    dns_runtime.set_classification_observer(Arc::new({
-        let storage = storage.clone();
-        let http_client = http_client.clone();
-        let notification_settings = notification_settings.clone();
-        let events = events.clone();
-        let runtime_handle = runtime_handle.clone();
-        move |event: cogwheel_dns_core::ClassificationEvent| {
-            events.publish(StreamEvent::Detection(Box::new(StreamDetectionEvent {
-                domain: event.domain.clone(),
-                client: event
-                    .client_ip
-                    .clone()
-                    .unwrap_or_else(|| "unknown".to_string()),
-                device_name: None,
-                probability: event.score,
-                decision: if event.blocked { "block" } else { "allow" }.to_string(),
-                observed_at: event.observed_at.to_rfc3339(),
-            })));
-            let storage = storage.clone();
-            let http_client = http_client.clone();
-            let notification_settings = notification_settings.clone();
-            runtime_handle.spawn(async move {
-                if let Err(error) = record_security_event_from_classification(
-                    storage,
-                    http_client,
-                    notification_settings,
-                    event,
-                )
-                .await
-                {
-                    tracing::warn!(%error, "failed to record security event");
-                }
-            });
-        }
-    }));
     dns_runtime.set_query_activity_observer(Arc::new({
         let recent_dns_activity = recent_dns_activity.clone();
         let events = events.clone();
@@ -895,21 +495,15 @@ async fn main() -> Result<()> {
 
     let app_state = ServerState {
         api_state: ApiState {
-            registry,
             readiness: Arc::clone(&readiness),
         },
         storage,
         dns_runtime,
-        http_client,
-        notification_settings,
-        threat_intel_settings: Arc::new(RwLock::new(default_threat_intel_settings())),
-        federated_learning_settings: Arc::new(RwLock::new(default_federated_learning_settings())),
         recent_dns_activity,
         events,
         shutdown: shutdown_rx.clone(),
         protected_domains,
-        runtime_guard: config.runtime_guard,
-        sync_seen_nonces: Arc::new(Mutex::new(HashMap::new())),
+        previous_policy: Arc::new(RwLock::new(None)),
         rate_limiter: Arc::new(RateLimiter::new(100, 60)),
         dns_udp_bind_addr: config.server.dns_udp_bind_addr,
         advertised_dns_port: std::env::var("COGWHEEL_SERVER__ADVERTISED_DNS_PORT")
@@ -937,33 +531,7 @@ async fn main() -> Result<()> {
             tracing::warn!(%error, "failed to warm runtime policy catalog on startup");
         }
     }
-    sync_runtime_device_policies(&app_state).await?;
-    // Publish runtime health to connected control planes on a slow cadence. Without this the
-    // client's `health` listener was dead code: it subscribed to an event the server never emitted,
-    // so the Activity screen could never show that the resolver had degraded.
-    //
-    // This uses the PASSIVE signal, `current_runtime_health`, which only reads counters already in
-    // memory. It must never call `active_runtime_health_check`: that one sends live DNS probes
-    // upstream, writes an audit row, and can fire a webhook. On a 30s timer that would mean ~2,880
-    // audit rows a day forever -- storage has no retention or vacuum -- plus constant probe traffic
-    // and alert noise, on a device whose durable storage is usually an SD card.
-    tokio::spawn({
-        let state = app_state.clone();
-        let events = state.events.clone();
-        async move {
-            let mut ticker = interval(Duration::from_secs(30));
-            loop {
-                ticker.tick().await;
-                let health = current_runtime_health(&state);
-                events.publish(StreamEvent::Health(Box::new(StreamHealthEvent {
-                    degraded: health.degraded,
-                    notes: health.notes,
-                    observed_at: chrono::Utc::now().to_rfc3339(),
-                })));
-            }
-        }
-    });
-
+    apply_runtime_device_policies(&app_state).await?;
     let refresh_handle = tokio::spawn({
         let state = app_state.clone();
         let refresh_every = config.updater.refresh_interval_secs.max(30);
@@ -994,9 +562,8 @@ async fn main() -> Result<()> {
     // household's browsing on a product that exists to prevent exactly that.
     if config.retention.history_days == 0 {
         tracing::warn!(
-            "history retention is disabled; classifier verdicts and audit events will be kept \
-             forever and the database will grow without limit. Set \
-             COGWHEEL_RETENTION__HISTORY_DAYS to bound it."
+            "history retention is disabled; observed history will be kept forever and the \
+             database will grow without limit. Set COGWHEEL_RETENTION__HISTORY_DAYS to bound it."
         );
     } else {
         let history_days = i64::from(config.retention.history_days);
@@ -1020,9 +587,7 @@ async fn main() -> Result<()> {
                 let cutoff = chrono::Utc::now() - chrono::Duration::days(history_days);
                 match retention_storage.prune_history_before(cutoff).await {
                     Ok(pruned) if pruned.total() > 0 => tracing::info!(
-                        security_events = pruned.security_events,
-                        audit_events = pruned.audit_events,
-                        notification_deliveries = pruned.notification_deliveries,
+                        rows = pruned.total(),
                         %cutoff,
                         "pruned history past the retention window"
                     ),
@@ -1229,9 +794,7 @@ fn build_resolver(servers: &[String]) -> Result<TokioResolver> {
 }
 
 fn build_http_app(app_state: ServerState) -> Router {
-    let api_app = router(app_state.clone())
-        .merge(admin_router())
-        .route("/favicon.ico", get(favicon));
+    let api_app = router(app_state.clone()).merge(admin_router());
 
     let app = if let Some(web_dist_dir) = resolve_web_dist_dir() {
         tracing::info!(path = %web_dist_dir.display(), "serving bundled web assets");
@@ -1254,7 +817,6 @@ fn build_http_app(app_state: ServerState) -> Router {
                     // which turns a broken integration into a silent one.
                     !path.starts_with("/api/")
                         && !path.starts_with("/health/")
-                        && !path.starts_with("/metrics")
                         && !path.starts_with("/assets/")
                         && !path
                             .rsplit('/')
@@ -1281,7 +843,7 @@ fn build_http_app(app_state: ServerState) -> Router {
         // The control plane is served to phones over a LAN. The JS and CSS bundles compress by
         // roughly 4x, so serving them raw wastes about half a megabyte on every cold load for no
         // reason. Compression is applied to the whole router rather than just the static files so
-        // large JSON responses (query logs, audit events) benefit too.
+        // large JSON responses (query logs, settings) benefit too.
         .layer(CompressionLayer::new().br(true).gzip(true))
         .layer(TraceLayer::new_for_http())
 }
@@ -1325,103 +887,13 @@ fn admin_router() -> Router<ServerState> {
         .route("/api/v1/settings/blocklists/delete", post(delete_blocklist))
         .route("/api/v1/devices", get(list_devices))
         .route("/api/v1/devices", post(upsert_device))
-        .route("/api/v1/security-events", get(list_security_events))
         .route("/api/v1/sources", get(list_sources))
         .route("/api/v1/sources/refresh", post(refresh_sources))
-        .route("/api/v1/services", get(list_services))
-        .route("/api/v1/services/toggles", post(update_service_toggle))
         .route("/api/v1/events/stream", get(events_stream))
-        .route("/api/v1/classifier", get(classifier_status))
-        .route(
-            "/api/v1/classifier/settings",
-            post(update_classifier_settings),
-        )
-        .route("/api/v1/classifier/inspect", post(inspect_domain))
-        .route("/api/v1/classifier/detections", get(classifier_detections))
-        .route("/api/v1/classifier/feedback", post(classifier_feedback))
-        .route("/api/v1/classifier/adapt", post(classifier_adapt))
-        .route(
-            "/api/v1/classifier/adapt/rollback",
-            post(classifier_adapt_rollback),
-        )
-        .route(
-            "/api/v1/settings/classifier",
-            post(update_classifier_settings),
-        )
-        .route(
-            "/api/v1/settings/notifications",
-            post(update_notification_settings),
-        )
-        .route(
-            "/api/v1/settings/notifications/test",
-            post(test_notification_settings),
-        )
-        .route(
-            "/api/v1/settings/notifications/presets",
-            post(update_notification_test_presets),
-        )
         .route("/api/v1/runtime", get(runtime_snapshot))
-        .route("/api/v1/runtime/health", get(runtime_health))
-        .route(
-            "/api/v1/runtime/health/check",
-            post(run_runtime_health_check),
-        )
         .route("/api/v1/runtime/pause", post(pause_runtime))
         .route("/api/v1/runtime/resume", post(resume_runtime))
         .route("/api/v1/resolver-access", get(resolver_access_status))
-        .route(
-            "/api/v1/false-positive-budget",
-            get(false_positive_budget_status),
-        )
-        .route("/api/v1/latency-budget", get(latency_budget_status))
-        .route("/api/v1/tailscale/status", get(tailscale_status))
-        .route("/api/v1/tailscale/exit-node", post(tailscale_exit_node))
-        .route("/api/v1/tailscale/rollback", post(tailscale_rollback))
-        .route("/api/v1/tailscale/dns-check", get(tailscale_dns_check))
-        .route("/api/v1/sync/status", get(sync_status))
-        .route("/api/v1/sync/profile", get(sync_profile))
-        .route("/api/v1/sync/profile", post(update_sync_profile))
-        .route("/api/v1/sync/transport", get(sync_transport))
-        .route("/api/v1/sync/transport", post(update_sync_transport))
-        .route("/api/v1/sync/export", get(export_sync_state))
-        .route("/api/v1/sync/import", post(import_sync_state))
-        .route("/api/v1/rulesets", get(list_rulesets))
-        .route("/api/v1/rulesets/rollback", post(rollback_ruleset))
-        .route("/api/v1/audit-events", get(list_audit_events))
-        .route("/api/v1/backup", get(backup_data))
-        .route("/api/v1/backup/restore", post(restore_data))
-        .route(
-            "/api/v1/resilience/upstream-outage",
-            post(simulate_upstream_outage),
-        )
-        .route(
-            "/api/v1/resilience/db-corruption",
-            post(simulate_db_corruption),
-        )
-        .route(
-            "/api/v1/resilience/source-failure",
-            post(simulate_source_failure),
-        )
-        .route(
-            "/api/v1/resilience/sync-partition",
-            post(simulate_sync_partition),
-        )
-        .route("/api/v1/load-test", post(run_load_test))
-        .route("/api/v1/benchmark/rust-opts", get(benchmark_rust_opts))
-        .route("/api/v1/config/version", get(config_version))
-        .route("/api/v1/threat-intel/providers", get(threat_intel_settings))
-        .route(
-            "/api/v1/threat-intel/providers",
-            post(update_threat_intel_provider),
-        )
-        .route(
-            "/api/v1/federated-learning/status",
-            get(federated_learning_settings),
-        )
-        .route(
-            "/api/v1/federated-learning/status",
-            post(update_federated_learning_settings),
-        )
 }
 
 async fn list_sources(
@@ -1464,12 +936,6 @@ async fn upsert_device(
         axum::http::StatusCode::BAD_REQUEST,
         "device protection override must be either inherit or bypass".to_string(),
     ))?;
-    let service_overrides = validate_device_service_overrides(
-        policy_mode.as_str(),
-        request.service_overrides.unwrap_or_default(),
-    )
-    .map_err(|message| (axum::http::StatusCode::BAD_REQUEST, message))?;
-
     let device = DeviceRecord {
         id: request.id.unwrap_or_else(Uuid::new_v4),
         name: request.name,
@@ -1483,7 +949,10 @@ async fn upsert_device(
         allowed_domains: normalize_device_allowed_domains(
             request.allowed_domains.unwrap_or_default(),
         ),
-        service_overrides,
+        // Per-device block rules have no source until the device model is
+        // rebuilt; the column is written empty rather than carried over from a
+        // feature that no longer exists.
+        service_overrides: Vec::new(),
     };
 
     state.storage.upsert_device(&device).await.map_err(|_| {
@@ -1492,88 +961,23 @@ async fn upsert_device(
             "failed to persist device".to_string(),
         )
     })?;
-    state
-        .storage
-        .record_audit_event(&AuditEvent {
-            id: Uuid::new_v4(),
-            event_type: "device.upserted".to_string(),
-            payload: serde_json::to_string(&device).map_err(|_| {
-                (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    "failed to serialize device audit payload".to_string(),
-                )
-            })?,
-            created_at: chrono::Utc::now(),
-        })
-        .await
-        .map_err(|_| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to record device audit event".to_string(),
-            )
-        })?;
 
-    sync_runtime_device_policies(&state).await.map_err(|_| {
+    apply_runtime_device_policies(&state).await.map_err(|_| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "failed to sync runtime device policies".to_string(),
+            "failed to apply runtime device policies".to_string(),
         )
     })?;
 
     Ok(Json(ApiEnvelope { data: device }))
 }
 
-async fn list_security_events(
-    State(state): State<ServerState>,
-) -> Result<Json<ApiEnvelope<Vec<SecurityEventRecord>>>, axum::http::StatusCode> {
-    state
-        .storage
-        .recent_security_events(20)
-        .await
-        .map(|data| Json(ApiEnvelope { data }))
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)
-}
-
 async fn dashboard_summary(
     State(state): State<ServerState>,
-    Query(query): Query<DashboardQuery>,
 ) -> Result<Json<ApiEnvelope<DashboardSummary>>, axum::http::StatusCode> {
-    let notification_window = normalize_notification_window(query.notification_window);
-    let notification_history_window =
-        normalize_notification_window(query.notification_history_window);
     let sources = state
         .storage
         .list_sources()
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let rulesets = state
-        .storage
-        .list_rulesets()
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let active_ruleset = rulesets
-        .iter()
-        .find(|row| row.status == "active")
-        .map(|row| RulesetSummary {
-            id: row.id,
-            hash: row.hash.clone(),
-            status: row.status.clone(),
-            created_at: row.created_at,
-        });
-    let runtime_health = current_runtime_health(&state);
-    let latest_audit_events = state
-        .storage
-        .recent_audit_events(5)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let notification_analytics_deliveries = state
-        .storage
-        .recent_notification_deliveries(notification_window as i64)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let notification_history_deliveries = state
-        .storage
-        .recent_notification_deliveries(notification_history_window as i64)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     let devices = state
@@ -1581,57 +985,30 @@ async fn dashboard_summary(
         .list_devices()
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let security_events = state
-        .storage
-        .recent_security_events(25)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let security_summary = build_security_summary(&security_events);
-    let recent_security_events = security_events.into_iter().take(5).collect();
-    let recent_notification_deliveries =
-        build_notification_delivery_events(&notification_history_deliveries);
-    let notification_health = build_notification_health_summary(&notification_analytics_deliveries);
-    let notification_failure_analytics =
-        build_notification_failure_analytics(&notification_analytics_deliveries);
     let domain_insights = build_domain_insights(&state);
-    let snapshot = load_service_toggle_snapshot(&state.storage)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
     let protection_paused_until = state.dns_runtime.protection_paused_until();
+
+    let current = state.dns_runtime.current_policy();
+    let policy = PolicySummary {
+        hash: current.artifact().hash.clone(),
+        rule_count: current.artifact().rules.len(),
+        previous_hash: read_recover(&state.previous_policy)
+            .as_ref()
+            .map(|previous| previous.artifact().hash.clone()),
+    };
 
     Ok(Json(ApiEnvelope {
         data: DashboardSummary {
-            protection_status: if let Some(until) = protection_paused_until {
-                if chrono::Utc::now() < until {
-                    "Paused".to_string()
-                } else if runtime_health.degraded {
-                    "Needs Attention".to_string()
-                } else {
-                    "Protected".to_string()
-                }
-            } else if runtime_health.degraded {
-                "Needs Attention".to_string()
-            } else {
-                "Protected".to_string()
+            protection_status: match protection_paused_until {
+                Some(until) if chrono::Utc::now() < until => "Paused".to_string(),
+                _ => "Protected".to_string(),
             },
             protection_paused_until,
-            active_ruleset,
+            policy,
             source_count: sources.len(),
             enabled_source_count: sources.iter().filter(|source| source.enabled).count(),
-            service_toggle_count: snapshot
-                .toggles
-                .iter()
-                .filter(|toggle| !matches!(toggle.mode, ServiceToggleMode::Inherit))
-                .count(),
             device_count: devices.len(),
-            runtime_health,
-            latest_audit_events,
-            recent_security_events,
-            recent_notification_deliveries,
-            notification_health,
-            notification_failure_analytics,
-            security_summary,
+            runtime: state.dns_runtime.snapshot(),
             domain_insights,
         },
     }))
@@ -1697,438 +1074,12 @@ fn top_domain_entries(counts: &HashMap<String, usize>) -> Vec<DomainInsightEntry
     entries
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
-struct LoadTestRequest {
-    duration_secs: u64,
-    qps: u32,
-    cache_hit_ratio: f64,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct LoadTestResult {
-    success: bool,
-    queries_sent: u64,
-    queries_succeeded: u64,
-    queries_failed: u64,
-    avg_latency_ms: f64,
-    p95_latency_ms: f64,
-    p99_latency_ms: f64,
-    cache_hit_ratio: f64,
-    throughput_qps: f64,
-    errors: Vec<String>,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct RustOptimizationBenchmark {
-    domain_parsing_ns: u64,
-    rule_matching_ns: u64,
-    cache_lookup_ns: u64,
-    memory_usage_bytes: u64,
-    allocations_per_query: u64,
-    recommendations: Vec<String>,
-}
-
-async fn run_load_test(
-    State(state): State<ServerState>,
-    Json(request): Json<LoadTestRequest>,
-) -> Result<Json<ApiEnvelope<LoadTestResult>>, (axum::http::StatusCode, String)> {
-    use std::time::{Duration, Instant};
-
-    let duration = Duration::from_secs(request.duration_secs);
-    let qps = request.qps.max(1);
-    let cache_hit_ratio = request.cache_hit_ratio.clamp(0.0, 1.0);
-
-    let mut latencies: Vec<f64> = Vec::new();
-    let mut errors: Vec<String> = Vec::new();
-    let mut succeeded = 0u64;
-    let mut failed = 0u64;
-    let start = Instant::now();
-
-    let test_domains = vec![
-        "google.com",
-        "facebook.com",
-        "youtube.com",
-        "amazon.com",
-        "twitter.com",
-        "wikipedia.org",
-        "reddit.com",
-        "netflix.com",
-        "github.com",
-        "stackoverflow.com",
-        "example.com",
-        "test.com",
-        "demo.local",
-        "internal.service",
-        "api.example.com",
-    ];
-
-    let interval = Duration::from_secs_f64(1.0 / qps as f64);
-    let mut query_count = 0u64;
-
-    while start.elapsed() < duration {
-        let loop_start = Instant::now();
-
-        for domain in &test_domains {
-            if start.elapsed() >= duration {
-                break;
-            }
-
-            let should_hit_cache =
-                (query_count as f64 % (1.0 / (1.0 - cache_hit_ratio).max(0.01))) < 1.0;
-            let query_domain = if should_hit_cache && query_count > 0 {
-                test_domains[(query_count as usize) % test_domains.len()]
-            } else {
-                domain
-            };
-
-            let query_start = Instant::now();
-            match state
-                .dns_runtime
-                .probe_domain(query_domain, RecordType::A)
-                .await
-            {
-                Ok(_) => {
-                    succeeded += 1;
-                    latencies.push(query_start.elapsed().as_secs_f64() * 1000.0);
-                }
-                Err(e) => {
-                    failed += 1;
-                    if errors.len() < 10 {
-                        errors.push(format!("{}: {}", query_domain, e));
-                    }
-                }
-            }
-            query_count += 1;
-        }
-
-        let elapsed = loop_start.elapsed();
-        if elapsed < interval {
-            tokio::time::sleep(interval - elapsed).await;
-        }
-    }
-
-    latencies.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let avg_latency = latencies.iter().sum::<f64>() / latencies.len().max(1) as f64;
-    let p95_idx = (latencies.len() as f64 * 0.95) as usize;
-    let p99_idx = (latencies.len() as f64 * 0.99) as usize;
-    let p95_latency = latencies.get(p95_idx).copied().unwrap_or(avg_latency);
-    let p99_latency = latencies.get(p99_idx).copied().unwrap_or(avg_latency);
-
-    let total_elapsed = start.elapsed().as_secs_f64();
-    let throughput = (succeeded + failed) as f64 / total_elapsed.max(0.001);
-
-    let mut result_errors = errors.clone();
-    if failed > 0 && errors.is_empty() {
-        result_errors.push(format!(
-            "{} queries failed without specific error messages",
-            failed
-        ));
-    }
-
-    Ok(Json(ApiEnvelope {
-        data: LoadTestResult {
-            success: failed == 0,
-            queries_sent: query_count,
-            queries_succeeded: succeeded,
-            queries_failed: failed,
-            avg_latency_ms: avg_latency,
-            p95_latency_ms: p95_latency,
-            p99_latency_ms: p99_latency,
-            cache_hit_ratio,
-            throughput_qps: throughput,
-            errors: result_errors,
-        },
-    }))
-}
-
-async fn benchmark_rust_opts(
-    State(state): State<ServerState>,
-) -> Result<Json<ApiEnvelope<RustOptimizationBenchmark>>, axum::http::StatusCode> {
-    use std::time::Instant;
-
-    let iterations = 10000u64;
-    let mut domain_parsing_total = 0u128;
-    let mut rule_matching_total = 0u128;
-    let mut cache_lookup_total = 0u128;
-
-    for _ in 0..iterations {
-        let start = Instant::now();
-        let _domain: &str = "example.com";
-        domain_parsing_total += start.elapsed().as_nanos();
-
-        let start = Instant::now();
-        let _matched = "example.com".contains("example");
-        rule_matching_total += start.elapsed().as_nanos();
-
-        let start = Instant::now();
-        let _cached = state.dns_runtime.snapshot().cache_hits_total;
-        cache_lookup_total += start.elapsed().as_nanos();
-    }
-
-    let domain_parsing_ns = (domain_parsing_total / iterations as u128) as u64;
-    let rule_matching_ns = (rule_matching_total / iterations as u128) as u64;
-    let cache_lookup_ns = (cache_lookup_total / iterations as u128) as u64;
-
-    let snapshot = state.dns_runtime.snapshot();
-    let queries = snapshot.queries_total.max(1);
-    let cache_hit_rate = (snapshot.cache_hits_total as f64) / (queries as f64);
-
-    let mut recommendations = Vec::new();
-
-    if domain_parsing_ns > 100 {
-        recommendations
-            .push("Domain parsing slower than expected - consider zero-copy parsing".to_string());
-    } else {
-        recommendations.push("Domain parsing is optimized".to_string());
-    }
-
-    if rule_matching_ns > 500 {
-        recommendations
-            .push("Rule matching could benefit from prefix/suffix matching structures".to_string());
-    } else {
-        recommendations.push("Rule matching hot path is efficient".to_string());
-    }
-
-    if cache_hit_rate > 0.8 {
-        recommendations.push("Cache hit rate is excellent".to_string());
-    } else if cache_hit_rate > 0.5 {
-        recommendations.push("Cache hit rate is moderate - consider tuning TTL values".to_string());
-    } else {
-        recommendations
-            .push("Cache hit rate is low - review cache size and TTL settings".to_string());
-    }
-
-    recommendations.push(format!(
-        "Current cache hit rate: {:.1}%",
-        cache_hit_rate * 100.0
-    ));
-
-    Ok(Json(ApiEnvelope {
-        data: RustOptimizationBenchmark {
-            domain_parsing_ns,
-            rule_matching_ns,
-            cache_lookup_ns,
-            memory_usage_bytes: 0,
-            allocations_per_query: 0,
-            recommendations,
-        },
-    }))
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct ConfigVersionStatus {
-    schema_version: u32,
-    config_version: u32,
-    cogwheel_version: String,
-    migration_count: u32,
-    upgrade_available: bool,
-    recommendations: Vec<String>,
-}
-
-async fn config_version(
-    State(state): State<ServerState>,
-) -> Result<Json<ApiEnvelope<ConfigVersionStatus>>, axum::http::StatusCode> {
-    let mut recommendations = Vec::new();
-
-    let current_config_version = cogwheel_storage::CONFIG_SCHEMA_VERSION;
-    let schema_version = cogwheel_storage::SCHEMA_VERSION;
-
-    let stored_version = state.storage.get_config_version().unwrap_or(1);
-
-    let upgrade_available = stored_version < current_config_version;
-
-    if upgrade_available {
-        recommendations.push(format!(
-            "Config upgrade available: v{} -> v{}",
-            stored_version, current_config_version
-        ));
-    } else {
-        recommendations.push("Config schema is up to date".to_string());
-    }
-
-    recommendations.push(format!("Database schema version: {}", schema_version));
-
-    Ok(Json(ApiEnvelope {
-        data: ConfigVersionStatus {
-            schema_version,
-            config_version: stored_version,
-            cogwheel_version: env!("CARGO_PKG_VERSION").to_string(),
-            migration_count: 10,
-            upgrade_available,
-            recommendations,
-        },
-    }))
-}
-
-fn default_threat_intel_settings() -> ThreatIntelSettings {
-    ThreatIntelSettings {
-        providers: vec![
-            ThreatIntelProviderConfig {
-                id: "alphamountain".to_string(),
-                display_name: "alphaMountain DNS Feed".to_string(),
-                enabled: false,
-                feed_url: Some("https://api.example.invalid/threat-intel/dns".to_string()),
-                api_key_configured: false,
-                update_interval_minutes: 30,
-                last_sync_at: None,
-                last_error: None,
-                capabilities: vec!["domain-reputation".to_string(), "malware-c2".to_string()],
-            },
-            ThreatIntelProviderConfig {
-                id: "abuse-ch".to_string(),
-                display_name: "Abuse.ch Import Bridge".to_string(),
-                enabled: false,
-                feed_url: Some(
-                    "https://feodotracker.abuse.ch/downloads/ipblocklist_recommended.json"
-                        .to_string(),
-                ),
-                api_key_configured: false,
-                update_interval_minutes: 60,
-                last_sync_at: None,
-                last_error: None,
-                capabilities: vec!["ip-reputation".to_string(), "botnet-tracking".to_string()],
-            },
-        ],
-        recommendations: vec![
-            "Keep threat-intel providers optional so the DNS hot path remains deterministic."
-                .to_string(),
-            "Prefer pull-based feeds with cached snapshots instead of inline blocking lookups."
-                .to_string(),
-        ],
-    }
-}
-
-fn default_federated_learning_settings() -> FederatedLearningSettings {
-    FederatedLearningSettings {
-        enabled: false,
-        coordinator_url: None,
-        node_id: "local-node".to_string(),
-        round_interval_hours: 24,
-        last_round_at: None,
-        last_model_version: None,
-        privacy_mode: "model-updates-only".to_string(),
-        raw_log_export_enabled: false,
-        recommendations: vec![
-            "Share only aggregated model deltas, never raw DNS logs.".to_string(),
-            "Require explicit opt-in before joining a coordinator.".to_string(),
-        ],
-    }
-}
-
-async fn threat_intel_settings(
-    State(state): State<ServerState>,
-) -> Result<Json<ApiEnvelope<ThreatIntelSettings>>, axum::http::StatusCode> {
-    let settings = state
-        .threat_intel_settings
-        .read()
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
-        .clone();
-    Ok(Json(ApiEnvelope { data: settings }))
-}
-
-async fn update_threat_intel_provider(
-    State(state): State<ServerState>,
-    Json(request): Json<ThreatIntelProviderUpdate>,
-) -> Result<Json<ApiEnvelope<ThreatIntelSettings>>, axum::http::StatusCode> {
-    let payload_for_audit;
-    let updated = {
-        let mut settings = state
-            .threat_intel_settings
-            .write()
-            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-        let provider = settings
-            .providers
-            .iter_mut()
-            .find(|provider| provider.id == request.id)
-            .ok_or(axum::http::StatusCode::NOT_FOUND)?;
-
-        provider.enabled = request.enabled;
-        provider.feed_url = request.feed_url.clone();
-        provider.update_interval_minutes = request.update_interval_minutes.max(5);
-        provider.last_error = None;
-        payload_for_audit = serde_json::json!({
-            "provider_id": provider.id,
-            "enabled": provider.enabled,
-            "feed_url": provider.feed_url,
-            "update_interval_minutes": provider.update_interval_minutes,
-        })
-        .to_string();
-        settings.clone()
-    };
-
-    state
-        .storage
-        .record_audit_event(&AuditEvent {
-            id: Uuid::new_v4(),
-            event_type: "threat_intel_provider_updated".to_string(),
-            payload: payload_for_audit,
-            created_at: chrono::Utc::now(),
-        })
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(Json(ApiEnvelope { data: updated }))
-}
-
-async fn federated_learning_settings(
-    State(state): State<ServerState>,
-) -> Result<Json<ApiEnvelope<FederatedLearningSettings>>, axum::http::StatusCode> {
-    let settings = state
-        .federated_learning_settings
-        .read()
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
-        .clone();
-    Ok(Json(ApiEnvelope { data: settings }))
-}
-
-async fn update_federated_learning_settings(
-    State(state): State<ServerState>,
-    Json(request): Json<FederatedLearningUpdate>,
-) -> Result<Json<ApiEnvelope<FederatedLearningSettings>>, axum::http::StatusCode> {
-    let payload_for_audit;
-    let updated = {
-        let mut settings = state
-            .federated_learning_settings
-            .write()
-            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-        settings.enabled = request.enabled;
-        settings.coordinator_url = request.coordinator_url.clone();
-        settings.round_interval_hours = request.round_interval_hours.max(1);
-        settings.raw_log_export_enabled = false;
-        payload_for_audit = serde_json::json!({
-            "enabled": settings.enabled,
-            "coordinator_url": settings.coordinator_url,
-            "round_interval_hours": settings.round_interval_hours,
-            "privacy_mode": settings.privacy_mode,
-            "raw_log_export_enabled": settings.raw_log_export_enabled,
-        })
-        .to_string();
-        settings.clone()
-    };
-
-    state
-        .storage
-        .record_audit_event(&AuditEvent {
-            id: Uuid::new_v4(),
-            event_type: "federated_learning_updated".to_string(),
-            payload: payload_for_audit,
-            created_at: chrono::Utc::now(),
-        })
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(Json(ApiEnvelope { data: updated }))
-}
-
 async fn settings_summary(
     State(state): State<ServerState>,
 ) -> Result<Json<ApiEnvelope<SettingsSummary>>, axum::http::StatusCode> {
     let blocklists = state
         .storage
         .list_sources()
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let services = build_service_toggle_views(&state)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     let devices = state
@@ -2142,10 +1093,6 @@ async fn settings_summary(
     let block_profiles = load_block_profiles(&state.storage)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let notifications = read_recover(&state.notification_settings).clone();
-    let notification_test_presets = load_notification_test_presets(&state.storage)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(ApiEnvelope {
         data: SettingsSummary {
@@ -2153,1627 +1100,15 @@ async fn settings_summary(
             blocklist_statuses,
             block_profiles,
             devices,
-            services,
-            classifier: state.dns_runtime.classifier_settings(),
-            notifications,
-            notification_test_presets,
-            runtime_guard: state.runtime_guard.clone(),
         },
     }))
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct TailscaleStatusView {
-    installed: bool,
-    daemon_running: bool,
-    backend_state: Option<String>,
-    hostname: Option<String>,
-    tailnet_name: Option<String>,
-    peer_count: usize,
-    exit_node_active: bool,
-    version: Option<String>,
-    health_warnings: Vec<String>,
-    last_error: Option<String>,
-}
-
-fn parse_tailscale_status_json(raw: &str) -> TailscaleStatusView {
-    let value: serde_json::Value = match serde_json::from_str(raw) {
-        Ok(value) => value,
-        Err(error) => {
-            return TailscaleStatusView {
-                installed: true,
-                daemon_running: false,
-                backend_state: None,
-                hostname: None,
-                tailnet_name: None,
-                peer_count: 0,
-                exit_node_active: false,
-                version: None,
-                health_warnings: vec![],
-                last_error: Some(format!("invalid tailscale json: {error}")),
-            };
-        }
-    };
-
-    let backend_state = value
-        .get("BackendState")
-        .and_then(serde_json::Value::as_str)
-        .map(ToString::to_string);
-    let hostname = value
-        .get("Self")
-        .and_then(|self_value| self_value.get("HostName"))
-        .and_then(serde_json::Value::as_str)
-        .map(ToString::to_string);
-    let tailnet_name = value
-        .get("CurrentTailnet")
-        .and_then(|tailnet| tailnet.get("Name"))
-        .or_else(|| value.get("MagicDNSSuffix"))
-        .and_then(serde_json::Value::as_str)
-        .map(ToString::to_string);
-    let peer_count = value
-        .get("Peer")
-        .and_then(serde_json::Value::as_object)
-        .map(|peers| peers.len())
-        .unwrap_or(0);
-    let advertised_exit_node = read_tailscale_exit_node_pref().unwrap_or(false);
-    let status_reports_exit_node = value
-        .get("Self")
-        .and_then(|self_value| {
-            self_value
-                .get("ExitNodeStatus")
-                .or_else(|| self_value.get("ExitNode"))
-                .or_else(|| self_value.get("UsingExitNode"))
-        })
-        .map(|value| {
-            value.as_bool().unwrap_or_else(|| {
-                value
-                    .as_object()
-                    .map(|object| !object.is_empty())
-                    .unwrap_or_else(|| value.as_str().is_some_and(|s| !s.is_empty()))
-            })
-        })
-        .unwrap_or(false);
-    let exit_node_active = advertised_exit_node || status_reports_exit_node;
-    let health_warnings = value
-        .get("Health")
-        .and_then(serde_json::Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.as_str().map(ToString::to_string))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-
-    TailscaleStatusView {
-        installed: true,
-        daemon_running: backend_state.as_deref() != Some("Stopped"),
-        backend_state,
-        hostname,
-        tailnet_name,
-        peer_count,
-        exit_node_active,
-        version: None,
-        health_warnings,
-        last_error: None,
-    }
-}
-
-fn load_tailscale_status() -> TailscaleStatusView {
-    match Command::new("tailscale")
-        .args(["status", "--json"])
-        .output()
-    {
-        Ok(output) if output.status.success() => {
-            let mut status = parse_tailscale_status_json(&String::from_utf8_lossy(&output.stdout));
-            if let Ok(version_output) = Command::new("tailscale").arg("version").output() {
-                if version_output.status.success() {
-                    status.version = Some(
-                        String::from_utf8_lossy(&version_output.stdout)
-                            .lines()
-                            .next()
-                            .unwrap_or_default()
-                            .trim()
-                            .to_string(),
-                    );
-                }
-            }
-            status
-        }
-        Ok(output) => TailscaleStatusView {
-            installed: true,
-            daemon_running: false,
-            backend_state: None,
-            hostname: None,
-            tailnet_name: None,
-            peer_count: 0,
-            exit_node_active: false,
-            version: None,
-            health_warnings: vec![],
-            last_error: Some(String::from_utf8_lossy(&output.stderr).trim().to_string()),
-        },
-        Err(error) => TailscaleStatusView {
-            installed: false,
-            daemon_running: false,
-            backend_state: None,
-            hostname: None,
-            tailnet_name: None,
-            peer_count: 0,
-            exit_node_active: false,
-            version: None,
-            health_warnings: vec![],
-            last_error: Some(error.to_string()),
-        },
-    }
-}
-
-async fn tailscale_status(
-    State(_state): State<ServerState>,
-) -> Result<Json<ApiEnvelope<TailscaleStatusView>>, axum::http::StatusCode> {
-    Ok(Json(ApiEnvelope {
-        data: load_tailscale_status(),
-    }))
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-struct TailscaleExitNodeRequest {
-    enabled: bool,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct TailscaleExitNodeResult {
-    success: bool,
-    message: String,
-}
-
-async fn tailscale_exit_node(
-    State(state): State<ServerState>,
-    Json(request): Json<TailscaleExitNodeRequest>,
-) -> Result<Json<ApiEnvelope<TailscaleExitNodeResult>>, (axum::http::StatusCode, String)> {
-    let status = load_tailscale_status();
-
-    if !status.installed {
-        return Err((
-            axum::http::StatusCode::BAD_REQUEST,
-            "Tailscale is not installed".to_string(),
-        ));
-    }
-
-    if !status.daemon_running {
-        return Err((
-            axum::http::StatusCode::BAD_REQUEST,
-            "Tailscale daemon is not running".to_string(),
-        ));
-    }
-
-    let hostname = status.hostname.ok_or_else(|| {
-        (
-            axum::http::StatusCode::BAD_REQUEST,
-            "Cannot determine local Tailscale hostname".to_string(),
-        )
-    })?;
-
-    let current_exit_node = read_tailscale_exit_node_pref().unwrap_or(status.exit_node_active);
-    let cmd = configure_tailscale_exit_node(request.enabled)
-        .map(|_| {
-            if request.enabled {
-                format!(
-                    "Exit-node advertising enabled on {} with DNS kept on Cogwheel.",
-                    hostname
-                )
-            } else {
-                format!(
-                    "Exit-node advertising disabled on {} and prior Tailscale routing restored.",
-                    hostname
-                )
-            }
-        })
-        .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?;
-
-    // The exit-node change itself succeeded; failing to persist it only means the setting will not
-    // survive a restart. That is worth reporting rather than discarding -- a silently unsaved
-    // setting looks like the appliance forgot what the operator told it.
-    if let Err(error) = save_tailscale_state(current_exit_node, &hostname) {
-        tracing::warn!(%error, "tailscale exit-node state could not be persisted");
-    }
-
-    state
-        .storage
-        .record_audit_event(&AuditEvent {
-            id: Uuid::new_v4(),
-            event_type: "tailscale.exit_node_updated".to_string(),
-            payload: serde_json::json!({
-                "enabled": request.enabled,
-                "hostname": hostname,
-                "previous_enabled": current_exit_node,
-            })
-            .to_string(),
-            created_at: chrono::Utc::now(),
-        })
-        .await
-        .map_err(|error| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                error.to_string(),
-            )
-        })?;
-
-    Ok(Json(ApiEnvelope {
-        data: TailscaleExitNodeResult {
-            success: true,
-            message: cmd,
-        },
-    }))
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct TailscaleSavedState {
-    exit_node_enabled: bool,
-    saved_at: String,
-    hostname: String,
-}
-
-fn get_tailscale_state_path() -> std::path::PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".cogwheel_tailscale_state.json")
-}
-
-fn save_tailscale_state(exit_node_enabled: bool, hostname: &str) -> Result<(), String> {
-    let state = TailscaleSavedState {
-        exit_node_enabled,
-        saved_at: chrono::Utc::now().to_rfc3339(),
-        hostname: hostname.to_string(),
-    };
-    let json = serde_json::to_string_pretty(&state).map_err(|e| e.to_string())?;
-    std::fs::write(get_tailscale_state_path(), json).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-fn load_tailscale_state() -> Option<TailscaleSavedState> {
-    let path = get_tailscale_state_path();
-    let content = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&content).ok()
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct TailscaleRollbackResult {
-    success: bool,
-    message: String,
-    previous_state: Option<bool>,
-}
-
-async fn tailscale_rollback(
-    State(state): State<ServerState>,
-) -> Result<Json<ApiEnvelope<TailscaleRollbackResult>>, (axum::http::StatusCode, String)> {
-    let saved_state = load_tailscale_state().ok_or_else(|| {
-        (
-            axum::http::StatusCode::NOT_FOUND,
-            "No previous Tailscale state found to rollback".to_string(),
-        )
-    })?;
-
-    let status = load_tailscale_status();
-
-    if !status.installed {
-        return Err((
-            axum::http::StatusCode::BAD_REQUEST,
-            "Tailscale is not installed".to_string(),
-        ));
-    }
-
-    if !status.daemon_running {
-        return Err((
-            axum::http::StatusCode::BAD_REQUEST,
-            "Tailscale daemon is not running".to_string(),
-        ));
-    }
-
-    configure_tailscale_exit_node(saved_state.exit_node_enabled)
-        .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?;
-
-    let _ = std::fs::remove_file(get_tailscale_state_path());
-
-    state
-        .storage
-        .record_audit_event(&AuditEvent {
-            id: Uuid::new_v4(),
-            event_type: "tailscale.rollback_completed".to_string(),
-            payload: serde_json::json!({
-                "restored_exit_node_enabled": saved_state.exit_node_enabled,
-                "hostname": saved_state.hostname,
-                "saved_at": saved_state.saved_at,
-            })
-            .to_string(),
-            created_at: chrono::Utc::now(),
-        })
-        .await
-        .map_err(|error| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                error.to_string(),
-            )
-        })?;
-
-    Ok(Json(ApiEnvelope {
-        data: TailscaleRollbackResult {
-            success: true,
-            message: format!(
-                "Rolled back to previous state: exit-node {}",
-                if saved_state.exit_node_enabled {
-                    "enabled"
-                } else {
-                    "disabled"
-                }
-            ),
-            previous_state: Some(saved_state.exit_node_enabled),
-        },
-    }))
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct TailscaleDnsCheckResult {
-    configured: bool,
-    message: String,
-    local_dns_server: Option<String>,
-    suggestions: Vec<String>,
-}
-
-fn get_local_dns_server() -> Option<String> {
-    #[cfg(target_os = "linux")]
-    {
-        std::fs::read_to_string("/etc/resolv.conf")
-            .ok()?
-            .lines()
-            .filter_map(|line| {
-                let line = line.trim();
-                if line.starts_with("nameserver") {
-                    line.split_whitespace().nth(1).map(String::from)
-                } else {
-                    None
-                }
-            })
-            .next()
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        None
-    }
-}
-
-async fn tailscale_dns_check()
--> Result<Json<ApiEnvelope<TailscaleDnsCheckResult>>, (axum::http::StatusCode, String)> {
-    let status = load_tailscale_status();
-    let local_dns = get_local_dns_server();
-
-    let mut suggestions = Vec::new();
-    let mut configured = true;
-    let message: String;
-
-    if !status.installed {
-        message = "Tailscale is not installed on this machine.".to_string();
-        configured = false;
-    } else if !status.daemon_running {
-        message = "Tailscale daemon is not running.".to_string();
-        configured = false;
-    } else if !status.exit_node_active {
-        message = "Exit-node mode is not active. Enable it to start filtering tailnet traffic."
-            .to_string();
-        suggestions
-            .push("Click 'Enable exit node' in the dashboard to start filtering.".to_string());
-    } else {
-        message =
-            "Exit-node mode is active. DNS filtering is enabled for tailnet clients.".to_string();
-        if let Some(ref dns) = local_dns {
-            suggestions.push(format!(
-                "This machine is using {} as its DNS server. Ensure Cogwheel is running on {} to filter DNS queries.",
-                dns, dns
-            ));
-        }
-        suggestions.push("Tailnet clients will use this node as their exit node and DNS queries will be filtered.".to_string());
-    }
-
-    if status.exit_node_active {
-        suggestions.push("To verify filtering is working, connect another tailnet client and check its DNS queries are blocked.".to_string());
-    }
-
-    Ok(Json(ApiEnvelope {
-        data: TailscaleDnsCheckResult {
-            configured,
-            message,
-            local_dns_server: local_dns,
-            suggestions,
-        },
-    }))
-}
-
-fn configure_tailscale_exit_node(enabled: bool) -> Result<(), String> {
-    let advertise_flag = if enabled {
-        "--advertise-exit-node"
-    } else {
-        "--advertise-exit-node=false"
-    };
-
-    let output = Command::new("tailscale")
-        .args(["up", advertise_flag, "--accept-dns=false"])
-        .output()
-        .map_err(|error| error.to_string())?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "Failed to update Tailscale exit-node advertising: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))
-    }
-}
-
-fn read_tailscale_exit_node_pref() -> Option<bool> {
-    let output = Command::new("tailscale")
-        .args(["debug", "prefs"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-    value
-        .get("AdvertiseExitNode")
-        .and_then(serde_json::Value::as_bool)
-        .or_else(|| {
-            value
-                .get("AdvertiseRoutes")
-                .and_then(serde_json::Value::as_array)
-                .map(|routes| {
-                    routes.iter().any(|route| {
-                        route
-                            .as_str()
-                            .is_some_and(|entry| entry == "0.0.0.0/0" || entry == "::/0")
-                    })
-                })
-        })
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct SyncImportResult {
-    imported_sources: usize,
-    imported_devices: usize,
-    applied_revision: u64,
-    profile: String,
-}
-
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-struct SyncExportQuery {
-    profile: Option<String>,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct SyncProfileView {
-    profile: String,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-struct UpdateSyncProfileRequest {
-    profile: String,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct SyncTransportView {
-    mode: String,
-    token_configured: bool,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct SyncPeerStatusView {
-    node_public_key: String,
-    imports: usize,
-    last_import_at: chrono::DateTime<chrono::Utc>,
-    last_revision: u64,
-    profile: String,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct SyncNodeStatusView {
-    local_node_public_key: String,
-    profile: String,
-    revision: u64,
-    transport_mode: String,
-    transport_token_configured: bool,
-    replay_cache_entries: usize,
-    peers: Vec<SyncPeerStatusView>,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-struct UpdateSyncTransportRequest {
-    mode: String,
-    token: Option<String>,
-}
-
-fn normalize_sync_transport_mode(raw: Option<&str>) -> String {
-    match raw
-        .unwrap_or("opportunistic")
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "https-required" => "https-required".to_string(),
-        _ => "opportunistic".to_string(),
-    }
-}
-
-fn normalize_sync_profile(raw: Option<&str>) -> SyncProfile {
-    match raw.unwrap_or("full").trim().to_ascii_lowercase().as_str() {
-        "settings-only" => SyncProfile::SettingsOnly,
-        "read-only-follower" => SyncProfile::ReadOnlyFollower,
-        _ => SyncProfile::Full,
-    }
-}
-
-async fn load_sync_revision(storage: &Storage) -> Result<u64> {
-    let value = storage.get_setting("sync_revision").await?;
-    Ok(value
-        .as_deref()
-        .and_then(|raw| raw.parse::<u64>().ok())
-        .unwrap_or(0))
-}
-
-async fn load_sync_profile(storage: &Storage) -> Result<SyncProfile> {
-    let raw = storage.get_setting("sync_profile").await?;
-    Ok(normalize_sync_profile(raw.as_deref()))
-}
-
-async fn persist_sync_profile(storage: &Storage, profile: &SyncProfile) -> Result<()> {
-    storage
-        .upsert_setting("sync_profile", profile.as_str())
-        .await?;
-    Ok(())
-}
-
-async fn load_sync_transport_mode(storage: &Storage) -> Result<String> {
-    let raw = storage.get_setting("sync_transport_mode").await?;
-    Ok(normalize_sync_transport_mode(raw.as_deref()))
-}
-
-async fn persist_sync_transport_mode(storage: &Storage, mode: &str) -> Result<()> {
-    storage.upsert_setting("sync_transport_mode", mode).await?;
-    Ok(())
-}
-
-async fn load_sync_transport_token(storage: &Storage) -> Result<Option<String>> {
-    storage
-        .get_setting("sync_transport_token")
-        .await
-        .map_err(Into::into)
-}
-
-async fn persist_sync_transport_token(storage: &Storage, token: Option<&str>) -> Result<()> {
-    storage
-        .upsert_setting("sync_transport_token", token.unwrap_or(""))
-        .await?;
-    Ok(())
-}
-
-async fn enforce_sync_transport_policy(
-    state: &ServerState,
-    headers: &HeaderMap,
-) -> Result<(), axum::http::StatusCode> {
-    let mode = load_sync_transport_mode(&state.storage)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    if mode == "https-required" {
-        let forwarded_proto = headers
-            .get("x-forwarded-proto")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        if forwarded_proto != "https" {
-            return Err(axum::http::StatusCode::FORBIDDEN);
-        }
-    }
-
-    let token = load_sync_transport_token(&state.storage)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    if let Some(expected_token) = token.filter(|t| !t.is_empty()) {
-        let auth = headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        let Some(bearer) = auth.strip_prefix("Bearer ") else {
-            return Err(axum::http::StatusCode::UNAUTHORIZED);
-        };
-        if bearer != expected_token {
-            return Err(axum::http::StatusCode::UNAUTHORIZED);
-        }
-    }
-
-    Ok(())
-}
-
-async fn sync_profile(
-    State(state): State<ServerState>,
-    headers: HeaderMap,
-) -> Result<Json<ApiEnvelope<SyncProfileView>>, axum::http::StatusCode> {
-    enforce_sync_transport_policy(&state, &headers).await?;
-    let profile = load_sync_profile(&state.storage)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(ApiEnvelope {
-        data: SyncProfileView {
-            profile: profile.as_str().to_string(),
-        },
-    }))
-}
-
-async fn update_sync_profile(
-    State(state): State<ServerState>,
-    headers: HeaderMap,
-    Json(request): Json<UpdateSyncProfileRequest>,
-) -> Result<Json<ApiEnvelope<SyncProfileView>>, axum::http::StatusCode> {
-    enforce_sync_transport_policy(&state, &headers).await?;
-    let profile = normalize_sync_profile(Some(&request.profile));
-    persist_sync_profile(&state.storage, &profile)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    state
-        .storage
-        .record_audit_event(&AuditEvent {
-            id: Uuid::new_v4(),
-            event_type: "sync.profile_updated".to_string(),
-            payload: serde_json::json!({
-                "profile": profile.as_str(),
-            })
-            .to_string(),
-            created_at: chrono::Utc::now(),
-        })
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(ApiEnvelope {
-        data: SyncProfileView {
-            profile: profile.as_str().to_string(),
-        },
-    }))
-}
-
-async fn sync_transport(
-    State(state): State<ServerState>,
-    headers: HeaderMap,
-) -> Result<Json<ApiEnvelope<SyncTransportView>>, axum::http::StatusCode> {
-    enforce_sync_transport_policy(&state, &headers).await?;
-    let mode = load_sync_transport_mode(&state.storage)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let token = load_sync_transport_token(&state.storage)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(Json(ApiEnvelope {
-        data: SyncTransportView {
-            mode,
-            token_configured: token.is_some_and(|value| !value.is_empty()),
-        },
-    }))
-}
-
-async fn update_sync_transport(
-    State(state): State<ServerState>,
-    headers: HeaderMap,
-    Json(request): Json<UpdateSyncTransportRequest>,
-) -> Result<Json<ApiEnvelope<SyncTransportView>>, axum::http::StatusCode> {
-    enforce_sync_transport_policy(&state, &headers).await?;
-    let mode = normalize_sync_transport_mode(Some(&request.mode));
-    persist_sync_transport_mode(&state.storage, &mode)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let token = request.token.as_deref().map(str::trim);
-    let token = token.filter(|value| !value.is_empty());
-    persist_sync_transport_token(&state.storage, token)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    state
-        .storage
-        .record_audit_event(&AuditEvent {
-            id: Uuid::new_v4(),
-            event_type: "sync.transport_updated".to_string(),
-            payload: serde_json::json!({
-                "mode": mode,
-                "token_configured": token.is_some(),
-            })
-            .to_string(),
-            created_at: chrono::Utc::now(),
-        })
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(Json(ApiEnvelope {
-        data: SyncTransportView {
-            mode,
-            token_configured: token.is_some(),
-        },
-    }))
-}
-
-async fn sync_status(
-    State(state): State<ServerState>,
-) -> Result<Json<ApiEnvelope<SyncNodeStatusView>>, axum::http::StatusCode> {
-    let profile = load_sync_profile(&state.storage)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let revision = load_sync_revision(&state.storage)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let transport_mode = load_sync_transport_mode(&state.storage)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let transport_token = load_sync_transport_token(&state.storage)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let replay_cache_entries = lock_recover(&state.sync_seen_nonces).len();
-
-    let events = state
-        .storage
-        .recent_audit_events(200)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let mut peers = HashMap::<String, SyncPeerStatusView>::new();
-    for event in events {
-        if event.event_type != "sync.state_imported" {
-            continue;
-        }
-        let payload: serde_json::Value = match serde_json::from_str(&event.payload) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let from = match payload.get("from").and_then(serde_json::Value::as_str) {
-            Some(v) => v.to_string(),
-            None => continue,
-        };
-        let revision = payload
-            .get("revision")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        let profile = payload
-            .get("profile")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("full")
-            .to_string();
-
-        let entry = peers.entry(from.clone()).or_insert(SyncPeerStatusView {
-            node_public_key: from,
-            imports: 0,
-            last_import_at: event.created_at,
-            last_revision: revision,
-            profile,
-        });
-        entry.imports += 1;
-        if event.created_at > entry.last_import_at {
-            entry.last_import_at = event.created_at;
-            entry.last_revision = revision;
-            entry.profile = payload
-                .get("profile")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("full")
-                .to_string();
-        }
-    }
-
-    let mut peers: Vec<SyncPeerStatusView> = peers.into_values().collect();
-    peers.sort_by_key(|peer| std::cmp::Reverse(peer.last_import_at));
-
-    Ok(Json(ApiEnvelope {
-        data: SyncNodeStatusView {
-            local_node_public_key: state.storage.identity().public_b64.clone(),
-            profile: profile.as_str().to_string(),
-            revision,
-            transport_mode,
-            transport_token_configured: transport_token.is_some_and(|v| !v.is_empty()),
-            replay_cache_entries,
-            peers,
-        },
-    }))
-}
-
-async fn persist_sync_revision(storage: &Storage, revision: u64) -> Result<()> {
-    storage
-        .upsert_setting("sync_revision", &revision.to_string())
-        .await
-        .map_err(Into::into)
-}
-
-fn is_sync_payload_newer(
-    incoming_revision: u64,
-    incoming_node: &str,
-    local_revision: u64,
-    local_node: &str,
-) -> bool {
-    incoming_revision > local_revision
-        || (incoming_revision == local_revision && incoming_node > local_node)
-}
-
-fn register_sync_nonce(state: &ServerState, envelope: &SyncEnvelope) -> bool {
-    let now = chrono::Utc::now();
-
-    let max_age = chrono::Duration::minutes(10);
-    let max_future_skew = chrono::Duration::seconds(30);
-    if envelope.timestamp < (now - max_age) || envelope.timestamp > (now + max_future_skew) {
-        return false;
-    }
-
-    let key = format!("{}:{}", envelope.node_public_key, envelope.nonce);
-    let mut guard = lock_recover(&state.sync_seen_nonces);
-    guard.retain(|_, ts| *ts >= (now - chrono::Duration::minutes(30)));
-
-    if guard.contains_key(&key) {
-        return false;
-    }
-
-    guard.insert(key, now);
-    true
-}
-
-async fn export_sync_state(
-    State(state): State<ServerState>,
-    Query(query): Query<SyncExportQuery>,
-    headers: HeaderMap,
-) -> Result<Json<ApiEnvelope<SyncEnvelope>>, axum::http::StatusCode> {
-    enforce_sync_transport_policy(&state, &headers).await?;
-    let profile = if query.profile.is_some() {
-        normalize_sync_profile(query.profile.as_deref())
-    } else {
-        load_sync_profile(&state.storage)
-            .await
-            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
-    };
-
-    if matches!(profile, SyncProfile::ReadOnlyFollower) {
-        return Err(axum::http::StatusCode::FORBIDDEN);
-    }
-
-    let revision = load_sync_revision(&state.storage)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
-        .saturating_add(1);
-
-    let blocklists = if matches!(profile, SyncProfile::Full) {
-        state
-            .storage
-            .list_sources()
-            .await
-            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
-    } else {
-        Vec::new()
-    };
-    let devices = if matches!(profile, SyncProfile::Full) {
-        state
-            .storage
-            .list_devices()
-            .await
-            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
-    } else {
-        Vec::new()
-    };
-
-    let payload = SyncStatePayloadV1 {
-        version: 1,
-        revision,
-        profile: profile.as_str().to_string(),
-        exported_at: chrono::Utc::now(),
-        blocklists,
-        devices,
-        classifier: state.dns_runtime.classifier_settings(),
-        notifications: read_recover(&state.notification_settings).clone(),
-    };
-
-    let payload_bytes =
-        serde_json::to_vec(&payload).map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let envelope = state.storage.sign_sync_payload(&payload_bytes);
-
-    Ok(Json(ApiEnvelope { data: envelope }))
-}
-
-async fn import_sync_state(
-    State(state): State<ServerState>,
-    headers: HeaderMap,
-    Json(request): Json<ImportSyncEnvelopeRequest>,
-) -> Result<Json<ApiEnvelope<SyncImportResult>>, axum::http::StatusCode> {
-    enforce_sync_transport_policy(&state, &headers).await?;
-    let payload_bytes = Storage::verify_sync_envelope(&request.envelope)
-        .map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
-    let payload: SyncStatePayloadV1 =
-        serde_json::from_slice(&payload_bytes).map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
-
-    if payload.version != 1 {
-        return Err(axum::http::StatusCode::BAD_REQUEST);
-    }
-
-    if !register_sync_nonce(&state, &request.envelope) {
-        return Err(axum::http::StatusCode::BAD_REQUEST);
-    }
-
-    let profile = normalize_sync_profile(Some(&payload.profile));
-
-    let local_revision = load_sync_revision(&state.storage)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let local_node = state.storage.identity().public_b64.clone();
-    if !is_sync_payload_newer(
-        payload.revision,
-        &request.envelope.node_public_key,
-        local_revision,
-        &local_node,
-    ) {
-        return Err(axum::http::StatusCode::CONFLICT);
-    }
-
-    if matches!(profile, SyncProfile::Full) {
-        let existing_sources = state
-            .storage
-            .list_sources()
-            .await
-            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-        for source in existing_sources {
-            let _ = state
-                .storage
-                .delete_source(source.id)
-                .await
-                .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-        }
-        for source in &payload.blocklists {
-            state
-                .storage
-                .insert_source(source)
-                .await
-                .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-        }
-
-        let existing_devices = state
-            .storage
-            .list_devices()
-            .await
-            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-        for device in existing_devices {
-            let _ = state
-                .storage
-                .delete_device(device.id)
-                .await
-                .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-        }
-        for device in &payload.devices {
-            state
-                .storage
-                .upsert_device(device)
-                .await
-                .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-        }
-    }
-
-    persist_classifier_settings(&state.storage, &payload.classifier)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    state
-        .dns_runtime
-        .replace_classifier_settings(payload.classifier.clone());
-
-    persist_notification_settings(&state.storage, &payload.notifications)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    if let Ok(mut notifications) = state.notification_settings.write() {
-        *notifications = payload.notifications.clone();
-    }
-
-    persist_sync_revision(&state.storage, payload.revision)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    sync_runtime_device_policies(&state)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    state
-        .storage
-        .record_audit_event(&AuditEvent {
-            id: Uuid::new_v4(),
-            event_type: "sync.state_imported".to_string(),
-            payload: serde_json::json!({
-                "from": request.envelope.node_public_key,
-                "revision": payload.revision,
-                "profile": profile.as_str(),
-                "sources": payload.blocklists.len(),
-                "devices": payload.devices.len(),
-            })
-            .to_string(),
-            created_at: chrono::Utc::now(),
-        })
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(Json(ApiEnvelope {
-        data: SyncImportResult {
-            imported_sources: payload.blocklists.len(),
-            imported_devices: payload.devices.len(),
-            applied_revision: payload.revision,
-            profile: profile.as_str().to_string(),
-        },
-    }))
-}
-
-async fn list_rulesets(
-    State(state): State<ServerState>,
-) -> Result<Json<ApiEnvelope<Vec<RulesetSummary>>>, axum::http::StatusCode> {
-    state
-        .storage
-        .list_rulesets()
-        .await
-        .map(|rows| {
-            Json(ApiEnvelope {
-                data: rows
-                    .into_iter()
-                    .map(|row| RulesetSummary {
-                        id: row.id,
-                        hash: row.hash,
-                        status: row.status,
-                        created_at: row.created_at,
-                    })
-                    .collect(),
-            })
-        })
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)
-}
-
-async fn rollback_ruleset(
-    State(state): State<ServerState>,
-) -> Result<Json<ApiEnvelope<RulesetSummary>>, axum::http::StatusCode> {
-    let Some(artifact) = state
-        .storage
-        .rollback_to_previous_ruleset()
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
-    else {
-        return Err(axum::http::StatusCode::NOT_FOUND);
-    };
-
-    let rollback_policy = Arc::new(PolicyEngine::new(artifact.clone()));
-    let profile_policies = match load_current_runtime_policy_catalog(&state).await {
-        Ok(catalog) => catalog.profile_policies,
-        Err(error) => {
-            tracing::warn!(%error, "failed to rebuild profile policies during rollback");
-            HashMap::new()
-        }
-    };
-    state
-        .dns_runtime
-        .replace_policy_catalog(rollback_policy, profile_policies);
-    sync_runtime_device_policies(&state)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    state
-        .storage
-        .record_audit_event(&AuditEvent {
-            id: Uuid::new_v4(),
-            event_type: "ruleset.rollback".to_string(),
-            payload: serde_json::json!({
-                "ruleset_id": artifact.id,
-                "hash": artifact.hash,
-            })
-            .to_string(),
-            created_at: chrono::Utc::now(),
-        })
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let notification_settings = read_recover(&state.notification_settings).clone();
-    if should_deliver_notification(&notification_settings, "high") {
-        let event = NotificationWebhookEvent {
-            event_type: "ruleset.rollback".to_string(),
-            severity: "high".to_string(),
-            title: "Ruleset rolled back".to_string(),
-            summary: format!("Rolled back to ruleset {}.", artifact.hash),
-            domain: None,
-            device_name: None,
-            client_ip: Some("control-plane".to_string()),
-            details: vec![format!("ruleset id {}", artifact.id)],
-            created_at: chrono::Utc::now(),
-        };
-        if let Err(error) = deliver_operational_notification(
-            &state.storage,
-            &state.http_client,
-            &notification_settings,
-            event,
-        )
-        .await
-        {
-            tracing::warn!(%error, "failed to deliver rollback notification");
-        }
-    }
-
-    Ok(Json(ApiEnvelope {
-        data: RulesetSummary {
-            id: artifact.id,
-            hash: artifact.hash,
-            status: "active".to_string(),
-            created_at: artifact.created_at,
-        },
-    }))
-}
-
-async fn list_audit_events(
-    State(state): State<ServerState>,
-) -> Result<Json<ApiEnvelope<Vec<AuditEvent>>>, axum::http::StatusCode> {
-    state
-        .storage
-        .recent_audit_events(20)
-        .await
-        .map(|data| Json(ApiEnvelope { data }))
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct BackupData {
-    version: String,
-    created_at: String,
-    sources: Vec<SourceRecord>,
-    devices: Vec<DeviceRecord>,
-    classifier: ClassifierSettings,
-    notifications: NotificationSettings,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-struct RestoreRequest {
-    data: BackupData,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct BackupResult {
-    success: bool,
-    message: String,
-    size_bytes: usize,
-}
-
-async fn backup_data(
-    State(state): State<ServerState>,
-) -> Result<Json<ApiEnvelope<BackupData>>, axum::http::StatusCode> {
-    let sources = state
-        .storage
-        .list_sources()
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let devices = state
-        .storage
-        .list_devices()
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let classifier = state.dns_runtime.classifier_settings();
-    let notifications = read_recover(&state.notification_settings).clone();
-
-    let backup = BackupData {
-        version: "1.0".to_string(),
-        created_at: chrono::Utc::now().to_rfc3339(),
-        sources,
-        devices,
-        classifier,
-        notifications,
-    };
-
-    Ok(Json(ApiEnvelope { data: backup }))
-}
-
-async fn restore_data(
-    State(state): State<ServerState>,
-    Json(request): Json<RestoreRequest>,
-) -> Result<Json<ApiEnvelope<BackupResult>>, axum::http::StatusCode> {
-    let data = request.data;
-    let source_count = data.sources.len();
-    let device_count = data.devices.len();
-    let size_bytes = serde_json::to_string(&data).map(|s| s.len()).unwrap_or(0);
-
-    let mut restore_failures: Vec<String> = Vec::new();
-    let mut restored_sources = 0usize;
-    for source in &data.sources {
-        match state.storage.insert_source(source).await {
-            Ok(()) => restored_sources += 1,
-            Err(error) => restore_failures.push(format!("source {}: {error}", source.name)),
-        }
-    }
-
-    let mut restored_devices = 0usize;
-    for device in &data.devices {
-        match state.storage.upsert_device(device).await {
-            Ok(()) => restored_devices += 1,
-            Err(error) => restore_failures.push(format!("device {}: {error}", device.ip_address)),
-        }
-    }
-
-    if let Ok(mut notifications) = state.notification_settings.write() {
-        *notifications = data.notifications;
-    } else {
-        tracing::error!("notification settings lock poisoned; restore left them unchanged");
-    }
-
-    state
-        .storage
-        .record_audit_event(&AuditEvent {
-            id: Uuid::new_v4(),
-            event_type: "backup.restore_completed".to_string(),
-            payload: serde_json::json!({
-                "version": data.version,
-                "source_count": source_count,
-                "device_count": device_count,
-                "size_bytes": size_bytes,
-            })
-            .to_string(),
-            created_at: chrono::Utc::now(),
-        })
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // Report what actually landed. Previously every write result was discarded and the response
-    // claimed success unconditionally, so a restore onto a node with a locked database or a full
-    // disk told the operator it had worked -- and wrote that claim into the audit log.
-    let success = restore_failures.is_empty();
-    let message = if success {
-        format!(
-            "Restored {} sources, {} devices, classifier and notification settings",
-            restored_sources, restored_devices
-        )
-    } else {
-        let shown = restore_failures.len().min(3);
-        format!(
-            "Restored {}/{} sources and {}/{} devices; {} write(s) failed: {}",
-            restored_sources,
-            source_count,
-            restored_devices,
-            device_count,
-            restore_failures.len(),
-            restore_failures[..shown].join("; ")
-        )
-    };
-    if !success {
-        tracing::error!(
-            failures = restore_failures.len(),
-            "backup restore partially failed"
-        );
-    }
-
-    Ok(Json(ApiEnvelope {
-        data: BackupResult {
-            success,
-            message,
-            size_bytes,
-        },
-    }))
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct ResilienceDrillResult {
-    drill_type: String,
-    success: bool,
-    message: String,
-    recommendations: Vec<String>,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-struct ResilienceDrillRequest {
-    #[allow(dead_code)]
-    duration_secs: Option<u64>,
-}
-
-async fn simulate_upstream_outage(
-    State(state): State<ServerState>,
-    Json(_request): Json<ResilienceDrillRequest>,
-) -> Result<Json<ApiEnvelope<ResilienceDrillResult>>, axum::http::StatusCode> {
-    let snapshot = state.dns_runtime.snapshot();
-    let has_failures = snapshot.upstream_failures_total > 0;
-    let fallback_working = snapshot.fallback_served_total > 0;
-
-    let mut recommendations = vec![
-        "Monitor upstream health metrics during failures".to_string(),
-        "Verify fallback cache is warming properly".to_string(),
-    ];
-
-    if !has_failures {
-        recommendations.push("Consider simulating failures to test fallback behavior".to_string());
-    }
-
-    if !fallback_working {
-        recommendations
-            .push("CRITICAL: Fallback cache not serving - check cache warming".to_string());
-    }
-
-    Ok(Json(ApiEnvelope {
-        data: ResilienceDrillResult {
-            drill_type: "upstream_outage".to_string(),
-            success: fallback_working,
-            message: format!(
-                "Upstream failures: {}, Fallback served: {}",
-                snapshot.upstream_failures_total, snapshot.fallback_served_total
-            ),
-            recommendations,
-        },
-    }))
-}
-
-async fn simulate_db_corruption(
-    State(state): State<ServerState>,
-    Json(_request): Json<ResilienceDrillRequest>,
-) -> Result<Json<ApiEnvelope<ResilienceDrillResult>>, axum::http::StatusCode> {
-    let sources_result = state.storage.list_sources().await;
-    let devices_result = state.storage.list_devices().await;
-
-    let db_healthy = sources_result.is_ok() && devices_result.is_ok();
-
-    let mut recommendations = vec![
-        "Regular backup verification is critical".to_string(),
-        "Test restore procedures periodically".to_string(),
-    ];
-
-    if !db_healthy {
-        recommendations
-            .push("URGENT: Database corruption detected - initiate recovery".to_string());
-    }
-
-    Ok(Json(ApiEnvelope {
-        data: ResilienceDrillResult {
-            drill_type: "db_corruption".to_string(),
-            success: db_healthy,
-            message: if db_healthy {
-                "Database integrity check passed".to_string()
-            } else {
-                "Database integrity check failed".to_string()
-            },
-            recommendations,
-        },
-    }))
-}
-
-async fn simulate_source_failure(
-    State(state): State<ServerState>,
-    Json(_request): Json<ResilienceDrillRequest>,
-) -> Result<Json<ApiEnvelope<ResilienceDrillResult>>, axum::http::StatusCode> {
-    let sources = state
-        .storage
-        .list_sources()
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let enabled_count = sources.iter().filter(|s| s.enabled).count();
-    let total_count = sources.len();
-
-    let mut recommendations = vec![
-        "Multiple source redundancy is recommended".to_string(),
-        "Monitor source refresh failures".to_string(),
-    ];
-
-    if enabled_count == 0 && total_count > 0 {
-        recommendations.push("WARNING: No sources enabled - blocking may not work".to_string());
-    }
-
-    if total_count == 1 {
-        recommendations.push("Consider adding redundant sources".to_string());
-    }
-
-    Ok(Json(ApiEnvelope {
-        data: ResilienceDrillResult {
-            drill_type: "source_failure".to_string(),
-            success: enabled_count > 0,
-            message: format!("{} of {} sources enabled", enabled_count, total_count),
-            recommendations,
-        },
-    }))
-}
-
-async fn simulate_sync_partition(
-    State(state): State<ServerState>,
-    Json(_request): Json<ResilienceDrillRequest>,
-) -> Result<Json<ApiEnvelope<ResilienceDrillResult>>, axum::http::StatusCode> {
-    let transport_mode = load_sync_transport_mode(&state.storage)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let transport_token = load_sync_transport_token(&state.storage)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let transport_ok = transport_token.is_some() || transport_mode != "disabled";
-
-    let mut recommendations = vec![
-        "Monitor sync peer connectivity".to_string(),
-        "Verify transport token configuration".to_string(),
-    ];
-
-    if !transport_ok {
-        recommendations.push("Sync transport not fully configured".to_string());
-    }
-
-    Ok(Json(ApiEnvelope {
-        data: ResilienceDrillResult {
-            drill_type: "sync_partition".to_string(),
-            success: transport_ok,
-            message: format!("Transport mode: {}", transport_mode),
-            recommendations,
-        },
-    }))
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct FalsePositiveBudgetStatus {
-    release_ready: bool,
-    blocking_rate: f64,
-    blocked_total: u64,
-    queries_total: u64,
-    false_positive_estimate: f64,
-    budget_remaining: f64,
-    budget_limit: f64,
-    recommendations: Vec<String>,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct LatencyBudgetCheck {
-    label: String,
-    observed_ms: f64,
-    target_p50_ms: f64,
-    sample_count: u64,
-    status: String,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct LatencyBudgetStatus {
-    within_budget: bool,
-    cache_hit_rate: f64,
-    checks: Vec<LatencyBudgetCheck>,
-    recommendations: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
 struct ResolverAccessStatus {
     hostname: Option<String>,
     dns_targets: Vec<String>,
-    tailscale_ip: Option<String>,
     notes: Vec<String>,
-}
-
-async fn false_positive_budget_status(
-    State(state): State<ServerState>,
-) -> Result<Json<ApiEnvelope<FalsePositiveBudgetStatus>>, axum::http::StatusCode> {
-    let snapshot = state.dns_runtime.snapshot();
-    let blocked = snapshot.blocked_total;
-    let queries = snapshot.queries_total.max(1);
-    let blocking_rate = (blocked as f64) / (queries as f64);
-    let budget_limit = 0.001; // 0.1% false positive budget
-    let false_positive_estimate = blocking_rate * 0.1; // Assume 10% of blocked are false positives
-    let budget_remaining = (budget_limit - false_positive_estimate).max(0.0);
-    let release_ready = false_positive_estimate < budget_limit;
-
-    let mut recommendations = vec![];
-
-    if release_ready {
-        recommendations.push("System meets false-positive budget for release".to_string());
-    } else {
-        recommendations.push(
-            "WARNING: False-positive rate exceeds budget - review blocking rules".to_string(),
-        );
-    }
-
-    if blocking_rate > 0.05 {
-        recommendations.push("High blocking rate detected - verify list quality".to_string());
-    }
-
-    if queries < 1000_u64 {
-        recommendations
-            .push("Low query volume - insufficient data for reliable estimate".to_string());
-    }
-
-    Ok(Json(ApiEnvelope {
-        data: FalsePositiveBudgetStatus {
-            release_ready,
-            blocking_rate,
-            blocked_total: blocked,
-            queries_total: queries,
-            false_positive_estimate,
-            budget_remaining,
-            budget_limit,
-            recommendations,
-        },
-    }))
-}
-
-async fn latency_budget_status(
-    State(state): State<ServerState>,
-) -> Result<Json<ApiEnvelope<LatencyBudgetStatus>>, axum::http::StatusCode> {
-    let snapshot = state.dns_runtime.snapshot();
-    let queries = snapshot.queries_total.max(1);
-    let cache_hit_rate = snapshot.cache_hits_total as f64 / queries as f64;
-
-    let checks = vec![
-        latency_budget_check(
-            "Cache hit",
-            snapshot.cache_hit_latency_avg_ns,
-            1.0,
-            snapshot.cache_hit_samples,
-        ),
-        latency_budget_check(
-            "Cache miss",
-            snapshot.cache_miss_latency_avg_ns,
-            8.0,
-            snapshot.cache_miss_samples,
-        ),
-        latency_budget_check(
-            "Classifier monitor path",
-            snapshot.classifier_latency_avg_ns,
-            10.0,
-            snapshot.classifier_latency_samples,
-        ),
-    ];
-
-    let within_budget = checks.iter().all(|check| check.status != "over-budget");
-    let mut recommendations = Vec::new();
-
-    if within_budget {
-        recommendations
-            .push("Observed hot-path latency stays within current p50 budget targets.".to_string());
-    } else {
-        recommendations.push(
-            "One or more hot-path stages are over budget; review recent policy or cache changes."
-                .to_string(),
-        );
-    }
-
-    if cache_hit_rate < 0.5 {
-        recommendations.push("Cache hit rate is low; review TTLs and warm-path traffic before tightening latency budgets further.".to_string());
-    } else {
-        recommendations.push(format!(
-            "Cache hit rate is {:.1}% across the current runtime window.",
-            cache_hit_rate * 100.0
-        ));
-    }
-
-    if snapshot.cache_miss_samples < 25 {
-        recommendations.push(
-            "Cache-miss sample volume is still low; continue soak testing for stronger confidence."
-                .to_string(),
-        );
-    }
-
-    Ok(Json(ApiEnvelope {
-        data: LatencyBudgetStatus {
-            within_budget,
-            cache_hit_rate,
-            checks,
-            recommendations,
-        },
-    }))
-}
-
-fn latency_budget_check(
-    label: &str,
-    observed_ns: u64,
-    target_p50_ms: f64,
-    sample_count: u64,
-) -> LatencyBudgetCheck {
-    let observed_ms = observed_ns as f64 / 1_000_000.0;
-    let status = if sample_count == 0 {
-        "insufficient-data"
-    } else if observed_ms <= target_p50_ms {
-        "within-budget"
-    } else {
-        "over-budget"
-    };
-
-    LatencyBudgetCheck {
-        label: label.to_string(),
-        observed_ms,
-        target_p50_ms,
-        sample_count,
-        status: status.to_string(),
-    }
 }
 
 async fn resolver_access_status(
@@ -3786,7 +1121,6 @@ async fn resolver_access_status(
         &headers,
         &state.advertised_dns_targets,
     );
-    let tailscale_ip = discover_tailscale_ipv4();
     let hostname = std::env::var("HOSTNAME")
         .ok()
         .or_else(|| read_command_output("hostname", &[]));
@@ -3799,12 +1133,6 @@ async fn resolver_access_status(
             state.advertised_dns_port
         )]
     };
-    if tailscale_ip.is_some() {
-        notes.push(
-            "Tailscale is available, so tailnet devices can use the Tailscale address directly."
-                .to_string(),
-        );
-    }
     if state.advertised_dns_port == 53 {
         notes.push(
             "Android tablets and phones should use the Wi-Fi network DNS setting with the LAN IP shown here; Android Private DNS expects DNS-over-TLS and is not the right mode for this deployment."
@@ -3820,7 +1148,6 @@ async fn resolver_access_status(
         data: ResolverAccessStatus {
             hostname,
             dns_targets,
-            tailscale_ip,
             notes,
         },
     }))
@@ -3853,9 +1180,6 @@ fn discover_dns_targets(
                 targets.push(format_dns_target(&ip, advertised_port));
             }
         }
-        for ip in discover_local_ipv6s() {
-            targets.push(format_dns_target(&ip, advertised_port));
-        }
     } else {
         targets.push(format_dns_target(
             &bind_addr.ip().to_string(),
@@ -3883,68 +1207,21 @@ fn format_dns_target(host: &str, port: u16) -> String {
     }
 }
 
+/// Every IPv4 address the host answers on, from `hostname -I`.
+///
+/// One shell-out, deliberately. Enumerating interfaces properly needs `ip` and
+/// a netlink parser; `hostname -I` is on every Debian-family image this ships
+/// on and is exactly the list a person would copy into a router's DNS field.
 fn discover_local_ipv4s() -> Vec<String> {
-    #[cfg(target_os = "linux")]
-    {
-        if let Some(output) = read_command_output("hostname", &["-I"]) {
-            return output
+    read_command_output("hostname", &["-I"])
+        .map(|output| {
+            output
                 .split_whitespace()
                 .filter(|value| value.parse::<std::net::Ipv4Addr>().is_ok())
                 .map(ToString::to_string)
-                .collect();
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let mut values = Vec::new();
-        for interface in ["en0", "en1"] {
-            if let Some(ip) = read_command_output("ipconfig", &["getifaddr", interface]) {
-                values.push(ip);
-            }
-        }
-        if !values.is_empty() {
-            return values;
-        }
-    }
-
-    Vec::new()
-}
-
-fn discover_local_ipv6s() -> Vec<String> {
-    #[cfg(target_os = "linux")]
-    {
-        if let Some(output) = read_command_output(
-            "sh",
-            &[
-                "-c",
-                "ip -6 -o addr show scope global | awk '{print $4}' | cut -d/ -f1",
-            ],
-        ) {
-            return output
-                .split_whitespace()
-                .filter(|value| value.parse::<std::net::Ipv6Addr>().is_ok())
-                .filter(|value| !value.starts_with("fe80:") && *value != "::1")
-                .map(ToString::to_string)
-                .collect();
-        }
-    }
-
-    Vec::new()
-}
-
-fn discover_tailscale_ipv4() -> Option<String> {
-    read_command_output("tailscale", &["ip", "-4"]).and_then(|output| {
-        output
-            .lines()
-            .map(str::trim)
-            .find(|line| line.parse::<std::net::Ipv4Addr>().is_ok())
-            .map(ToString::to_string)
-    })
-}
-
-async fn favicon() -> axum::http::StatusCode {
-    axum::http::StatusCode::NO_CONTENT
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn read_command_output(command: &str, args: &[&str]) -> Option<String> {
@@ -3965,68 +1242,20 @@ async fn runtime_snapshot(
     }))
 }
 
-async fn runtime_health(
-    State(state): State<ServerState>,
-) -> Result<Json<ApiEnvelope<RuntimeHealthResponse>>, axum::http::StatusCode> {
-    Ok(Json(ApiEnvelope {
-        data: current_runtime_health(&state),
-    }))
-}
-
-async fn run_runtime_health_check(
-    State(state): State<ServerState>,
-) -> Result<Json<ApiEnvelope<RuntimeHealthResponse>>, axum::http::StatusCode> {
-    active_runtime_health_check(&state)
-        .await
-        .map(|data| Json(ApiEnvelope { data }))
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)
-}
-
 #[derive(serde::Deserialize)]
 struct PauseRuntimeRequest {
     minutes: u32,
 }
 
-async fn pause_runtime(
-    State(state): State<ServerState>,
-    Json(request): Json<PauseRuntimeRequest>,
-) -> Result<(), axum::http::StatusCode> {
-    let until = chrono::Utc::now() + chrono::Duration::minutes(request.minutes as i64);
+async fn pause_runtime(State(state): State<ServerState>, Json(request): Json<PauseRuntimeRequest>) {
+    let until = chrono::Utc::now() + chrono::Duration::minutes(i64::from(request.minutes));
     state.dns_runtime.pause_protection_until(until);
-
-    state
-        .storage
-        .record_audit_event(&AuditEvent {
-            id: uuid::Uuid::new_v4(),
-            event_type: "runtime.protection_paused".to_string(),
-            payload: serde_json::json!({
-                "minutes": request.minutes,
-                "until": until,
-            })
-            .to_string(),
-            created_at: chrono::Utc::now(),
-        })
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(())
+    tracing::info!(minutes = request.minutes, %until, "protection paused");
 }
 
-async fn resume_runtime(State(state): State<ServerState>) -> Result<(), axum::http::StatusCode> {
+async fn resume_runtime(State(state): State<ServerState>) {
     state.dns_runtime.resume_protection();
-
-    state
-        .storage
-        .record_audit_event(&AuditEvent {
-            id: uuid::Uuid::new_v4(),
-            event_type: "runtime.protection_resumed".to_string(),
-            payload: "{}".to_string(),
-            created_at: chrono::Utc::now(),
-        })
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(())
+    tracing::info!("protection resumed");
 }
 
 async fn refresh_sources(
@@ -4040,233 +1269,6 @@ async fn refresh_sources(
         .await
         .map(|data| Json(ApiEnvelope { data }))
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)
-}
-
-async fn list_services(
-    State(state): State<ServerState>,
-) -> Result<Json<ApiEnvelope<Vec<ServiceToggleView>>>, axum::http::StatusCode> {
-    build_service_toggle_views(&state)
-        .await
-        .map(|data| Json(ApiEnvelope { data }))
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)
-}
-
-async fn update_service_toggle(
-    State(state): State<ServerState>,
-    Json(request): Json<UpdateServiceToggleRequest>,
-) -> Result<Json<ApiEnvelope<RefreshResponse>>, axum::http::StatusCode> {
-    let manifests = built_in_service_manifests();
-    if !manifests
-        .iter()
-        .any(|item| item.service_id == request.service_id)
-    {
-        return Err(axum::http::StatusCode::NOT_FOUND);
-    }
-
-    let mut snapshot = load_service_toggle_snapshot(&state.storage)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    snapshot.upsert(&request.service_id, request.mode);
-    persist_service_toggle_snapshot(&state.storage, &snapshot)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    state
-        .storage
-        .record_audit_event(&AuditEvent {
-            id: Uuid::new_v4(),
-            event_type: "service-toggle.updated".to_string(),
-            payload: serde_json::json!({
-                "service_id": request.service_id,
-                "mode": snapshot.mode_for(&request.service_id),
-            })
-            .to_string(),
-            created_at: chrono::Utc::now(),
-        })
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    refresh_sources_once(&state, "service-toggle", None)
-        .await
-        .map(|data| Json(ApiEnvelope { data }))
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)
-}
-
-async fn update_classifier_settings(
-    State(state): State<ServerState>,
-    Json(request): Json<UpdateClassifierSettingsRequest>,
-) -> Result<Json<ApiEnvelope<ClassifierSettings>>, axum::http::StatusCode> {
-    let settings = ClassifierSettings {
-        mode: request.mode,
-        sensitivity: request.sensitivity,
-    };
-
-    persist_classifier_settings(&state.storage, &settings)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    state
-        .dns_runtime
-        .replace_classifier_settings(settings.clone());
-    state
-        .storage
-        .record_audit_event(&AuditEvent {
-            id: Uuid::new_v4(),
-            event_type: "classifier-settings.updated".to_string(),
-            payload: serde_json::to_string(&settings)
-                .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?,
-            created_at: chrono::Utc::now(),
-        })
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(Json(ApiEnvelope { data: settings }))
-}
-
-async fn update_notification_settings(
-    State(state): State<ServerState>,
-    Json(request): Json<UpdateNotificationSettingsRequest>,
-) -> Result<Json<ApiEnvelope<NotificationSettings>>, axum::http::StatusCode> {
-    let settings = NotificationSettings {
-        enabled: request.enabled,
-        webhook_url: normalize_webhook_url(request.webhook_url.as_deref())
-            .ok_or(axum::http::StatusCode::BAD_REQUEST)?,
-        min_severity: normalize_notification_severity(&request.min_severity)
-            .ok_or(axum::http::StatusCode::BAD_REQUEST)?,
-    };
-
-    persist_notification_settings(&state.storage, &settings)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    *write_recover(&state.notification_settings) = settings.clone();
-    state
-        .storage
-        .record_audit_event(&AuditEvent {
-            id: Uuid::new_v4(),
-            event_type: "notification-settings.updated".to_string(),
-            payload: serde_json::to_string(&settings)
-                .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?,
-            created_at: chrono::Utc::now(),
-        })
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(Json(ApiEnvelope { data: settings }))
-}
-
-async fn test_notification_settings(
-    State(state): State<ServerState>,
-    Json(request): Json<TestNotificationRequest>,
-) -> Result<Json<ApiEnvelope<NotificationTestResult>>, axum::http::StatusCode> {
-    let settings = read_recover(&state.notification_settings).clone();
-    let Some(target) = settings.webhook_url.clone() else {
-        return Err(axum::http::StatusCode::BAD_REQUEST);
-    };
-
-    let severity = normalize_notification_severity(
-        request
-            .severity
-            .as_deref()
-            .unwrap_or(&settings.min_severity),
-    )
-    .ok_or(axum::http::StatusCode::BAD_REQUEST)?;
-    let dry_run = request.dry_run.unwrap_or(false);
-
-    let test_event = SecurityEventRecord {
-        id: Uuid::new_v4(),
-        device_id: None,
-        device_name: Some(
-            request
-                .device_name
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| "Control Plane Test".to_string()),
-        ),
-        client_ip: "127.0.0.1".to_string(),
-        domain: request
-            .domain
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "notification-test.cogwheel.local".to_string()),
-        classifier_score: 1.0,
-        severity: severity.clone(),
-        created_at: chrono::Utc::now(),
-    };
-
-    if dry_run {
-        state
-            .storage
-            .record_audit_event(&AuditEvent {
-                id: Uuid::new_v4(),
-                event_type: "notification-settings.tested.dry-run".to_string(),
-                payload: serde_json::to_string(&serde_json::json!({
-                    "target": target,
-                    "severity": test_event.severity,
-                    "domain": test_event.domain,
-                }))
-                .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?,
-                created_at: test_event.created_at,
-            })
-            .await
-            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        return Ok(Json(ApiEnvelope {
-            data: NotificationTestResult {
-                outcome: "validated".to_string(),
-                target,
-            },
-        }));
-    }
-
-    deliver_security_notification(
-        state.storage.as_ref(),
-        &state.http_client,
-        &settings,
-        &test_event,
-    )
-    .await
-    .map_err(|_| axum::http::StatusCode::BAD_GATEWAY)?;
-    state
-        .storage
-        .record_audit_event(&AuditEvent {
-            id: Uuid::new_v4(),
-            event_type: "notification-settings.tested".to_string(),
-            payload: serde_json::to_string(&serde_json::json!({
-                "target": target,
-                "severity": test_event.severity,
-            }))
-            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?,
-            created_at: test_event.created_at,
-        })
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(Json(ApiEnvelope {
-        data: NotificationTestResult {
-            outcome: "sent".to_string(),
-            target,
-        },
-    }))
-}
-
-async fn update_notification_test_presets(
-    State(state): State<ServerState>,
-    Json(request): Json<UpdateNotificationPresetsRequest>,
-) -> Result<Json<ApiEnvelope<Vec<NotificationTestPreset>>>, axum::http::StatusCode> {
-    let presets = normalize_notification_test_presets(request.presets);
-    persist_notification_test_presets(&state.storage, &presets)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    state
-        .storage
-        .record_audit_event(&AuditEvent {
-            id: Uuid::new_v4(),
-            event_type: "notification-test-presets.updated".to_string(),
-            payload: serde_json::to_string(&presets)
-                .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?,
-            created_at: chrono::Utc::now(),
-        })
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(Json(ApiEnvelope { data: presets }))
 }
 
 async fn upsert_blocklist(
@@ -4303,17 +1305,6 @@ async fn upsert_blocklist(
         .insert_source(&source)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    state
-        .storage
-        .record_audit_event(&AuditEvent {
-            id: Uuid::new_v4(),
-            event_type: "blocklist.upserted".to_string(),
-            payload: serde_json::to_string(&source)
-                .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?,
-            created_at: chrono::Utc::now(),
-        })
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if request.refresh_now.unwrap_or(true) && source.enabled {
         return refresh_sources_once(&state, "blocklist-update", None)
@@ -4325,7 +1316,8 @@ async fn upsert_blocklist(
     Ok(Json(ApiEnvelope {
         data: RefreshResponse {
             outcome: "saved".to_string(),
-            ruleset: None,
+            hash: None,
+            rule_count: None,
             notes: vec![format!("saved blocklist {}", source.name)],
         },
     }))
@@ -4354,17 +1346,6 @@ async fn update_blocklist_state(
         .insert_source(&source)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    state
-        .storage
-        .record_audit_event(&AuditEvent {
-            id: Uuid::new_v4(),
-            event_type: "blocklist.state_updated".to_string(),
-            payload: serde_json::to_string(&source)
-                .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?,
-            created_at: chrono::Utc::now(),
-        })
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if request.refresh_now.unwrap_or(true) {
         return refresh_sources_once(&state, "blocklist-state-update", None)
@@ -4376,7 +1357,8 @@ async fn update_blocklist_state(
     Ok(Json(ApiEnvelope {
         data: RefreshResponse {
             outcome: "saved".to_string(),
-            ruleset: None,
+            hash: None,
+            rule_count: None,
             notes: vec![format!(
                 "{} blocklist {}",
                 if source.enabled {
@@ -4416,18 +1398,6 @@ async fn delete_blocklist(
         return Err(axum::http::StatusCode::NOT_FOUND);
     }
 
-    state
-        .storage
-        .record_audit_event(&AuditEvent {
-            id: Uuid::new_v4(),
-            event_type: "blocklist.deleted".to_string(),
-            payload: serde_json::to_string(&source)
-                .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?,
-            created_at: chrono::Utc::now(),
-        })
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
     if request.refresh_now.unwrap_or(true) {
         return refresh_sources_once(&state, "blocklist-delete", None)
             .await
@@ -4438,7 +1408,8 @@ async fn delete_blocklist(
     Ok(Json(ApiEnvelope {
         data: RefreshResponse {
             outcome: "saved".to_string(),
-            ruleset: None,
+            hash: None,
+            rule_count: None,
             notes: vec![format!("deleted blocklist {}", source.name)],
         },
     }))
@@ -4489,66 +1460,18 @@ async fn refresh_sources_once(
         parsed_sources.push(fetch_and_parse_source(&client, source).await?);
     }
 
-    let manifests = built_in_service_manifests();
-    let snapshot = load_service_toggle_snapshot(&state.storage).await?;
-    let service_layer = compile_service_rule_layer(&manifests, &snapshot);
-    if !service_layer.rules.is_empty() {
-        parsed_sources.push(synthetic_source("service-toggles", service_layer.rules));
-    }
-
     let verification = verify_candidate(&parsed_sources, &state.protected_domains);
     if !verification.passed {
-        let rejection_notes = verification
-            .notes
-            .iter()
-            .cloned()
-            .chain(service_layer.notes.iter().cloned())
-            .collect::<Vec<_>>();
-        state
-            .storage
-            .record_audit_event(&AuditEvent {
-                id: Uuid::new_v4(),
-                event_type: "ruleset.refresh_rejected".to_string(),
-                payload: serde_json::json!({
-                    "reason": reason,
-                    "notes": verification.notes,
-                    "blocked_protected_domains": verification.blocked_protected_domains,
-                    "invalid_ratio": verification.invalid_ratio,
-                })
-                .to_string(),
-                created_at: chrono::Utc::now(),
-            })
-            .await?;
-
-        let notification_settings = read_recover(&state.notification_settings).clone();
-        if should_deliver_notification(&notification_settings, "high") {
-            let event = NotificationWebhookEvent {
-                event_type: "ruleset.refresh_rejected".to_string(),
-                severity: "high".to_string(),
-                title: "Ruleset refresh rejected".to_string(),
-                summary: format!("Refresh {} was rejected before activation.", reason),
-                domain: None,
-                device_name: None,
-                client_ip: Some("control-plane".to_string()),
-                details: rejection_notes.clone(),
-                created_at: chrono::Utc::now(),
-            };
-            if let Err(error) = deliver_operational_notification(
-                &state.storage,
-                &client,
-                &notification_settings,
-                event,
-            )
-            .await
-            {
-                tracing::warn!(%error, "failed to deliver refresh rejection notification");
-            }
-        }
-
+        tracing::warn!(
+            reason,
+            notes = ?verification.notes,
+            "refresh rejected before activation"
+        );
         return Ok(RefreshResponse {
             outcome: "rejected".to_string(),
-            ruleset: None,
-            notes: rejection_notes,
+            hash: None,
+            rule_count: None,
+            notes: verification.notes,
         });
     }
 
@@ -4558,233 +1481,41 @@ async fn refresh_sources_once(
         configured_block_mode(),
     );
 
-    state
-        .storage
-        .record_ruleset(&RulesetRecord {
-            id: catalog.global_policy.artifact().id,
-            hash: catalog.global_policy.artifact().hash.clone(),
-            status: "candidate".to_string(),
-            created_at: catalog.global_policy.artifact().created_at,
-            artifact_json: serde_json::to_string(catalog.global_policy.artifact())?,
-        })
-        .await?;
-    let runtime_before = state.dns_runtime.snapshot();
-    state
-        .storage
-        .activate_ruleset(catalog.global_policy.artifact().id)
-        .await?;
-    state.dns_runtime.replace_policy_catalog(
-        catalog.global_policy.clone(),
-        catalog.profile_policies.clone(),
-    );
-    sync_runtime_device_policies(state).await?;
-
-    let mut regression_notes =
-        post_activation_regressions(catalog.global_policy.as_ref(), &state.protected_domains)
-            .unwrap_or_default();
-    let runtime_report = run_runtime_guard_probes(state, &runtime_before).await;
-    if runtime_report.degraded {
-        regression_notes.extend(runtime_report.notes);
-    }
-
-    if !regression_notes.is_empty() {
-        let Some(artifact) = state.storage.rollback_to_previous_ruleset().await? else {
-            anyhow::bail!("regression detected but no previous ruleset available for rollback");
-        };
-        state.dns_runtime.replace_policy_catalog(
-            Arc::new(PolicyEngine::new(artifact.clone())),
-            HashMap::new(),
+    // The safety net runs against the candidate BEFORE it is installed. It
+    // used to run after activation and roll the runtime back to the previous
+    // compiled policy from storage; with that history gone, the only sound
+    // order is to refuse a candidate that would take a protected name off the
+    // network and keep serving whatever is already in force. `verify_candidate`
+    // above already probed the flattened rule set; this pass covers what it
+    // cannot see -- each per-profile engine is built from a subset of the
+    // sources and can lose the allow rule that rescued a name globally.
+    let regressions = protected_domain_regressions(&catalog, &state.protected_domains);
+    if !regressions.is_empty() {
+        tracing::warn!(
+            reason,
+            notes = ?regressions,
+            "refresh rejected: candidate blocks protected domains"
         );
-        sync_runtime_device_policies(state).await?;
-        state
-            .storage
-            .record_audit_event(&AuditEvent {
-                id: Uuid::new_v4(),
-                event_type: "ruleset.auto_rollback".to_string(),
-                payload: serde_json::json!({
-                    "reason": reason,
-                    "rolled_back_to": artifact.id,
-                    "notes": regression_notes,
-                })
-                .to_string(),
-                created_at: chrono::Utc::now(),
-            })
-            .await?;
-
-        let notification_settings = read_recover(&state.notification_settings).clone();
-        if should_deliver_notification(&notification_settings, "critical") {
-            let event = NotificationWebhookEvent {
-                event_type: "ruleset.auto_rollback".to_string(),
-                severity: "critical".to_string(),
-                title: "Ruleset auto-rollback triggered".to_string(),
-                summary: format!("Refresh {} triggered runtime guard rollback.", reason),
-                domain: None,
-                device_name: None,
-                client_ip: Some("control-plane".to_string()),
-                details: regression_notes.clone(),
-                created_at: chrono::Utc::now(),
-            };
-            if let Err(error) = deliver_operational_notification(
-                &state.storage,
-                &client,
-                &notification_settings,
-                event,
-            )
-            .await
-            {
-                tracing::warn!(%error, "failed to deliver auto rollback notification");
-            }
-        }
-
         return Ok(RefreshResponse {
-            outcome: "rolled_back".to_string(),
-            ruleset: Some(to_ruleset_summary(
-                &artifact.id,
-                &artifact.hash,
-                "active",
-                artifact.created_at,
-            )),
-            notes: regression_notes,
+            outcome: "rejected".to_string(),
+            hash: None,
+            rule_count: None,
+            notes: regressions,
         });
     }
 
-    state
-        .storage
-        .record_audit_event(&AuditEvent {
-            id: Uuid::new_v4(),
-            event_type: "ruleset.activated".to_string(),
-            payload: serde_json::json!({
-                "ruleset_id": catalog.global_policy.artifact().id,
-                "hash": catalog.global_policy.artifact().hash,
-                "reason": reason,
-            })
-            .to_string(),
-            created_at: chrono::Utc::now(),
-        })
-        .await?;
+    let hash = catalog.global_policy.artifact().hash.clone();
+    let rule_count = catalog.global_policy.artifact().rules.len();
+    activate_policy_catalog(state, catalog);
+    apply_runtime_device_policies(state).await?;
+    tracing::info!(reason, %hash, rule_count, "activated refreshed policy");
 
     Ok(RefreshResponse {
         outcome: "activated".to_string(),
-        ruleset: Some(to_ruleset_summary(
-            &catalog.global_policy.artifact().id,
-            &catalog.global_policy.artifact().hash,
-            "active",
-            catalog.global_policy.artifact().created_at,
-        )),
-        notes: vec![format!("refreshed {} source(s)", enabled_source_count)]
-            .into_iter()
-            .chain(service_layer.notes)
-            .collect(),
+        hash: Some(hash),
+        rule_count: Some(rule_count),
+        notes: vec![format!("refreshed {} source(s)", enabled_source_count)],
     })
-}
-
-async fn load_service_toggle_snapshot(storage: &Storage) -> Result<ServiceToggleSnapshot> {
-    let Some(value) = storage.get_setting("service_toggles").await? else {
-        return Ok(ServiceToggleSnapshot::default());
-    };
-    Ok(ServiceToggleSnapshot::from_json(&value).unwrap_or_default())
-}
-
-async fn load_classifier_settings(storage: &Storage) -> Result<ClassifierSettings> {
-    let Some(value) = storage.get_setting("classifier_settings").await? else {
-        return Ok(ClassifierSettings::default());
-    };
-    Ok(serde_json::from_str(&value).unwrap_or_default())
-}
-
-/// Feedback the household has given but that has not yet been folded into an adaptation.
-///
-/// Kept as one JSON blob in the `settings` table rather than a table of its own: it is bounded to
-/// [`MAX_PENDING_FEEDBACK`] rows, it is only ever read and written whole, and it then rides the
-/// existing backup and sync paths for free.
-async fn load_classifier_feedback(storage: &Storage) -> Result<Vec<cogwheel_classifier::Feedback>> {
-    let Some(value) = storage.get_setting("classifier_feedback").await? else {
-        return Ok(Vec::new());
-    };
-    Ok(serde_json::from_str(&value).unwrap_or_default())
-}
-
-async fn persist_classifier_feedback(
-    storage: &Storage,
-    feedback: &[cogwheel_classifier::Feedback],
-) -> Result<()> {
-    storage
-        .upsert_setting("classifier_feedback", &serde_json::to_string(feedback)?)
-        .await?;
-    Ok(())
-}
-
-/// The promoted adaptation, with the measurements that justified promoting it.
-///
-/// The delta itself is hex because the `settings` table stores `TEXT`. The measurements are stored
-/// alongside it rather than recomputed on read: they are the *evidence* for this specific delta, and
-/// recomputing them at boot would cost 25,000 inferences every restart to rediscover a number that
-/// cannot have changed.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct StoredAdaptation {
-    delta_hex: String,
-    roc_auc: f32,
-    false_positive_rate: [f32; 3],
-    example_count: usize,
-    trained_at: i64,
-}
-
-async fn load_classifier_adaptation(storage: &Storage) -> Result<Option<StoredAdaptation>> {
-    let Some(value) = storage.get_setting("classifier_adaptation").await? else {
-        return Ok(None);
-    };
-    // An empty value is how rollback records "no adaptation"; the settings table has no delete.
-    if value.trim().is_empty() {
-        return Ok(None);
-    }
-    match serde_json::from_str(&value) {
-        Ok(stored) => Ok(Some(stored)),
-        Err(error) => {
-            // Never fail the boot over this. The base model is intact by construction, so an
-            // unreadable adaptation costs quality, not availability.
-            tracing::warn!(%error, "stored classifier adaptation is unreadable; staying on the base model");
-            Ok(None)
-        }
-    }
-}
-
-async fn persist_classifier_adaptation(storage: &Storage, stored: &StoredAdaptation) -> Result<()> {
-    storage
-        .upsert_setting("classifier_adaptation", &serde_json::to_string(stored)?)
-        .await?;
-    Ok(())
-}
-
-async fn clear_classifier_adaptation(storage: &Storage) -> Result<()> {
-    storage.upsert_setting("classifier_adaptation", "").await?;
-    Ok(())
-}
-
-async fn load_notification_settings(storage: &Storage) -> Result<NotificationSettings> {
-    let Some(value) = storage.get_setting("notification_settings").await? else {
-        return Ok(NotificationSettings {
-            enabled: false,
-            webhook_url: None,
-            min_severity: "high".to_string(),
-        });
-    };
-    Ok(
-        serde_json::from_str(&value).unwrap_or(NotificationSettings {
-            enabled: false,
-            webhook_url: None,
-            min_severity: "high".to_string(),
-        }),
-    )
-}
-
-async fn load_notification_test_presets(storage: &Storage) -> Result<Vec<NotificationTestPreset>> {
-    let Some(value) = storage.get_setting("notification_test_presets").await? else {
-        return Ok(Vec::new());
-    };
-    Ok(normalize_notification_test_presets(
-        serde_json::from_str(&value).unwrap_or_default(),
-    ))
 }
 
 async fn load_block_profiles(storage: &Storage) -> Result<Vec<BlockProfileRecord>> {
@@ -5107,7 +1838,7 @@ async fn upsert_block_profile(
         } else {
             request.emoji.trim().to_string()
         },
-        name: profile_name.clone(),
+        name: profile_name,
         description: request.description.unwrap_or_default().trim().to_string(),
         blocklists: normalize_block_profile_lists(request.blocklists),
         allowlists: normalize_domain_list(request.allowlists),
@@ -5122,31 +1853,6 @@ async fn upsert_block_profile(
 
     let profiles = normalize_block_profiles(profiles);
     persist_block_profiles(&state.storage, &profiles)
-        .await
-        .map_err(|error| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                error.to_string(),
-            )
-        })?;
-
-    state
-        .storage
-        .record_audit_event(&AuditEvent {
-            id: Uuid::new_v4(),
-            event_type: "block-profile.updated".to_string(),
-            payload: serde_json::to_string(&serde_json::json!({
-                "id": profile_id,
-                "name": profile_name,
-            }))
-            .map_err(|error| {
-                (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    error.to_string(),
-                )
-            })?,
-            created_at: chrono::Utc::now(),
-        })
         .await
         .map_err(|error| {
             (
@@ -5174,43 +1880,16 @@ async fn delete_block_profile(
         )
     })?;
 
-    let removed_profile = profiles
-        .iter()
-        .find(|profile| profile.id == profile_id)
-        .cloned()
-        .ok_or((
+    if !profiles.iter().any(|profile| profile.id == profile_id) {
+        return Err((
             axum::http::StatusCode::NOT_FOUND,
             "block profile not found".to_string(),
-        ))?;
+        ));
+    }
 
     profiles.retain(|profile| profile.id != profile_id);
 
     persist_block_profiles(&state.storage, &profiles)
-        .await
-        .map_err(|error| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                error.to_string(),
-            )
-        })?;
-
-    state
-        .storage
-        .record_audit_event(&AuditEvent {
-            id: Uuid::new_v4(),
-            event_type: "block-profile.deleted".to_string(),
-            payload: serde_json::to_string(&serde_json::json!({
-                "id": removed_profile.id,
-                "name": removed_profile.name,
-            }))
-            .map_err(|error| {
-                (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    error.to_string(),
-                )
-            })?,
-            created_at: chrono::Utc::now(),
-        })
         .await
         .map_err(|error| {
             (
@@ -5227,19 +1906,6 @@ async fn load_source_refresh_state(storage: &Storage) -> Result<SourceRefreshSta
         return Ok(SourceRefreshState::default());
     };
     Ok(serde_json::from_str(&value).unwrap_or_default())
-}
-
-async fn build_service_toggle_views(state: &ServerState) -> Result<Vec<ServiceToggleView>> {
-    let manifests = built_in_service_manifests();
-    let snapshot = load_service_toggle_snapshot(&state.storage).await?;
-
-    Ok(manifests
-        .into_iter()
-        .map(|manifest| ServiceToggleView {
-            mode: snapshot.mode_for(&manifest.service_id),
-            manifest,
-        })
-        .collect())
 }
 
 async fn build_blocklist_status_views(
@@ -5264,208 +1930,11 @@ async fn build_blocklist_status_views(
         .collect())
 }
 
-fn current_runtime_health(state: &ServerState) -> RuntimeHealthResponse {
-    let snapshot = state.dns_runtime.snapshot();
-    let report = evaluate_runtime_regressions(
-        &DnsRuntimeSnapshot {
-            upstream_failures_total: 0,
-            fallback_served_total: 0,
-            cache_hits_total: 0,
-            cache_expired_total: 0,
-            cname_uncloaks_total: 0,
-            cname_blocks_total: 0,
-            queries_total: 0,
-            blocked_total: 0,
-            cache_hit_latency_avg_ns: 0,
-            cache_hit_samples: 0,
-            cache_miss_latency_avg_ns: 0,
-            cache_miss_samples: 0,
-            classifier_latency_avg_ns: 0,
-            classifier_latency_samples: 0,
-        },
-        &snapshot,
-        &state.runtime_guard,
-    );
-
-    RuntimeHealthResponse {
-        snapshot,
-        degraded: report.degraded,
-        notes: report.notes,
-    }
-}
-
-async fn active_runtime_health_check(state: &ServerState) -> Result<RuntimeHealthResponse> {
-    let before = state.dns_runtime.snapshot();
-    let current = current_runtime_health(state);
-    let probe_report = run_runtime_guard_probes(state, &before).await;
-    let after = state.dns_runtime.snapshot();
-
-    let mut notes = current.notes;
-    for note in probe_report.notes {
-        if !notes.contains(&note) {
-            notes.push(note);
-        }
-    }
-    let degraded = current.degraded || probe_report.degraded;
-    let response = RuntimeHealthResponse {
-        snapshot: after,
-        degraded,
-        notes,
-    };
-
-    state
-        .storage
-        .record_audit_event(&AuditEvent {
-            id: Uuid::new_v4(),
-            event_type: if response.degraded {
-                "runtime.health_check_degraded".to_string()
-            } else {
-                "runtime.health_check_passed".to_string()
-            },
-            payload: serde_json::to_string(&serde_json::json!({
-                "degraded": response.degraded,
-                "notes": response.notes,
-                "snapshot": response.snapshot,
-            }))?,
-            created_at: chrono::Utc::now(),
-        })
-        .await?;
-
-    if response.degraded {
-        let notification_settings = read_recover(&state.notification_settings).clone();
-        if should_deliver_notification(&notification_settings, "high") {
-            let event = NotificationWebhookEvent {
-                event_type: "runtime.health_degraded".to_string(),
-                severity: "high".to_string(),
-                title: "Runtime health degraded".to_string(),
-                summary: "A manual runtime health check detected regressions or probe failures."
-                    .to_string(),
-                domain: None,
-                device_name: None,
-                client_ip: Some("control-plane".to_string()),
-                details: response.notes.clone(),
-                created_at: chrono::Utc::now(),
-            };
-            if let Err(error) = deliver_operational_notification(
-                &state.storage,
-                &state.http_client,
-                &notification_settings,
-                event,
-            )
-            .await
-            {
-                tracing::warn!(%error, "failed to deliver runtime health notification");
-            }
-        }
-    }
-
-    Ok(response)
-}
-
-async fn persist_service_toggle_snapshot(
-    storage: &Storage,
-    snapshot: &ServiceToggleSnapshot,
-) -> Result<()> {
-    storage
-        .upsert_setting("service_toggles", &snapshot.to_json()?)
-        .await?;
-    Ok(())
-}
-
 async fn persist_source_refresh_state(storage: &Storage, state: &SourceRefreshState) -> Result<()> {
     storage
         .upsert_setting("source_refresh_state", &serde_json::to_string(state)?)
         .await?;
     Ok(())
-}
-
-async fn persist_classifier_settings(
-    storage: &Storage,
-    settings: &ClassifierSettings,
-) -> Result<()> {
-    storage
-        .upsert_setting("classifier_settings", &serde_json::to_string(settings)?)
-        .await?;
-    Ok(())
-}
-
-async fn persist_notification_settings(
-    storage: &Storage,
-    settings: &NotificationSettings,
-) -> Result<()> {
-    storage
-        .upsert_setting("notification_settings", &serde_json::to_string(settings)?)
-        .await?;
-    Ok(())
-}
-
-async fn persist_notification_test_presets(
-    storage: &Storage,
-    presets: &[NotificationTestPreset],
-) -> Result<()> {
-    storage
-        .upsert_setting(
-            "notification_test_presets",
-            &serde_json::to_string(presets)?,
-        )
-        .await?;
-    Ok(())
-}
-
-async fn run_runtime_guard_probes(
-    state: &ServerState,
-    before: &DnsRuntimeSnapshot,
-) -> RuntimeRegressionReport {
-    let mut notes = Vec::new();
-    for domain in &state.runtime_guard.probe_domains {
-        if let Err(error) = state.dns_runtime.probe_domain(domain, RecordType::A).await {
-            notes.push(format!("runtime probe failed for {domain}: {error}"));
-        }
-    }
-
-    let after = state.dns_runtime.snapshot();
-    let mut report = evaluate_runtime_regressions(before, &after, &state.runtime_guard);
-    report.notes.extend(notes);
-    if report
-        .notes
-        .iter()
-        .any(|note| note.starts_with("runtime probe failed"))
-    {
-        report.degraded = true;
-    }
-    report
-}
-
-fn evaluate_runtime_regressions(
-    before: &DnsRuntimeSnapshot,
-    after: &DnsRuntimeSnapshot,
-    guard: &RuntimeGuardConfig,
-) -> RuntimeRegressionReport {
-    let upstream_failures_delta = after
-        .upstream_failures_total
-        .saturating_sub(before.upstream_failures_total);
-    let fallback_served_delta = after
-        .fallback_served_total
-        .saturating_sub(before.fallback_served_total);
-
-    let mut notes = Vec::new();
-    if upstream_failures_delta > guard.max_upstream_failures_delta {
-        notes.push(format!(
-            "upstream failures delta {upstream_failures_delta} exceeds threshold {}",
-            guard.max_upstream_failures_delta
-        ));
-    }
-    if fallback_served_delta > guard.max_fallback_served_delta {
-        notes.push(format!(
-            "fallback served delta {fallback_served_delta} exceeds threshold {}",
-            guard.max_fallback_served_delta
-        ));
-    }
-
-    RuntimeRegressionReport {
-        degraded: !notes.is_empty(),
-        notes,
-    }
 }
 
 async fn update_source_refresh_attempts(
@@ -5497,10 +1966,21 @@ async fn due_source_ids(state: &ServerState) -> Result<HashSet<Uuid>> {
 
 async fn warm_runtime_policy_catalog(state: &ServerState) -> Result<()> {
     let catalog = load_current_runtime_policy_catalog(state).await?;
+    activate_policy_catalog(state, catalog);
+    Ok(())
+}
+
+/// Install a compiled catalog and remember the engine it displaces.
+///
+/// The displaced engine goes into [`ServerState::previous_policy`]; nothing on
+/// the DNS path reads it, so a swap costs one `Arc` move under a lock nobody
+/// else contends for.
+fn activate_policy_catalog(state: &ServerState, catalog: RuntimePolicyCatalog) {
+    let outgoing = state.dns_runtime.current_policy();
+    *write_recover(&state.previous_policy) = Some(outgoing);
     state
         .dns_runtime
         .replace_policy_catalog(catalog.global_policy, catalog.profile_policies);
-    Ok(())
 }
 
 async fn load_current_runtime_policy_catalog(state: &ServerState) -> Result<RuntimePolicyCatalog> {
@@ -5522,13 +2002,6 @@ async fn load_current_runtime_policy_catalog(state: &ServerState) -> Result<Runt
     let mut parsed_sources = Vec::with_capacity(enabled_sources.len());
     for source in enabled_sources {
         parsed_sources.push(fetch_and_parse_source(&client, source).await?);
-    }
-
-    let manifests = built_in_service_manifests();
-    let snapshot = load_service_toggle_snapshot(&state.storage).await?;
-    let service_layer = compile_service_rule_layer(&manifests, &snapshot);
-    if !service_layer.rules.is_empty() {
-        parsed_sources.push(synthetic_source("service-toggles", service_layer.rules));
     }
 
     let verification = verify_candidate(&parsed_sources, &state.protected_domains);
@@ -5635,12 +2108,6 @@ fn build_runtime_policy_catalog(
 }
 
 fn runtime_device_policies_from_records(devices: Vec<DeviceRecord>) -> Vec<DevicePolicyConfig> {
-    let manifests = built_in_service_manifests();
-    let manifest_map = manifests
-        .into_iter()
-        .map(|manifest| (manifest.service_id.clone(), manifest))
-        .collect::<HashMap<_, _>>();
-
     devices
         .into_iter()
         .map(|device| {
@@ -5665,42 +2132,23 @@ fn runtime_device_policies_from_records(devices: Vec<DeviceRecord>) -> Vec<Devic
             } else {
                 Vec::new()
             };
-            let service_overrides = if policy_mode == "custom" {
-                normalize_device_service_overrides(device.service_overrides)
-            } else {
-                Vec::new()
-            };
-            let mut expanded_allowed_domains = allowed_domains.clone();
-            let mut blocked_domains = Vec::new();
-            for override_record in &service_overrides {
-                if let Some(manifest) = manifest_map.get(&override_record.service_id) {
-                    match override_record.mode.as_str() {
-                        "allow" => {
-                            expanded_allowed_domains.extend(manifest.allow_domains.clone());
-                            expanded_allowed_domains.extend(manifest.exceptions.clone());
-                        }
-                        "block" => blocked_domains.extend(manifest.block_domains.clone()),
-                        _ => {}
-                    }
-                }
-            }
-            let expanded_allowed_domains =
-                normalize_device_allowed_domains(expanded_allowed_domains);
-            let blocked_domains = normalize_device_allowed_domains(blocked_domains);
 
             DevicePolicyConfig {
                 ip_address: device.ip_address,
                 policy_mode,
                 blocklist_profile_override,
                 protection_override,
-                allowed_domains: expanded_allowed_domains,
-                blocked_domains,
+                allowed_domains,
+                // Per-device block rules had no source other than the service
+                // manifests, which are gone. The runtime still honours the
+                // field; nothing fills it until the device model is rebuilt.
+                blocked_domains: Vec::new(),
             }
         })
         .collect()
 }
 
-async fn sync_runtime_device_policies(state: &ServerState) -> Result<()> {
+async fn apply_runtime_device_policies(state: &ServerState) -> Result<()> {
     let devices = state.storage.list_devices().await?;
     state
         .dns_runtime
@@ -5764,1349 +2212,56 @@ fn normalize_device_allowed_domains(domains: Vec<String>) -> Vec<String> {
     normalized
 }
 
-fn normalize_device_service_overrides(
-    overrides: Vec<DeviceServiceOverrideRecord>,
-) -> Vec<DeviceServiceOverrideRecord> {
-    let manifests = built_in_service_manifests();
-    let known_ids = manifests
-        .iter()
-        .map(|manifest| manifest.service_id.as_str())
-        .collect::<HashSet<_>>();
-    let mut normalized = Vec::new();
-
-    for override_record in overrides {
-        let service_id = override_record.service_id.trim().to_ascii_lowercase();
-        let mode = override_record.mode.trim().to_ascii_lowercase();
-        if !known_ids.contains(service_id.as_str()) {
-            continue;
-        }
-        if !matches!(mode.as_str(), "allow" | "block") {
-            continue;
-        }
-
-        normalized
-            .retain(|existing: &DeviceServiceOverrideRecord| existing.service_id != service_id);
-        normalized.push(DeviceServiceOverrideRecord { service_id, mode });
-    }
-
-    normalized.sort_by(|left, right| left.service_id.cmp(&right.service_id));
-    normalized
-}
-
-fn validate_device_service_overrides(
-    policy_mode: &str,
-    overrides: Vec<DeviceServiceOverrideRecord>,
-) -> Result<Vec<DeviceServiceOverrideRecord>, String> {
-    if overrides.is_empty() {
-        return Ok(Vec::new());
-    }
-    if policy_mode != "custom" {
-        return Err("device service overrides require custom policy mode".to_string());
-    }
-
-    let manifests = built_in_service_manifests()
-        .into_iter()
-        .map(|manifest| (manifest.service_id.clone(), manifest))
-        .collect::<HashMap<_, _>>();
-    let normalized = normalize_device_service_overrides(overrides.clone());
-
-    for override_record in overrides {
-        let service_id = override_record.service_id.trim().to_ascii_lowercase();
-        let mode = override_record.mode.trim().to_ascii_lowercase();
-        let Some(manifest) = manifests.get(&service_id) else {
-            return Err(format!(
-                "unknown device service override `{}`; choose one of the built-in services",
-                override_record.service_id.trim()
-            ));
-        };
-        if !matches!(mode.as_str(), "allow" | "block") {
-            return Err(format!(
-                "device service override `{}` must use allow or block mode",
-                manifest.display_name
-            ));
-        }
-
-        let expanded_domains = if mode == "allow" {
-            manifest
-                .allow_domains
-                .iter()
-                .chain(manifest.block_domains.iter())
-                .chain(manifest.exceptions.iter())
-                .collect::<HashSet<_>>()
-                .len()
-        } else {
-            manifest.block_domains.len()
-        };
-        if expanded_domains == 0 {
-            return Err(format!(
-                "device service override `{}` has no device-specific domains for {} mode",
-                manifest.display_name, mode
-            ));
-        }
-    }
-
-    if normalized.is_empty() {
-        return Err(
-            "device service overrides must use known built-in services with allow or block mode"
-                .to_string(),
-        );
-    }
-
-    Ok(normalized)
-}
-
-fn severity_for_classifier_score(score: f32) -> &'static str {
-    if score >= 0.99 {
-        "critical"
-    } else if score >= 0.96 {
-        "high"
-    } else {
-        "medium"
-    }
-}
-
-fn severity_rank(severity: &str) -> usize {
-    match severity {
-        "critical" => 3,
-        "high" => 2,
-        _ => 1,
-    }
-}
-
-fn build_security_summary(events: &[SecurityEventRecord]) -> SecuritySummary {
-    let mut medium_count = 0;
-    let mut high_count = 0;
-    let mut critical_count = 0;
-    let mut top_devices = HashMap::<String, DeviceSecuritySummary>::new();
-
-    for event in events {
-        match event.severity.as_str() {
-            "critical" => critical_count += 1,
-            "high" => high_count += 1,
-            _ => medium_count += 1,
-        }
-
-        let label = event
-            .device_name
-            .clone()
-            .unwrap_or_else(|| event.client_ip.clone());
-        let entry = top_devices
-            .entry(label.clone())
-            .or_insert_with(|| DeviceSecuritySummary {
-                label,
-                event_count: 0,
-                highest_severity: event.severity.clone(),
-            });
-        entry.event_count += 1;
-        if severity_rank(&event.severity) > severity_rank(&entry.highest_severity) {
-            entry.highest_severity = event.severity.clone();
-        }
-    }
-
-    let mut top_devices = top_devices.into_values().collect::<Vec<_>>();
-    top_devices.sort_by(|left, right| {
-        right
-            .event_count
-            .cmp(&left.event_count)
-            .then_with(|| {
-                severity_rank(&right.highest_severity).cmp(&severity_rank(&left.highest_severity))
-            })
-            .then_with(|| left.label.cmp(&right.label))
-    });
-    top_devices.truncate(3);
-
-    SecuritySummary {
-        medium_count,
-        high_count,
-        critical_count,
-        top_devices,
-    }
-}
-
-fn build_notification_delivery_events(
-    deliveries: &[NotificationDeliveryRecord],
-) -> Vec<NotificationDeliveryEvent> {
-    deliveries
-        .iter()
-        .map(|delivery| NotificationDeliveryEvent {
-            status: delivery.status.clone(),
-            event_type: delivery.event_type.clone(),
-            severity: delivery.severity.clone(),
-            title: delivery.title.clone(),
-            summary: delivery.summary.clone(),
-            target: delivery
-                .device_name
-                .clone()
-                .unwrap_or_else(|| delivery.client_ip.clone()),
-            domain: delivery.domain.clone(),
-            device_name: delivery.device_name.clone(),
-            client_ip: delivery.client_ip.clone(),
-            attempts: delivery.attempts,
-            created_at: delivery.created_at,
-        })
-        .take(5)
-        .collect()
-}
-
-fn build_notification_health_summary(
-    deliveries: &[NotificationDeliveryRecord],
-) -> NotificationHealthSummary {
-    let mut delivered_count = 0;
-    let mut failed_count = 0;
-    let mut last_delivery_at = None;
-    let mut last_failure_at = None;
-
-    for delivery in deliveries {
-        match delivery.status.as_str() {
-            "delivered" => {
-                delivered_count += 1;
-                if last_delivery_at.is_none_or(|current| delivery.created_at > current) {
-                    last_delivery_at = Some(delivery.created_at);
-                }
-            }
-            "failed" => {
-                failed_count += 1;
-                if last_failure_at.is_none_or(|current| delivery.created_at > current) {
-                    last_failure_at = Some(delivery.created_at);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    NotificationHealthSummary {
-        delivered_count,
-        failed_count,
-        last_delivery_at,
-        last_failure_at,
-    }
-}
-
-fn build_notification_failure_analytics(
-    deliveries: &[NotificationDeliveryRecord],
-) -> NotificationFailureAnalytics {
-    let mut delivered_count = 0usize;
-    let mut failed_count = 0usize;
-    let mut failed_domains = HashMap::<String, usize>::new();
-
-    for delivery in deliveries {
-        match delivery.status.as_str() {
-            "delivered" => delivered_count += 1,
-            "failed" => {
-                failed_count += 1;
-                if delivery.domain != "control-plane" {
-                    *failed_domains.entry(delivery.domain.clone()).or_insert(0) += 1;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let total = delivered_count + failed_count;
-    let success_rate_percent = if total == 0 {
-        100.0
-    } else {
-        ((delivered_count as f32 / total as f32) * 1000.0).round() / 10.0
-    };
-
-    let mut top_failed_domains = failed_domains
-        .into_iter()
-        .map(|(domain, failure_count)| NotificationFailureDomain {
-            domain,
-            failure_count,
-        })
-        .collect::<Vec<_>>();
-    top_failed_domains.sort_by(|left, right| {
-        right
-            .failure_count
-            .cmp(&left.failure_count)
-            .then_with(|| left.domain.cmp(&right.domain))
-    });
-    top_failed_domains.truncate(3);
-
-    NotificationFailureAnalytics {
-        success_rate_percent,
-        top_failed_domains,
-    }
-}
-
-fn normalize_notification_window(window: Option<usize>) -> usize {
-    match window.unwrap_or(30) {
-        10 => 10,
-        50 => 50,
-        100 => 100,
-        _ => 30,
-    }
-}
-
-fn normalize_notification_test_presets(
-    presets: Vec<NotificationTestPreset>,
-) -> Vec<NotificationTestPreset> {
-    let mut normalized = Vec::new();
-
-    for preset in presets {
-        let name = preset.name.trim().to_string();
-        let domain = preset.domain.trim().to_string();
-        let device_name = preset.device_name.trim().to_string();
-        let Some(severity) = normalize_notification_severity(&preset.severity) else {
-            continue;
-        };
-        if name.is_empty() || domain.is_empty() || device_name.is_empty() {
-            continue;
-        }
-
-        normalized.retain(|existing: &NotificationTestPreset| existing.name != name);
-        normalized.push(NotificationTestPreset {
-            name,
-            domain,
-            severity,
-            device_name,
-            dry_run: preset.dry_run,
-        });
-    }
-
-    normalized.sort_by(|left, right| left.name.cmp(&right.name));
-    normalized.truncate(8);
-    normalized
-}
-
-fn normalize_notification_severity(severity: &str) -> Option<String> {
-    match severity.trim().to_ascii_lowercase().as_str() {
-        "medium" => Some("medium".to_string()),
-        "high" => Some("high".to_string()),
-        "critical" => Some("critical".to_string()),
-        _ => None,
-    }
-}
-
-fn normalize_webhook_url(url: Option<&str>) -> Option<Option<String>> {
-    let Some(url) = url else {
-        return Some(None);
-    };
-    let trimmed = url.trim();
-    if trimmed.is_empty() {
-        return Some(None);
-    }
-    let parsed = Url::parse(trimmed).ok()?;
-    match parsed.scheme() {
-        "https" | "http" => Some(Some(parsed.to_string())),
-        _ => None,
-    }
-}
-
-fn should_deliver_notification(settings: &NotificationSettings, severity: &str) -> bool {
-    settings.enabled
-        && settings.webhook_url.is_some()
-        && severity_rank(severity) >= severity_rank(&settings.min_severity)
-}
-
-fn notification_retry_delay(attempt: usize) -> Duration {
-    let multiplier = 1u64.checked_shl(attempt.min(4) as u32).unwrap_or(16);
-    Duration::from_millis(250 * multiplier)
-}
-
-async fn send_security_notification(
-    client: &Client,
-    settings: &NotificationSettings,
-    security_event: &SecurityEventRecord,
-) -> Result<()> {
-    let event = NotificationWebhookEvent {
-        event_type: "security.alert_raised".to_string(),
-        severity: security_event.severity.clone(),
-        title: security_event.domain.clone(),
-        summary: format!(
-            "{} alert for {}.",
-            security_event.severity,
-            security_event
-                .device_name
-                .as_deref()
-                .unwrap_or(&security_event.client_ip)
-        ),
-        domain: Some(security_event.domain.clone()),
-        device_name: security_event.device_name.clone(),
-        client_ip: Some(security_event.client_ip.clone()),
-        details: vec![format!(
-            "classifier score {:.2}",
-            security_event.classifier_score
-        )],
-        created_at: security_event.created_at,
-    };
-    send_notification(client, settings, &event).await
-}
-
-async fn send_notification(
-    client: &Client,
-    settings: &NotificationSettings,
-    event: &NotificationWebhookEvent,
-) -> Result<()> {
-    let Some(webhook_url) = settings.webhook_url.as_deref() else {
-        return Ok(());
-    };
-    client
-        .post(webhook_url)
-        .json(&serde_json::json!({
-            "event_type": event.event_type,
-            "severity": event.severity,
-            "title": event.title,
-            "summary": event.summary,
-            "domain": event.domain,
-            "client_ip": event.client_ip,
-            "device_name": event.device_name,
-            "details": event.details,
-            "created_at": event.created_at,
-        }))
-        .send()
-        .await?
-        .error_for_status()?;
-    Ok(())
-}
-
-async fn deliver_operational_notification(
-    storage: &Storage,
-    client: &Client,
-    settings: &NotificationSettings,
-    event: NotificationWebhookEvent,
-) -> Result<()> {
-    let mut last_error = None;
-
-    for attempt in 0..3 {
-        match send_notification(client, settings, &event).await {
-            Ok(()) => {
-                storage
-                    .record_notification_delivery(&NotificationDeliveryRecord {
-                        id: Uuid::new_v4(),
-                        event_type: event.event_type.clone(),
-                        status: "delivered".to_string(),
-                        severity: event.severity.clone(),
-                        title: event.title.clone(),
-                        summary: event.summary.clone(),
-                        domain: event
-                            .domain
-                            .clone()
-                            .unwrap_or_else(|| "control-plane".to_string()),
-                        device_name: event.device_name.clone(),
-                        client_ip: event
-                            .client_ip
-                            .clone()
-                            .unwrap_or_else(|| "control-plane".to_string()),
-                        attempts: attempt + 1,
-                        created_at: event.created_at,
-                    })
-                    .await?;
-                storage
-                    .record_audit_event(&AuditEvent {
-                        id: Uuid::new_v4(),
-                        event_type: "notification.delivery_succeeded".to_string(),
-                        payload: serde_json::to_string(&serde_json::json!({
-                            "event_type": event.event_type,
-                            "severity": event.severity,
-                            "title": event.title,
-                            "summary": event.summary,
-                            "domain": event.domain,
-                            "client_ip": event.client_ip,
-                            "device_name": event.device_name,
-                            "attempts": attempt + 1,
-                        }))?,
-                        created_at: event.created_at,
-                    })
-                    .await?;
-                return Ok(());
-            }
-            Err(error) => {
-                last_error = Some(error.to_string());
-                if attempt < 2 {
-                    tokio::time::sleep(notification_retry_delay(attempt)).await;
-                }
-            }
-        }
-    }
-
-    let error_message = last_error.unwrap_or_else(|| "unknown delivery error".to_string());
-
-    storage
-        .record_notification_delivery(&NotificationDeliveryRecord {
-            id: Uuid::new_v4(),
-            event_type: event.event_type.clone(),
-            status: "failed".to_string(),
-            severity: event.severity.clone(),
-            title: event.title.clone(),
-            summary: event.summary.clone(),
-            domain: event
-                .domain
-                .clone()
-                .unwrap_or_else(|| "control-plane".to_string()),
-            device_name: event.device_name.clone(),
-            client_ip: event
-                .client_ip
-                .clone()
-                .unwrap_or_else(|| "control-plane".to_string()),
-            attempts: 3,
-            created_at: event.created_at,
-        })
-        .await?;
-
-    storage
-        .record_audit_event(&AuditEvent {
-            id: Uuid::new_v4(),
-            event_type: "notification.delivery_failed".to_string(),
-            payload: serde_json::to_string(&serde_json::json!({
-                "event_type": event.event_type,
-                "severity": event.severity,
-                "title": event.title,
-                "summary": event.summary,
-                "domain": event.domain,
-                "client_ip": event.client_ip,
-                "device_name": event.device_name,
-                "attempts": 3,
-                "error": error_message.clone(),
-            }))?,
-            created_at: event.created_at,
-        })
-        .await?;
-
-    anyhow::bail!(
-        "operational notification delivery failed after retries: {}",
-        error_message
-    )
-}
-
-async fn deliver_security_notification(
-    storage: &Storage,
-    client: &Client,
-    settings: &NotificationSettings,
-    security_event: &SecurityEventRecord,
-) -> Result<()> {
-    let mut last_error = None;
-
-    for attempt in 0..3 {
-        match send_security_notification(client, settings, security_event).await {
-            Ok(()) => {
-                storage
-                    .record_notification_delivery(&NotificationDeliveryRecord {
-                        id: Uuid::new_v4(),
-                        event_type: "security.alert_raised".to_string(),
-                        status: "delivered".to_string(),
-                        severity: security_event.severity.clone(),
-                        title: security_event.domain.clone(),
-                        summary: format!(
-                            "{} alert for {}.",
-                            security_event.severity,
-                            security_event
-                                .device_name
-                                .as_deref()
-                                .unwrap_or(&security_event.client_ip)
-                        ),
-                        domain: security_event.domain.clone(),
-                        device_name: security_event.device_name.clone(),
-                        client_ip: security_event.client_ip.clone(),
-                        attempts: attempt + 1,
-                        created_at: security_event.created_at,
-                    })
-                    .await?;
-                storage
-                    .record_audit_event(&AuditEvent {
-                        id: Uuid::new_v4(),
-                        event_type: "security.alert_delivery_succeeded".to_string(),
-                        payload: serde_json::to_string(&serde_json::json!({
-                            "severity": security_event.severity,
-                            "domain": security_event.domain,
-                            "client_ip": security_event.client_ip,
-                            "device_name": security_event.device_name,
-                            "attempts": attempt + 1,
-                        }))?,
-                        created_at: security_event.created_at,
-                    })
-                    .await?;
-                return Ok(());
-            }
-            Err(error) => {
-                last_error = Some(error.to_string());
-                if attempt < 2 {
-                    tokio::time::sleep(notification_retry_delay(attempt)).await;
-                }
-            }
-        }
-    }
-
-    let error_message = last_error.unwrap_or_else(|| "unknown delivery error".to_string());
-
-    storage
-        .record_notification_delivery(&NotificationDeliveryRecord {
-            id: Uuid::new_v4(),
-            event_type: "security.alert_raised".to_string(),
-            status: "failed".to_string(),
-            severity: security_event.severity.clone(),
-            title: security_event.domain.clone(),
-            summary: format!(
-                "{} alert for {}.",
-                security_event.severity,
-                security_event
-                    .device_name
-                    .as_deref()
-                    .unwrap_or(&security_event.client_ip)
-            ),
-            domain: security_event.domain.clone(),
-            device_name: security_event.device_name.clone(),
-            client_ip: security_event.client_ip.clone(),
-            attempts: 3,
-            created_at: security_event.created_at,
-        })
-        .await?;
-
-    storage
-        .record_audit_event(&AuditEvent {
-            id: Uuid::new_v4(),
-            event_type: "security.alert_delivery_failed".to_string(),
-            payload: serde_json::to_string(&serde_json::json!({
-                "severity": security_event.severity,
-                "domain": security_event.domain,
-                "client_ip": security_event.client_ip,
-                "device_name": security_event.device_name,
-                "attempts": 3,
-                "error": error_message.clone(),
-            }))?,
-            created_at: security_event.created_at,
-        })
-        .await?;
-
-    anyhow::bail!(
-        "security alert delivery failed after retries: {}",
-        error_message
-    )
-}
-
-async fn record_security_event_from_classification(
-    storage: Arc<Storage>,
-    http_client: Client,
-    notification_settings: Arc<RwLock<NotificationSettings>>,
-    event: ClassificationEvent,
-) -> Result<()> {
-    let Some(client_ip) = event.client_ip.clone() else {
-        return Ok(());
-    };
-    let device = storage.find_device_by_ip(&client_ip).await?;
-    let severity = severity_for_classifier_score(event.score).to_string();
-    let security_event = SecurityEventRecord {
-        id: Uuid::new_v4(),
-        device_id: device.as_ref().map(|record| record.id),
-        device_name: device.as_ref().map(|record| record.name.clone()),
-        client_ip,
-        domain: event.domain,
-        classifier_score: f64::from(event.score),
-        severity,
-        created_at: event.observed_at,
-    };
-    storage.record_security_event(&security_event).await?;
-    let current_notification_settings = read_recover(&notification_settings).clone();
-    if matches!(security_event.severity.as_str(), "high" | "critical") {
-        storage
-            .record_audit_event(&AuditEvent {
-                id: Uuid::new_v4(),
-                event_type: "security.alert_raised".to_string(),
-                payload: serde_json::to_string(&serde_json::json!({
-                    "severity": security_event.severity,
-                    "domain": security_event.domain,
-                    "client_ip": security_event.client_ip,
-                    "device_name": security_event.device_name,
-                    "classifier_score": security_event.classifier_score,
-                }))?,
-                created_at: event.observed_at,
-            })
-            .await?;
-    }
-    if should_deliver_notification(&current_notification_settings, &security_event.severity) {
-        deliver_security_notification(
-            storage.as_ref(),
-            &http_client,
-            &current_notification_settings,
-            &security_event,
-        )
-        .await?;
-    }
-    Ok(())
-}
-
 fn is_reserved_source_id(source_id: Uuid) -> bool {
     source_id == Uuid::from_u128(1)
 }
 
-fn post_activation_regressions(
-    policy: &PolicyEngine,
+/// Protected names the candidate's rules would block, per policy scope. Empty
+/// means it is safe to install.
+///
+/// The compiled engines cannot be probed directly: [`PolicyEngine::evaluate`]
+/// answers `Allowed` for every protected suffix before it consults a single
+/// rule, so evaluating the catalog as built would never find anything. Each
+/// engine's rules are therefore recompiled WITHOUT a protected set -- the same
+/// trick `verify_candidate` uses -- and probed in that form. Every engine in
+/// the catalog is checked, not just the global one: a profile is built from a
+/// subset of the sources and can lack the allow rule that rescued a name in
+/// the global set.
+fn protected_domain_regressions(
+    catalog: &RuntimePolicyCatalog,
     protected_domains: &HashSet<String>,
-) -> Option<Vec<String>> {
-    let blocked = protected_domains
-        .iter()
-        .filter_map(|domain| match policy.evaluate(domain).kind {
-            DecisionKind::Blocked(_) => Some(format!("protected domain blocked: {domain}")),
-            DecisionKind::Allowed => None,
-        })
-        .collect::<Vec<_>>();
+) -> Vec<String> {
+    let scopes = std::iter::once(("global", catalog.global_policy.as_ref())).chain(
+        catalog
+            .profile_policies
+            .iter()
+            .map(|(profile, policy)| (profile.as_str(), policy.as_ref())),
+    );
 
-    if blocked.is_empty() {
-        None
-    } else {
-        Some(blocked)
-    }
-}
-
-fn to_ruleset_summary(
-    id: &Uuid,
-    hash: &str,
-    status: &str,
-    created_at: chrono::DateTime<chrono::Utc>,
-) -> RulesetSummary {
-    RulesetSummary {
-        id: *id,
-        hash: hash.to_string(),
-        status: status.to_string(),
-        created_at,
-    }
-}
-
-// ---------------------------------------------------------------- classifier API
-
-/// Per-sensitivity calibration figures, so the UI can show what each option actually costs.
-#[derive(Debug, Clone, serde::Serialize)]
-struct SensitivityBand {
-    low: f32,
-    balanced: f32,
-    high: f32,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ClassifierModelInfo {
-    version: u32,
-    trained_at: String,
-    roc_auc: f32,
-    pr_auc: f32,
-    resident_bytes: usize,
-    thresholds: SensitivityBand,
-    false_positive_rate: SensitivityBand,
-    recall: SensitivityBand,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ClassifierEngineStats {
-    scored: u64,
-    cache_hits: u64,
-    cache_misses: u64,
-    dropped: u64,
-    blocked: u64,
-    protected_overrides: u64,
-    hook_panics: u64,
-    cached_entries: u64,
-}
-
-/// What adaptation is doing right now, and on what evidence.
-///
-/// Everything here is reported rather than summarised into a single "adapted: yes/no", because the
-/// point of gating a delta on measurements is lost if the user cannot see the measurements.
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ClassifierAdaptationInfo {
-    active: bool,
-    trained_at: Option<String>,
-    example_count: usize,
-    ngram_entries: usize,
-    roc_auc: Option<f32>,
-    false_positive_rate: Option<SensitivityBand>,
-    /// The delta's certified worst-case effect on any logit, and the ceiling it is held under.
-    max_logit_shift: f32,
-    logit_budget: f32,
-    pending_feedback: usize,
-    minimum_feedback: usize,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ClassifierStatusResponse {
-    settings: ClassifierSettings,
-    model: ClassifierModelInfo,
-    stats: ClassifierEngineStats,
-    active_threshold: f32,
-    adaptation: ClassifierAdaptationInfo,
-}
-
-/// Describe the engine's current adaptation state.
-///
-/// `stored` carries the measurements the gate recorded when the delta was promoted; the delta itself
-/// is read back from the engine so the report describes what is actually scoring traffic rather than
-/// what the database believes should be.
-fn build_adaptation_info(
-    state: &ServerState,
-    stored: Option<&StoredAdaptation>,
-    pending_feedback: usize,
-) -> ClassifierAdaptationInfo {
-    let delta = state.dns_runtime.classifier().active_delta();
-    // The stored measurements are evidence *for a specific delta*. If that delta is not the one
-    // scoring traffic -- it failed validation at boot, or was rolled back -- reporting its figures
-    // would advertise quality nothing is currently delivering, so they are withheld with it.
-    let evidence = stored.filter(|_| delta.is_some());
-    ClassifierAdaptationInfo {
-        active: delta.is_some(),
-        trained_at: delta.as_ref().and_then(|delta| {
-            chrono::DateTime::from_timestamp(delta.trained_at(), 0)
-                .map(|timestamp| timestamp.to_rfc3339())
-        }),
-        example_count: delta.as_ref().map_or(0, |delta| delta.example_count()),
-        ngram_entries: delta.as_ref().map_or(0, |delta| delta.ngram_entries()),
-        roc_auc: evidence.map(|stored| stored.roc_auc),
-        false_positive_rate: evidence.map(|stored| SensitivityBand {
-            low: stored.false_positive_rate[0],
-            balanced: stored.false_positive_rate[1],
-            high: stored.false_positive_rate[2],
-        }),
-        max_logit_shift: delta
-            .as_ref()
-            .map_or(0.0, |delta| delta.certified_max_logit_shift()),
-        logit_budget: cogwheel_classifier::adapt::DELTA_LOGIT_BUDGET,
-        pending_feedback,
-        minimum_feedback: cogwheel_classifier::adapt::MIN_FEEDBACK_EXAMPLES,
-    }
-}
-
-fn build_classifier_status(
-    state: &ServerState,
-    adaptation: ClassifierAdaptationInfo,
-) -> ClassifierStatusResponse {
-    let engine = state.dns_runtime.classifier();
-    let model = engine.model();
-    let quality = model.quality();
-    let thresholds = model.thresholds();
-    let stats = engine.stats();
-
-    ClassifierStatusResponse {
-        settings: engine.settings(),
-        model: ClassifierModelInfo {
-            version: cogwheel_classifier::model::FORMAT_VERSION,
-            trained_at: chrono::DateTime::from_timestamp(model.trained_at(), 0)
-                .unwrap_or_default()
-                .to_rfc3339(),
-            roc_auc: quality.roc_auc,
-            pr_auc: quality.pr_auc,
-            resident_bytes: model.resident_bytes(),
-            thresholds: SensitivityBand {
-                low: thresholds.low,
-                balanced: thresholds.balanced,
-                high: thresholds.high,
-            },
-            false_positive_rate: SensitivityBand {
-                low: quality.false_positive_rate[0],
-                balanced: quality.false_positive_rate[1],
-                high: quality.false_positive_rate[2],
-            },
-            recall: SensitivityBand {
-                low: quality.recall_at_threshold[0],
-                balanced: quality.recall_at_threshold[1],
-                high: quality.recall_at_threshold[2],
-            },
-        },
-        stats: ClassifierEngineStats {
-            scored: stats.scored,
-            cache_hits: stats.cache_hits,
-            cache_misses: stats.cache_misses,
-            dropped: stats.dropped,
-            blocked: stats.blocked,
-            protected_overrides: stats.protected_overrides,
-            hook_panics: stats.hook_panics,
-            cached_entries: stats.cached_entries,
-        },
-        active_threshold: engine.active_threshold(),
-        adaptation,
-    }
-}
-
-async fn classifier_status(
-    State(state): State<ServerState>,
-) -> Json<ApiEnvelope<ClassifierStatusResponse>> {
-    let stored = load_classifier_adaptation(&state.storage)
-        .await
-        .unwrap_or_default();
-    let pending = load_classifier_feedback(&state.storage)
-        .await
-        .unwrap_or_default()
-        .len();
-    let adaptation = build_adaptation_info(&state, stored.as_ref(), pending);
-    Json(ApiEnvelope {
-        data: build_classifier_status(&state, adaptation),
-    })
-}
-
-#[derive(serde::Deserialize)]
-struct InspectDomainRequest {
-    domain: String,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ContributionView {
-    label: String,
-    kind: String,
-    value: f32,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct InspectDomainResponse {
-    domain: String,
-    probability: f32,
-    protected: bool,
-    decision: String,
-    active_threshold: f32,
-    blocklist_match: Option<String>,
-    contributions: Vec<ContributionView>,
-}
-
-/// Score an arbitrary domain on demand and explain the result.
-///
-/// This is the one place inference runs synchronously, and it is deliberate: it is an operator
-/// action on the HTTP path, not the DNS path, and a single inference is ~7 microseconds.
-async fn inspect_domain(
-    State(state): State<ServerState>,
-    Json(request): Json<InspectDomainRequest>,
-) -> Result<Json<ApiEnvelope<InspectDomainResponse>>, axum::http::StatusCode> {
-    // Bound the input before doing any work: this endpoint is reachable by anything on the LAN.
-    if request.domain.len() > cogwheel_classifier::normalize::MAX_HOST_LEN {
-        return Err(axum::http::StatusCode::BAD_REQUEST);
-    }
-    let domain = cogwheel_classifier::normalize(&request.domain)
-        .map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
-
-    let engine = state.dns_runtime.classifier();
-    let verdict = engine.score_now(&domain);
-    let active_threshold = engine.active_threshold();
-    let would_block = !verdict.protected
-        && verdict.probability >= active_threshold
-        && engine.settings().mode == cogwheel_classifier::ClassifierMode::Protect;
-
-    let contributions = engine
-        .explain(&domain, 12)
-        .into_iter()
-        .map(|contribution| ContributionView {
-            label: contribution.label,
-            kind: match contribution.kind {
-                cogwheel_classifier::ContributionKind::Dense => "dense".to_string(),
-                cogwheel_classifier::ContributionKind::Ngram => "ngram".to_string(),
-            },
-            value: contribution.value,
-        })
-        .collect();
-
-    Ok(Json(ApiEnvelope {
-        data: InspectDomainResponse {
-            domain,
-            probability: verdict.probability,
-            protected: verdict.protected,
-            decision: if would_block { "block" } else { "allow" }.to_string(),
-            active_threshold,
-            blocklist_match: None,
-            contributions,
-        },
-    }))
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct DetectionView {
-    domain: String,
-    client: Option<String>,
-    probability: f32,
-    protected: bool,
-    blocked: bool,
-    observed_at: String,
-}
-
-#[derive(serde::Deserialize)]
-struct DetectionsQuery {
-    #[serde(default)]
-    limit: Option<usize>,
-}
-
-// ------------------------------------------------------- classifier adaptation API
-
-/// Most feedback items retained. Beyond this the oldest are dropped.
-///
-/// A household reports a handful of mistakes a month, so this is years of headroom — but the row is
-/// read and written whole on every submission, and an unbounded one would eventually make a single
-/// feedback click cost a multi-megabyte round trip through SQLite.
-const MAX_PENDING_FEEDBACK: usize = 5_000;
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClassifierFeedbackRequest {
-    domain: String,
-    is_ad: bool,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ClassifierFeedbackResponse {
-    domain: String,
-    is_ad: bool,
-    pending_feedback: usize,
-    minimum_feedback: usize,
-}
-
-/// Record one correction from the household.
-///
-/// Nothing is trained here. Feedback only accumulates; turning it into a model change is an explicit
-/// second step (`/adapt`) that has to pass the gate, so a stream of clicks can never quietly become
-/// a behaviour change.
-async fn classifier_feedback(
-    State(state): State<ServerState>,
-    Json(request): Json<ClassifierFeedbackRequest>,
-) -> Result<Json<ApiEnvelope<ClassifierFeedbackResponse>>, axum::http::StatusCode> {
-    // Bound the input before doing any work: this endpoint is reachable by anything on the LAN.
-    if request.domain.len() > cogwheel_classifier::normalize::MAX_HOST_LEN {
-        return Err(axum::http::StatusCode::BAD_REQUEST);
-    }
-    // Normalise at the door rather than at training time. An unscoreable name is a client bug or a
-    // typo, and the household deserves to be told now instead of having it silently discarded weeks
-    // later when someone presses Adapt.
-    let domain = cogwheel_classifier::normalize(&request.domain)
-        .map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
-
-    let mut feedback = load_classifier_feedback(&state.storage)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    // One live claim per host: a later report replaces an earlier one rather than stacking with it,
-    // so a household that changes its mind is not training the model on both answers.
-    feedback.retain(|item| item.host != domain);
-    feedback.push(cogwheel_classifier::Feedback {
-        host: domain.clone(),
-        is_ad: request.is_ad,
-        observed_at: chrono::Utc::now(),
-    });
-    while feedback.len() > MAX_PENDING_FEEDBACK {
-        feedback.remove(0);
-    }
-
-    persist_classifier_feedback(&state.storage, &feedback)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(Json(ApiEnvelope {
-        data: ClassifierFeedbackResponse {
-            domain,
-            is_ad: request.is_ad,
-            pending_feedback: feedback.len(),
-            minimum_feedback: cogwheel_classifier::adapt::MIN_FEEDBACK_EXAMPLES,
-        },
-    }))
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AdaptationOutcomeView {
-    /// `promoted`, `rejected` or `notEnoughData`.
-    status: String,
-    promoted: bool,
-    /// Set only on rejection, and always specific about which criterion failed.
-    reason: Option<String>,
-    /// ROC-AUC of base+delta on the committed holdout, when it was measured.
-    roc_auc: Option<f32>,
-    /// False-positive rate of base+delta at the three calibrated thresholds.
-    false_positive_rate: Option<SensitivityBand>,
-    example_count: Option<usize>,
-    /// Feedback available, when there was not enough of it to judge.
-    have: Option<usize>,
-    /// Feedback required.
-    need: Option<usize>,
-    adaptation: ClassifierAdaptationInfo,
-}
-
-/// Train a correction from the pending feedback, measure it, and keep it only if it holds up.
-///
-/// The base model is never touched. On rejection the previously active delta (if any) is also left
-/// exactly as it was: a failed adaptation attempt is a no-op, not a rollback.
-async fn classifier_adapt(
-    State(state): State<ServerState>,
-) -> Result<Json<ApiEnvelope<AdaptationOutcomeView>>, axum::http::StatusCode> {
-    let feedback = load_classifier_feedback(&state.storage)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // Training is a few thousand sparse SGD steps and the gate is 25,000 inferences. That is tens to
-    // hundreds of milliseconds of pure CPU, and running it on the async runtime would stall the DNS
-    // listeners sharing this executor on a 4-core Pi -- the exact mistake the scoring worker exists
-    // to avoid.
-    let base = state.dns_runtime.classifier().model().clone();
-    let (delta, outcome) = tokio::task::spawn_blocking(move || {
-        let delta = cogwheel_classifier::train_delta(
-            &base,
-            &feedback,
-            cogwheel_classifier::AdaptConfig::default(),
-        );
-        let outcome = cogwheel_classifier::evaluate_and_gate(
-            &base,
-            &delta,
-            &cogwheel_classifier::embedded_holdout(),
-            base.quality(),
-        );
-        (delta, outcome)
-    })
-    .await
-    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let mut view = match &outcome {
-        cogwheel_classifier::AdaptationOutcome::Promoted {
-            auc,
-            false_positive_rate,
-            example_count,
-        } => AdaptationOutcomeView {
-            status: "promoted".to_string(),
-            promoted: true,
-            reason: None,
-            roc_auc: Some(*auc),
-            false_positive_rate: Some(SensitivityBand {
-                low: false_positive_rate[0],
-                balanced: false_positive_rate[1],
-                high: false_positive_rate[2],
-            }),
-            example_count: Some(*example_count),
-            have: None,
-            need: None,
-            adaptation: build_adaptation_info(&state, None, 0),
-        },
-        cogwheel_classifier::AdaptationOutcome::Rejected {
-            reason,
-            auc,
-            false_positive_rate,
-        } => AdaptationOutcomeView {
-            status: "rejected".to_string(),
-            promoted: false,
-            reason: Some(reason.clone()),
-            roc_auc: Some(*auc),
-            false_positive_rate: Some(SensitivityBand {
-                low: false_positive_rate[0],
-                balanced: false_positive_rate[1],
-                high: false_positive_rate[2],
-            }),
-            example_count: None,
-            have: None,
-            need: None,
-            adaptation: build_adaptation_info(&state, None, 0),
-        },
-        cogwheel_classifier::AdaptationOutcome::NotEnoughData { have, need } => {
-            AdaptationOutcomeView {
-                status: "notEnoughData".to_string(),
-                promoted: false,
-                reason: None,
-                roc_auc: None,
-                false_positive_rate: None,
-                example_count: None,
-                have: Some(*have),
-                need: Some(*need),
-                adaptation: build_adaptation_info(&state, None, 0),
+    let mut blocked = Vec::new();
+    for (scope, policy) in scopes {
+        let artifact = policy.artifact();
+        let probe = PolicyEngine::new(RulesetArtifact::new(
+            artifact.rules.clone(),
+            HashSet::new(),
+            artifact.block_mode.clone(),
+        ));
+        blocked.extend(protected_domains.iter().filter_map(|domain| {
+            match probe.evaluate(domain).kind {
+                DecisionKind::Blocked(_) => Some(format!(
+                    "protected domain blocked in {scope} policy: {domain}"
+                )),
+                DecisionKind::Allowed => None,
             }
-        }
-    };
-
-    if let cogwheel_classifier::AdaptationOutcome::Promoted {
-        auc,
-        false_positive_rate,
-        example_count,
-    } = &outcome
-    {
-        let stored = StoredAdaptation {
-            delta_hex: delta.to_hex(),
-            roc_auc: *auc,
-            false_positive_rate: *false_positive_rate,
-            example_count: *example_count,
-            trained_at: delta.trained_at(),
-        };
-        persist_classifier_adaptation(&state.storage, &stored)
-            .await
-            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-        state
-            .dns_runtime
-            .classifier()
-            .set_active_delta(Some(Arc::new(delta)));
-        tracing::info!(
-            roc_auc = *auc,
-            example_count = *example_count,
-            "classifier adaptation promoted"
-        );
-    } else if let cogwheel_classifier::AdaptationOutcome::Rejected { reason, .. } = &outcome {
-        tracing::info!(reason = %reason, "classifier adaptation rejected by the quality gate");
+        }));
     }
-
-    state
-        .storage
-        .record_audit_event(&AuditEvent {
-            id: Uuid::new_v4(),
-            event_type: "classifier-adaptation.evaluated".to_string(),
-            payload: serde_json::to_string(&view)
-                .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?,
-            created_at: chrono::Utc::now(),
-        })
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // Rebuild the adaptation block after the engine has been updated, so the response describes the
-    // state the caller is now in rather than the one it was in a moment ago.
-    let stored = load_classifier_adaptation(&state.storage)
-        .await
-        .unwrap_or_default();
-    let pending = load_classifier_feedback(&state.storage)
-        .await
-        .unwrap_or_default()
-        .len();
-    view.adaptation = build_adaptation_info(&state, stored.as_ref(), pending);
-
-    Ok(Json(ApiEnvelope { data: view }))
-}
-
-/// Discard the active delta and return to the shipped model.
-///
-/// This is the entire rollback story, and it is deliberately this small: the base was never
-/// modified, so there is nothing to restore. Pending feedback is left alone — the household's
-/// corrections are their data, not a side effect of an adaptation they chose to undo.
-async fn classifier_adapt_rollback(
-    State(state): State<ServerState>,
-) -> Result<Json<ApiEnvelope<ClassifierAdaptationInfo>>, axum::http::StatusCode> {
-    clear_classifier_adaptation(&state.storage)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    state.dns_runtime.classifier().set_active_delta(None);
-    tracing::info!("classifier adaptation rolled back to the base model");
-
-    state
-        .storage
-        .record_audit_event(&AuditEvent {
-            id: Uuid::new_v4(),
-            event_type: "classifier-adaptation.rolled-back".to_string(),
-            payload: "{}".to_string(),
-            created_at: chrono::Utc::now(),
-        })
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let pending = load_classifier_feedback(&state.storage)
-        .await
-        .unwrap_or_default()
-        .len();
-    Ok(Json(ApiEnvelope {
-        data: build_adaptation_info(&state, None, pending),
-    }))
-}
-
-async fn classifier_detections(
-    State(state): State<ServerState>,
-    axum::extract::Query(query): axum::extract::Query<DetectionsQuery>,
-) -> Json<ApiEnvelope<Vec<DetectionView>>> {
-    // Clamp rather than reject: an unbounded limit would let one request serialise the whole ring.
-    let limit = query.limit.unwrap_or(50).clamp(1, 500);
-    let detections = state
-        .dns_runtime
-        .classifier()
-        .recent_detections(limit)
-        .into_iter()
-        .map(|detection| DetectionView {
-            domain: detection.host,
-            client: detection.client,
-            probability: detection.probability,
-            protected: detection.protected,
-            blocked: detection.blocked,
-            observed_at: detection.observed_at.to_rfc3339(),
-        })
-        .collect();
-    Json(ApiEnvelope { data: detections })
+    blocked.sort_unstable();
+    blocked
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
-    use cogwheel_classifier::ClassifierMode;
-
-    #[test]
-    fn runtime_regression_thresholds_trigger_degraded_state() {
-        let before = DnsRuntimeSnapshot {
-            upstream_failures_total: 1,
-            fallback_served_total: 0,
-            cache_hits_total: 0,
-            cache_expired_total: 0,
-            cname_uncloaks_total: 0,
-            cname_blocks_total: 0,
-            queries_total: 100,
-            blocked_total: 10,
-            cache_hit_latency_avg_ns: 0,
-            cache_hit_samples: 0,
-            cache_miss_latency_avg_ns: 0,
-            cache_miss_samples: 0,
-            classifier_latency_avg_ns: 0,
-            classifier_latency_samples: 0,
-        };
-        let after = DnsRuntimeSnapshot {
-            upstream_failures_total: 3,
-            fallback_served_total: 1,
-            cache_hits_total: 0,
-            cache_expired_total: 0,
-            cname_uncloaks_total: 0,
-            cname_blocks_total: 0,
-            queries_total: 200,
-            blocked_total: 20,
-            cache_hit_latency_avg_ns: 0,
-            cache_hit_samples: 0,
-            cache_miss_latency_avg_ns: 0,
-            cache_miss_samples: 0,
-            classifier_latency_avg_ns: 0,
-            classifier_latency_samples: 0,
-        };
-        let guard = RuntimeGuardConfig {
-            probe_domains: vec!["example.com".to_string()],
-            max_upstream_failures_delta: 0,
-            max_fallback_served_delta: 0,
-        };
-
-        let report = evaluate_runtime_regressions(&before, &after, &guard);
-        assert!(report.degraded);
-        assert_eq!(report.notes.len(), 2);
-    }
-
-    #[test]
-    fn runtime_regression_thresholds_allow_healthy_state() {
-        let before = DnsRuntimeSnapshot {
-            upstream_failures_total: 1,
-            fallback_served_total: 1,
-            cache_hits_total: 0,
-            cache_expired_total: 0,
-            cname_uncloaks_total: 0,
-            cname_blocks_total: 0,
-            queries_total: 100,
-            blocked_total: 10,
-            cache_hit_latency_avg_ns: 0,
-            cache_hit_samples: 0,
-            cache_miss_latency_avg_ns: 0,
-            cache_miss_samples: 0,
-            classifier_latency_avg_ns: 0,
-            classifier_latency_samples: 0,
-        };
-        let after = DnsRuntimeSnapshot {
-            upstream_failures_total: 1,
-            fallback_served_total: 1,
-            cache_hits_total: 2,
-            cache_expired_total: 0,
-            cname_uncloaks_total: 1,
-            cname_blocks_total: 0,
-            queries_total: 200,
-            blocked_total: 15,
-            cache_hit_latency_avg_ns: 0,
-            cache_hit_samples: 0,
-            cache_miss_latency_avg_ns: 0,
-            cache_miss_samples: 0,
-            classifier_latency_avg_ns: 0,
-            classifier_latency_samples: 0,
-        };
-        let guard = RuntimeGuardConfig::default();
-
-        let report = evaluate_runtime_regressions(&before, &after, &guard);
-        assert!(!report.degraded);
-        assert!(report.notes.is_empty());
-    }
 
     /// The subscriber cap and the Drop-based slot release are the event bus's two
     /// correctness-critical behaviours. Without a test, a refactor that dropped `SubscriberGuard`
@@ -7158,187 +2313,24 @@ mod tests {
     }
 
     #[test]
-    fn event_bus_delivers_each_frame_kind_to_a_subscriber() {
+    fn event_bus_delivers_query_frames_to_a_subscriber() {
         let bus = EventBus::new();
         let mut receiver = bus.sender.subscribe();
 
-        bus.publish(StreamEvent::Detection(Box::new(StreamDetectionEvent {
+        bus.publish(StreamEvent::Query(Box::new(StreamQueryEvent {
             domain: "ads.example.com".to_string(),
             client: "127.0.0.1".to_string(),
             device_name: None,
-            probability: 0.97,
-            decision: "block".to_string(),
-            observed_at: "2026-01-01T00:00:00Z".to_string(),
-        })));
-        bus.publish(StreamEvent::Health(Box::new(StreamHealthEvent {
-            degraded: true,
-            notes: vec!["upstream slow".to_string()],
+            blocked: true,
+            reason: None,
             observed_at: "2026-01-01T00:00:00Z".to_string(),
         })));
 
-        let first = receiver.try_recv();
+        let frame = receiver.try_recv();
         assert!(
-            matches!(&first, Ok(StreamEvent::Detection(event)) if event.domain == "ads.example.com"),
-            "expected a detection frame for ads.example.com, got {first:?}"
+            matches!(&frame, Ok(StreamEvent::Query(event)) if event.domain == "ads.example.com" && event.blocked),
+            "expected a blocked query frame for ads.example.com, got {frame:?}"
         );
-        let second = receiver.try_recv();
-        assert!(
-            matches!(&second, Ok(StreamEvent::Health(event)) if event.degraded),
-            "expected a degraded health frame, got {second:?}"
-        );
-    }
-
-    #[test]
-    fn classifier_settings_round_trip_json() {
-        let settings = ClassifierSettings {
-            mode: ClassifierMode::Protect,
-            sensitivity: cogwheel_classifier::Sensitivity::High,
-        };
-
-        let encoded = serde_json::to_string(&settings).expect("encode settings");
-        let decoded: ClassifierSettings = serde_json::from_str(&encoded).expect("decode settings");
-        assert_eq!(decoded.mode, ClassifierMode::Protect);
-        assert_eq!(decoded.sensitivity, cogwheel_classifier::Sensitivity::High);
-    }
-
-    /// Settings blobs written by builds that predate the sensitivity field must still load, because
-    /// they are sitting in the `settings` key-value table of every existing install.
-    #[test]
-    fn classifier_settings_tolerate_legacy_blobs() {
-        let decoded: ClassifierSettings =
-            serde_json::from_str(r#"{"mode":"protect","threshold":0.92}"#)
-                .expect("legacy blob must still decode");
-        assert_eq!(decoded.mode, ClassifierMode::Protect);
-        assert_eq!(
-            decoded.sensitivity,
-            cogwheel_classifier::Sensitivity::Balanced,
-            "an unknown legacy field should fall back to the default sensitivity"
-        );
-    }
-
-    /// The stored adaptation row has to survive a restart intact, delta bytes included — it is the
-    /// only copy of a correction the user explicitly approved.
-    #[test]
-    fn stored_adaptation_round_trips_through_the_settings_table() {
-        let base = cogwheel_classifier::embedded_model().expect("embedded model must parse");
-        let feedback: Vec<cogwheel_classifier::Feedback> = (0..40)
-            .map(|index| cogwheel_classifier::Feedback {
-                host: format!("h{index}.example{index}.com"),
-                is_ad: index % 3 == 0,
-                observed_at: chrono::Utc::now(),
-            })
-            .collect();
-        let delta = cogwheel_classifier::train_delta(
-            &base,
-            &feedback,
-            cogwheel_classifier::AdaptConfig::default(),
-        );
-
-        let stored = StoredAdaptation {
-            delta_hex: delta.to_hex(),
-            roc_auc: 0.8912,
-            false_positive_rate: [0.001, 0.005, 0.023],
-            example_count: delta.example_count(),
-            trained_at: delta.trained_at(),
-        };
-        let encoded = serde_json::to_string(&stored).expect("encode");
-        assert!(
-            encoded.contains("\"deltaHex\"") && encoded.contains("\"falsePositiveRate\""),
-            "stored adaptation must use the camelCase convention: {encoded}"
-        );
-
-        let decoded: StoredAdaptation = serde_json::from_str(&encoded).expect("decode");
-        let restored =
-            cogwheel_classifier::Delta::from_hex(&decoded.delta_hex).expect("delta must reload");
-        assert_eq!(restored.example_count(), delta.example_count());
-        for host in ["h1.example1.com", "chase.com", "doubleclick.net"] {
-            assert_eq!(
-                base.probability_with_delta(host, Some(&restored)),
-                base.probability_with_delta(host, Some(&delta)),
-                "{host} scored differently after a persistence round trip"
-            );
-        }
-    }
-
-    /// A delta row corrupted on disk must be dropped, not applied. `Delta::from_hex` is the gate for
-    /// that, so pin the fact that the server's restore path actually gets an error out of it.
-    #[test]
-    fn a_corrupt_stored_delta_is_rejected_rather_than_applied() {
-        let base = cogwheel_classifier::embedded_model().expect("parse");
-        let feedback: Vec<cogwheel_classifier::Feedback> = (0..40)
-            .map(|index| cogwheel_classifier::Feedback {
-                host: format!("h{index}.example{index}.com"),
-                is_ad: index % 3 == 0,
-                observed_at: chrono::Utc::now(),
-            })
-            .collect();
-        let delta = cogwheel_classifier::train_delta(
-            &base,
-            &feedback,
-            cogwheel_classifier::AdaptConfig::default(),
-        );
-        let mut hex = delta.to_hex();
-        assert!(hex.len() > 200);
-        // Flip one nibble deep in the weight block.
-        let position = hex.len() - 11;
-        hex.replace_range(position..position + 1, "f");
-        assert!(
-            cogwheel_classifier::Delta::from_hex(&hex).is_err()
-                || cogwheel_classifier::Delta::from_hex(&hex) == Ok(delta),
-            "a corrupted delta must not silently become a different valid delta"
-        );
-
-        assert!(cogwheel_classifier::Delta::from_hex("not hex at all").is_err());
-        assert!(cogwheel_classifier::Delta::from_hex("").is_err());
-    }
-
-    #[test]
-    fn classifier_feedback_request_uses_camel_case() {
-        let request: ClassifierFeedbackRequest =
-            serde_json::from_str(r#"{"domain":"ads.example.com","isAd":true}"#).expect("decode");
-        assert_eq!(request.domain, "ads.example.com");
-        assert!(request.is_ad);
-    }
-
-    #[test]
-    fn adaptation_outcome_view_serialises_in_camel_case() {
-        let view = AdaptationOutcomeView {
-            status: "rejected".to_string(),
-            promoted: false,
-            reason: Some("false-positive rate at balanced sensitivity rose".to_string()),
-            roc_auc: Some(0.8901),
-            false_positive_rate: Some(SensitivityBand {
-                low: 0.001,
-                balanced: 0.006,
-                high: 0.024,
-            }),
-            example_count: None,
-            have: None,
-            need: None,
-            adaptation: ClassifierAdaptationInfo {
-                active: false,
-                trained_at: None,
-                example_count: 0,
-                ngram_entries: 0,
-                roc_auc: None,
-                false_positive_rate: None,
-                max_logit_shift: 0.0,
-                logit_budget: cogwheel_classifier::adapt::DELTA_LOGIT_BUDGET,
-                pending_feedback: 42,
-                minimum_feedback: cogwheel_classifier::adapt::MIN_FEEDBACK_EXAMPLES,
-            },
-        };
-        let encoded = serde_json::to_string(&view).expect("encode");
-        for key in [
-            "\"rocAuc\"",
-            "\"falsePositiveRate\"",
-            "\"pendingFeedback\"",
-            "\"maxLogitShift\"",
-            "\"logitBudget\"",
-            "\"minimumFeedback\"",
-        ] {
-            assert!(encoded.contains(key), "missing {key} in {encoded}");
-        }
     }
 
     #[test]
@@ -7410,134 +2402,12 @@ mod tests {
     }
 
     #[test]
-    fn normalize_device_service_overrides_filters_unknown_values() {
-        assert_eq!(
-            normalize_device_service_overrides(vec![
-                DeviceServiceOverrideRecord {
-                    service_id: "tiktok".to_string(),
-                    mode: "allow".to_string(),
-                },
-                DeviceServiceOverrideRecord {
-                    service_id: "unknown".to_string(),
-                    mode: "block".to_string(),
-                },
-                DeviceServiceOverrideRecord {
-                    service_id: "tiktok".to_string(),
-                    mode: "block".to_string(),
-                },
-            ]),
-            vec![DeviceServiceOverrideRecord {
-                service_id: "tiktok".to_string(),
-                mode: "block".to_string(),
-            }]
-        );
-    }
-
-    #[test]
-    fn validate_device_service_overrides_rejects_global_mode_payloads() {
-        assert_eq!(
-            validate_device_service_overrides(
-                "global",
-                vec![DeviceServiceOverrideRecord {
-                    service_id: "tiktok".to_string(),
-                    mode: "allow".to_string(),
-                }],
-            ),
-            Err("device service overrides require custom policy mode".to_string())
-        );
-    }
-
-    #[test]
-    fn validate_device_service_overrides_rejects_invalid_values() {
-        assert_eq!(
-            validate_device_service_overrides(
-                "custom",
-                vec![DeviceServiceOverrideRecord {
-                    service_id: "unknown".to_string(),
-                    mode: "allow".to_string(),
-                }],
-            ),
-            Err(
-                "unknown device service override `unknown`; choose one of the built-in services"
-                    .to_string()
-            )
-        );
-
-        assert_eq!(
-            validate_device_service_overrides(
-                "custom",
-                vec![DeviceServiceOverrideRecord {
-                    service_id: "tiktok".to_string(),
-                    mode: "monitor".to_string(),
-                }],
-            ),
-            Err("device service override `TikTok` must use allow or block mode".to_string())
-        );
-    }
-
-    #[test]
-    fn validate_device_service_overrides_normalizes_known_values() {
-        assert_eq!(
-            validate_device_service_overrides(
-                "custom",
-                vec![
-                    DeviceServiceOverrideRecord {
-                        service_id: " tiktok ".to_string(),
-                        mode: "allow".to_string(),
-                    },
-                    DeviceServiceOverrideRecord {
-                        service_id: "tiktok".to_string(),
-                        mode: "block".to_string(),
-                    },
-                ],
-            ),
-            Ok(vec![DeviceServiceOverrideRecord {
-                service_id: "tiktok".to_string(),
-                mode: "block".to_string(),
-            }])
-        );
-    }
-
-    #[test]
     fn normalize_profile_name_accepts_non_empty_values() {
         assert_eq!(
             normalize_profile_name(" Balanced "),
             Some("balanced".to_string())
         );
         assert_eq!(normalize_profile_name("   "), None);
-    }
-
-    #[test]
-    fn normalize_notification_inputs_accept_expected_values() {
-        assert_eq!(
-            normalize_notification_severity(" HIGH "),
-            Some("high".to_string())
-        );
-        assert_eq!(normalize_notification_severity("low"), None);
-        assert_eq!(normalize_webhook_url(None), Some(None));
-        assert_eq!(normalize_webhook_url(Some("   ")), Some(None));
-        assert!(normalize_webhook_url(Some("https://hooks.example.test/path")).is_some());
-        assert_eq!(normalize_webhook_url(Some("ftp://example.test")), None);
-    }
-
-    #[test]
-    fn notification_delivery_respects_thresholds() {
-        let settings = NotificationSettings {
-            enabled: true,
-            webhook_url: Some("https://hooks.example.test/path".to_string()),
-            min_severity: "high".to_string(),
-        };
-
-        assert!(!should_deliver_notification(&settings, "medium"));
-        assert!(should_deliver_notification(&settings, "high"));
-        assert!(should_deliver_notification(&settings, "critical"));
-    }
-
-    #[test]
-    fn notification_retry_delay_backs_off() {
-        assert_eq!(notification_retry_delay(0), Duration::from_millis(250));
-        assert_eq!(notification_retry_delay(1), Duration::from_millis(500));
-        assert_eq!(notification_retry_delay(2), Duration::from_millis(1000));
     }
 
     #[test]
@@ -7550,10 +2420,7 @@ mod tests {
             blocklist_profile_override: Some("Aggressive".to_string()),
             protection_override: "bypass".to_string(),
             allowed_domains: vec!["example.com".to_string()],
-            service_overrides: vec![DeviceServiceOverrideRecord {
-                service_id: "tiktok".to_string(),
-                mode: "allow".to_string(),
-            }],
+            service_overrides: Vec::new(),
         }]);
 
         assert_eq!(configs.len(), 1);
@@ -7608,271 +2475,63 @@ mod tests {
         ));
     }
 
+    /// The pre-activation safety net has to see through the protected tier: a
+    /// catalog compiled with a protected set answers `Allowed` for those names no
+    /// matter what its rules say, so a check that trusted the compiled engines
+    /// would never fire. It also has to look at every profile, because a profile
+    /// built from a subset of the sources can lose the allow rule that rescued a
+    /// name in the global set.
     #[test]
-    fn build_security_summary_tracks_severity_and_devices() {
-        let summary = build_security_summary(&[
-            SecurityEventRecord {
-                id: Uuid::new_v4(),
-                device_id: None,
-                device_name: Some("Laptop".to_string()),
-                client_ip: "192.168.1.10".to_string(),
-                domain: "alpha.example".to_string(),
-                classifier_score: 0.97,
-                severity: "high".to_string(),
-                created_at: Utc::now(),
-            },
-            SecurityEventRecord {
-                id: Uuid::new_v4(),
-                device_id: None,
-                device_name: Some("Laptop".to_string()),
-                client_ip: "192.168.1.10".to_string(),
-                domain: "beta.example".to_string(),
-                classifier_score: 0.995,
-                severity: "critical".to_string(),
-                created_at: Utc::now(),
-            },
-            SecurityEventRecord {
-                id: Uuid::new_v4(),
-                device_id: None,
-                device_name: None,
-                client_ip: "192.168.1.20".to_string(),
-                domain: "gamma.example".to_string(),
-                classifier_score: 0.93,
-                severity: "medium".to_string(),
-                created_at: Utc::now(),
-            },
-        ]);
-
-        assert_eq!(summary.medium_count, 1);
-        assert_eq!(summary.high_count, 1);
-        assert_eq!(summary.critical_count, 1);
-        assert_eq!(summary.top_devices.len(), 2);
-        assert_eq!(summary.top_devices[0].label, "Laptop");
-        assert_eq!(summary.top_devices[0].event_count, 2);
-        assert_eq!(summary.top_devices[0].highest_severity, "critical");
-    }
-
-    #[test]
-    fn build_notification_delivery_events_maps_delivery_records() {
-        let deliveries = build_notification_delivery_events(&[NotificationDeliveryRecord {
-            id: Uuid::new_v4(),
-            event_type: "security.alert_raised".to_string(),
-            status: "delivered".to_string(),
-            severity: "high".to_string(),
-            title: "notify.example".to_string(),
-            summary: "high alert for Laptop after 2 attempt(s).".to_string(),
-            domain: "notify.example".to_string(),
-            device_name: Some("Laptop".to_string()),
-            client_ip: "192.168.1.25".to_string(),
-            attempts: 2,
-            created_at: Utc::now(),
-        }]);
-
-        assert_eq!(deliveries.len(), 1);
-        assert_eq!(deliveries[0].status, "delivered");
-        assert_eq!(deliveries[0].event_type, "security.alert_raised");
-        assert_eq!(deliveries[0].title, "notify.example");
-        assert_eq!(deliveries[0].target, "Laptop");
-        assert_eq!(deliveries[0].domain, "notify.example");
-        assert_eq!(deliveries[0].attempts, 2);
-    }
-
-    #[test]
-    fn build_notification_delivery_events_supports_operational_payloads() {
-        let deliveries = build_notification_delivery_events(&[NotificationDeliveryRecord {
-            id: Uuid::new_v4(),
-            event_type: "ruleset.rollback".to_string(),
-            status: "delivered".to_string(),
-            severity: "high".to_string(),
-            title: "Ruleset rolled back".to_string(),
-            summary: "Rolled back to the previous verified ruleset.".to_string(),
-            domain: "control-plane".to_string(),
-            device_name: None,
-            client_ip: "control-plane".to_string(),
-            attempts: 1,
-            created_at: Utc::now(),
-        }]);
-
-        assert_eq!(deliveries.len(), 1);
-        assert_eq!(deliveries[0].status, "delivered");
-        assert_eq!(deliveries[0].event_type, "ruleset.rollback");
-        assert_eq!(deliveries[0].title, "Ruleset rolled back");
-        assert_eq!(
-            deliveries[0].summary,
-            "Rolled back to the previous verified ruleset."
-        );
-        assert_eq!(deliveries[0].target, "control-plane");
-        assert_eq!(deliveries[0].client_ip, "control-plane");
-        assert_eq!(deliveries[0].domain, "control-plane");
-    }
-
-    #[test]
-    fn build_notification_health_summary_tracks_outcomes() {
-        let now = Utc::now();
-        let summary = build_notification_health_summary(&[
-            NotificationDeliveryRecord {
-                id: Uuid::new_v4(),
-                event_type: "security.alert_raised".to_string(),
-                status: "delivered".to_string(),
-                severity: "high".to_string(),
-                title: "ok.example".to_string(),
-                summary: "delivered".to_string(),
-                domain: "ok.example".to_string(),
-                device_name: None,
-                client_ip: "192.168.1.25".to_string(),
-                attempts: 1,
-                created_at: now,
-            },
-            NotificationDeliveryRecord {
-                id: Uuid::new_v4(),
-                event_type: "security.alert_raised".to_string(),
-                status: "failed".to_string(),
-                severity: "high".to_string(),
-                title: "fail.example".to_string(),
-                summary: "failed".to_string(),
-                domain: "fail.example".to_string(),
-                device_name: None,
-                client_ip: "192.168.1.25".to_string(),
-                attempts: 3,
-                created_at: now + chrono::Duration::seconds(5),
-            },
-        ]);
-
-        assert_eq!(summary.delivered_count, 1);
-        assert_eq!(summary.failed_count, 1);
-        assert_eq!(summary.last_delivery_at, Some(now));
-        assert_eq!(
-            summary.last_failure_at,
-            Some(now + chrono::Duration::seconds(5))
-        );
-    }
-
-    #[test]
-    fn build_notification_failure_analytics_tracks_failed_domains() {
-        let analytics = build_notification_failure_analytics(&[
-            NotificationDeliveryRecord {
-                id: Uuid::new_v4(),
-                event_type: "security.alert_raised".to_string(),
-                status: "delivered".to_string(),
-                severity: "high".to_string(),
-                title: "ok.example".to_string(),
-                summary: "ok".to_string(),
-                domain: "ok.example".to_string(),
-                device_name: None,
-                client_ip: "192.168.1.25".to_string(),
-                attempts: 1,
-                created_at: Utc::now(),
-            },
-            NotificationDeliveryRecord {
-                id: Uuid::new_v4(),
-                event_type: "security.alert_raised".to_string(),
-                status: "failed".to_string(),
-                severity: "high".to_string(),
-                title: "fail.example".to_string(),
-                summary: "failed".to_string(),
-                domain: "fail.example".to_string(),
-                device_name: None,
-                client_ip: "192.168.1.25".to_string(),
-                attempts: 3,
-                created_at: Utc::now(),
-            },
-            NotificationDeliveryRecord {
-                id: Uuid::new_v4(),
-                event_type: "security.alert_raised".to_string(),
-                status: "failed".to_string(),
-                severity: "high".to_string(),
-                title: "fail.example".to_string(),
-                summary: "failed again".to_string(),
-                domain: "fail.example".to_string(),
-                device_name: None,
-                client_ip: "192.168.1.25".to_string(),
-                attempts: 3,
-                created_at: Utc::now(),
-            },
-        ]);
-
-        assert_eq!(analytics.success_rate_percent, 33.3);
-        assert_eq!(analytics.top_failed_domains.len(), 1);
-        assert_eq!(analytics.top_failed_domains[0].domain, "fail.example");
-        assert_eq!(analytics.top_failed_domains[0].failure_count, 2);
-    }
-
-    #[test]
-    fn parse_tailscale_status_json_extracts_health_fields() {
-        let status = parse_tailscale_status_json(
-            &serde_json::json!({
-                "BackendState": "Running",
-                "CurrentTailnet": { "Name": "example.ts.net" },
-                "Self": {
-                    "HostName": "cogwheel-node",
-                    "UsingExitNode": true
+    fn protected_domain_regressions_sees_through_protected_tier_and_checks_profiles() {
+        let source = |name: &str, profile: &str, body: &str| {
+            parse_source(
+                SourceDefinition {
+                    id: Uuid::new_v4(),
+                    name: name.to_string(),
+                    url: Url::parse(&format!("data:text/plain,{name}")).expect("url"),
+                    kind: SourceKind::Adblock,
+                    enabled: true,
+                    profile: profile.to_string(),
+                    verification_strictness: "balanced".to_string(),
                 },
-                "Peer": {
-                    "peer-a": {},
-                    "peer-b": {}
-                },
-                "Health": ["wantrunning is false"]
-            })
-            .to_string(),
+                body,
+            )
+        };
+        let protected = HashSet::from(["apple.com".to_string()]);
+
+        // Only the balanced profile carries the block; the allow that rescues it
+        // globally lives in a strict-only source.
+        let catalog = build_runtime_policy_catalog(
+            &[
+                source("balanced", "balanced", "||apple.com^"),
+                source("strict", "strict", "@@||apple.com^"),
+            ],
+            protected.clone(),
+            BlockMode::NullIp,
+        );
+        assert!(
+            matches!(
+                catalog
+                    .profile_policies
+                    .get("balanced")
+                    .expect("balanced profile")
+                    .evaluate("apple.com")
+                    .kind,
+                DecisionKind::Allowed
+            ),
+            "the compiled engine hides the regression behind the protected tier"
+        );
+        assert_eq!(
+            protected_domain_regressions(&catalog, &protected),
+            vec!["protected domain blocked in balanced policy: apple.com".to_string()]
         );
 
-        assert!(status.installed);
-        assert!(status.daemon_running);
-        assert_eq!(status.backend_state.as_deref(), Some("Running"));
-        assert_eq!(status.hostname.as_deref(), Some("cogwheel-node"));
-        assert_eq!(status.tailnet_name.as_deref(), Some("example.ts.net"));
-        assert_eq!(status.peer_count, 2);
-        assert!(status.exit_node_active);
-        assert_eq!(status.health_warnings, vec!["wantrunning is false"]);
-    }
-
-    #[test]
-    fn normalize_notification_window_accepts_known_values() {
-        assert_eq!(normalize_notification_window(Some(10)), 10);
-        assert_eq!(normalize_notification_window(Some(50)), 50);
-        assert_eq!(normalize_notification_window(Some(100)), 100);
-        assert_eq!(normalize_notification_window(Some(999)), 30);
-        assert_eq!(normalize_notification_window(None), 30);
-    }
-
-    #[test]
-    fn normalize_notification_test_presets_filters_invalid_entries() {
-        let presets = normalize_notification_test_presets(vec![
-            NotificationTestPreset {
-                name: "weekday".to_string(),
-                domain: "notify.example".to_string(),
-                severity: "high".to_string(),
-                device_name: "Laptop".to_string(),
-                dry_run: false,
-            },
-            NotificationTestPreset {
-                name: "weekday".to_string(),
-                domain: "notify-two.example".to_string(),
-                severity: "critical".to_string(),
-                device_name: "Tablet".to_string(),
-                dry_run: true,
-            },
-            NotificationTestPreset {
-                name: "".to_string(),
-                domain: "ignored.example".to_string(),
-                severity: "high".to_string(),
-                device_name: "Ignored".to_string(),
-                dry_run: false,
-            },
-        ]);
-
-        assert_eq!(presets.len(), 1);
-        assert_eq!(presets[0].name, "weekday");
-        assert_eq!(presets[0].domain, "notify-two.example");
-        assert_eq!(presets[0].severity, "critical");
-        assert!(presets[0].dry_run);
-    }
-
-    #[test]
-    fn severity_for_classifier_score_uses_expected_bands() {
-        assert_eq!(severity_for_classifier_score(0.995), "critical");
-        assert_eq!(severity_for_classifier_score(0.97), "high");
-        assert_eq!(severity_for_classifier_score(0.92), "medium");
+        let clean = build_runtime_policy_catalog(
+            &[source("shared", "shared", "||ads.example^")],
+            protected.clone(),
+            BlockMode::NullIp,
+        );
+        assert!(protected_domain_regressions(&clean, &protected).is_empty());
     }
 
     #[test]
@@ -7907,56 +2566,6 @@ mod tests {
             Some(now - chrono::TimeDelta::minutes(45)),
             now,
         ));
-    }
-
-    #[test]
-    fn parse_tailscale_status_json_handles_missing_fields() {
-        let status = parse_tailscale_status_json("{}");
-        assert!(status.installed);
-        assert!(status.daemon_running);
-        assert!(status.hostname.is_none());
-        assert!(!status.exit_node_active);
-    }
-
-    #[test]
-    fn parse_tailscale_status_json_detects_exit_node_status_variants() {
-        let status_with_exit_node = parse_tailscale_status_json(
-            &serde_json::json!({
-                "Self": { "ExitNode": true }
-            })
-            .to_string(),
-        );
-        assert!(status_with_exit_node.exit_node_active);
-
-        let status_with_exit_node_status = parse_tailscale_status_json(
-            &serde_json::json!({
-                "Self": { "ExitNodeStatus": "Active" }
-            })
-            .to_string(),
-        );
-        assert!(status_with_exit_node_status.exit_node_active);
-
-        let status_without_exit = parse_tailscale_status_json(
-            &serde_json::json!({
-                "Self": { "ExitNode": false }
-            })
-            .to_string(),
-        );
-        assert!(!status_without_exit.exit_node_active);
-    }
-
-    #[test]
-    fn tailscale_saved_state_serialization() {
-        let state = TailscaleSavedState {
-            exit_node_enabled: true,
-            saved_at: "2024-01-01T00:00:00Z".to_string(),
-            hostname: "test-node".to_string(),
-        };
-        let json = serde_json::to_string(&state).expect("encode tailscale state");
-        let parsed: TailscaleSavedState =
-            serde_json::from_str(&json).expect("decode tailscale state");
-        assert!(parsed.exit_node_enabled);
-        assert_eq!(parsed.hostname, "test-node");
     }
 
     /// hickory builds its TLS client config as `RootCertStore::empty()` and
@@ -8125,31 +2734,10 @@ struct StreamQueryEvent {
     observed_at: String,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct StreamDetectionEvent {
-    domain: String,
-    client: String,
-    device_name: Option<String>,
-    probability: f32,
-    decision: String,
-    observed_at: String,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct StreamHealthEvent {
-    degraded: bool,
-    notes: Vec<String>,
-    observed_at: String,
-}
-
 /// Which SSE event name a frame is published under.
 #[derive(Debug, Clone)]
 enum StreamEvent {
     Query(Box<StreamQueryEvent>),
-    Detection(Box<StreamDetectionEvent>),
-    Health(Box<StreamHealthEvent>),
 }
 
 /// Fan-out for live events, with a bounded subscriber count.
@@ -8197,7 +2785,7 @@ impl Drop for SubscriberGuard {
     }
 }
 
-/// Live query and detection stream.
+/// Live query stream.
 ///
 /// Returns 503 once [`MAX_EVENT_SUBSCRIBERS`] connections are open rather than accepting unbounded
 /// clients.
@@ -8234,12 +2822,6 @@ async fn events_stream(
             let frame = match item {
                 Ok(StreamEvent::Query(event)) => axum::response::sse::Event::default()
                     .event("query")
-                    .json_data(&*event),
-                Ok(StreamEvent::Detection(event)) => axum::response::sse::Event::default()
-                    .event("detection")
-                    .json_data(&*event),
-                Ok(StreamEvent::Health(event)) => axum::response::sse::Event::default()
-                    .event("health")
                     .json_data(&*event),
                 // A slow reader missed frames. Skip them and keep the connection alive rather than
                 // tearing down a working stream over dropped display rows.

@@ -68,7 +68,7 @@ export function SnoozeControl() {
       <ConfirmDialog
         confirmLabel={`Pause for ${pending ?? 0} minutes`}
         consequence="Every device on the network resolves unfiltered until the window expires or you resume manually. The pause is held in memory, so a restart of the appliance also ends it."
-        description={`Blocking and classification stop for ${pending ?? 0} minutes across the whole network, not just this browser.`}
+        description={`Blocking stops for ${pending ?? 0} minutes across the whole network, not just this browser.`}
         destructive
         onConfirm={async () => {
           if (pending !== null) await pause(pending);

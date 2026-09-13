@@ -16,5 +16,4 @@ moka.workspace = true
 serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-cogwheel-classifier = { path = "../cogwheel-classifier" }
 cogwheel-policy = { path = "../cogwheel-policy" }

@@ -2,18 +2,10 @@ import React from "react";
 import { api, errorMessage } from "@/lib/api";
 import {
   CACHE_KEYS,
-  NOTIFICATION_HISTORY_WINDOW,
-  NOTIFICATION_WINDOW,
   REFRESH_INTERVAL_MS,
   emptyDashboard,
-  emptyFederatedLearning,
-  emptyLatencyBudget,
   emptyResolverAccess,
   emptySettings,
-  emptySyncStatus,
-  emptyTailscaleDnsCheck,
-  emptyTailscaleStatus,
-  emptyThreatIntel,
 } from "@/lib/constants";
 import { notify } from "@/lib/toast";
 import {
@@ -27,26 +19,12 @@ import {
 const INITIAL: ControlPlaneSnapshot = {
   dashboard: emptyDashboard,
   settings: emptySettings,
-  classifier: null,
-  syncStatus: emptySyncStatus,
-  tailscale: emptyTailscaleStatus,
-  tailscaleDns: emptyTailscaleDnsCheck,
-  threatIntel: emptyThreatIntel,
-  federatedLearning: emptyFederatedLearning,
-  latencyBudget: emptyLatencyBudget,
   resolverAccess: emptyResolverAccess,
 };
 
 const CACHE_KEY_BY_FIELD: Record<keyof ControlPlaneSnapshot, string> = {
   dashboard: CACHE_KEYS.dashboard,
   settings: CACHE_KEYS.settings,
-  classifier: CACHE_KEYS.classifier,
-  syncStatus: CACHE_KEYS.syncStatus,
-  tailscale: CACHE_KEYS.tailscale,
-  tailscaleDns: CACHE_KEYS.tailscaleDns,
-  threatIntel: CACHE_KEYS.threatIntel,
-  federatedLearning: CACHE_KEYS.federatedLearning,
-  latencyBudget: CACHE_KEYS.latencyBudget,
   resolverAccess: CACHE_KEYS.resolverAccess,
 };
 
@@ -87,28 +65,17 @@ type Loader = { field: keyof ControlPlaneSnapshot; load: (signal: AbortSignal) =
 
 /** Everything, used on first paint, manual refresh and after every mutation. */
 const FULL_LOADERS: Loader[] = [
-  {
-    field: "dashboard",
-    load: (signal) => api.dashboard(NOTIFICATION_WINDOW, NOTIFICATION_HISTORY_WINDOW, { signal }),
-  },
+  { field: "dashboard", load: (signal) => api.dashboard({ signal }) },
   { field: "settings", load: (signal) => api.settings({ signal }) },
-  { field: "classifier", load: (signal) => api.classifier({ signal }) },
-  { field: "syncStatus", load: (signal) => api.syncStatus({ signal }) },
-  { field: "tailscale", load: (signal) => api.tailscaleStatus({ signal }) },
-  { field: "tailscaleDns", load: (signal) => api.tailscaleDnsCheck({ signal }) },
-  { field: "threatIntel", load: (signal) => api.threatIntelProviders({ signal }) },
-  { field: "federatedLearning", load: (signal) => api.federatedLearningStatus({ signal }) },
-  { field: "latencyBudget", load: (signal) => api.latencyBudget({ signal }) },
   { field: "resolverAccess", load: (signal) => api.resolverAccess({ signal }) },
 ];
 
 /**
- * The poll set. Deliberately narrower than the old app's, which re-ran six
- * endpoints every five seconds — two of which shell out to `tailscale` and
- * `hostname` on the appliance. Only genuinely live data is polled; the rest
- * refreshes on mount, on demand, and after any mutation.
+ * The poll set. Only the dashboard is genuinely live; settings and the
+ * resolver-access report (which shells out to `hostname` on the appliance)
+ * refresh on mount, on demand, and after any mutation.
  */
-const LIVE_FIELDS = new Set<keyof ControlPlaneSnapshot>(["dashboard", "classifier", "latencyBudget"]);
+const LIVE_FIELDS = new Set<keyof ControlPlaneSnapshot>(["dashboard"]);
 const LIVE_LOADERS = FULL_LOADERS.filter((loader) => LIVE_FIELDS.has(loader.field));
 
 export function CogwheelProvider({ children }: { children: React.ReactNode }) {

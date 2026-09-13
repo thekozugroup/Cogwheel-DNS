@@ -1,14 +1,7 @@
 import React from "react";
 import { useSearchParams } from "react-router-dom";
 import { HardDriveIcon, PlusIcon, RotateCwIcon, ShieldIcon, Trash2Icon, XIcon } from "lucide-react";
-import {
-  api,
-  type BlockProfileListRecord,
-  type BlockProfileRecord,
-  type ServiceMode,
-  type ServiceToggle,
-  type SourceRecord,
-} from "@/lib/api";
+import { api, type BlockProfileListRecord, type BlockProfileRecord, type SourceRecord } from "@/lib/api";
 import { MUTUALLY_EXCLUSIVE_PRESETS, emptyBlockProfileDraft, oisdProfileOptions } from "@/lib/constants";
 import { slugify, splitDomainList } from "@/lib/derive";
 import { formatCount, formatRelative, truncateMiddle } from "@/lib/format";
@@ -28,7 +21,7 @@ import { StatusPill } from "@/components/app/status-indicator";
 import { ConfirmDialog } from "@/components/app/confirm-dialog";
 import { AsyncRegion, EmptyState } from "@/components/app/states";
 
-const TABS = ["blocklists", "services", "profiles"] as const;
+const TABS = ["blocklists", "profiles"] as const;
 type TabId = (typeof TABS)[number];
 
 export function ProtectionScreen() {
@@ -57,7 +50,7 @@ export function ProtectionScreen() {
             Refresh sources
           </Button>
         }
-        description="What gets blocked, for whom, and from which lists."
+        description="What gets blocked, and from which lists."
         title="Protection"
       />
 
@@ -76,15 +69,11 @@ export function ProtectionScreen() {
       >
         <TabsList className="mb-6">
           <TabsTrigger value="blocklists">Blocklists</TabsTrigger>
-          <TabsTrigger value="services">Services</TabsTrigger>
           <TabsTrigger value="profiles">Block profiles</TabsTrigger>
         </TabsList>
 
         <TabsContent value="blocklists">
           <BlocklistsPane />
-        </TabsContent>
-        <TabsContent value="services">
-          <ServicesPane />
         </TabsContent>
         <TabsContent value="profiles">
           <ProfilesPane />
@@ -98,7 +87,6 @@ export function ProtectionScreen() {
 
 function BlocklistsPane() {
   const { data, phase, error, busy, mutate, reload } = useCogwheel();
-  const [params] = useSearchParams();
   const [name, setName] = React.useState("");
   const [url, setUrl] = React.useState("");
   const [profile, setProfile] = React.useState("custom");
@@ -106,15 +94,6 @@ function BlocklistsPane() {
   const [interval, setInterval] = React.useState("60");
   const [search, setSearch] = React.useState("");
   const [pendingDelete, setPendingDelete] = React.useState<SourceRecord | null>(null);
-
-  // A ?source=<id> deep link (from the command palette) scrolls the operator to
-  // the row they asked for by seeding the filter with its name.
-  const deepLinkSource = params.get("source");
-  React.useEffect(() => {
-    if (!deepLinkSource) return;
-    const match = data.settings.blocklists.find((source) => source.id === deepLinkSource);
-    if (match) setSearch(match.name);
-  }, [data.settings.blocklists, deepLinkSource]);
 
   const statusById = React.useMemo(
     () => new Map(data.settings.blocklist_statuses.map((status) => [status.id, status])),
@@ -365,122 +344,6 @@ function BlocklistsPane() {
       />
 
     </div>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-
-const SERVICE_MODES: ServiceMode[] = ["Inherit", "Allow", "Block"];
-
-function ServicesPane() {
-  const { data, phase, error, busy, mutate, reload } = useCogwheel();
-  const [search, setSearch] = React.useState("");
-  const [showAll, setShowAll] = React.useState(false);
-
-  const filtered = React.useMemo(() => {
-    const needle = search.trim().toLowerCase();
-    if (!needle) return data.settings.services;
-    return data.settings.services.filter(
-      (service) =>
-        service.manifest.display_name.toLowerCase().includes(needle) ||
-        service.manifest.category.toLowerCase().includes(needle),
-    );
-  }, [data.settings.services, search]);
-
-  const visible = showAll || search ? filtered : filtered.slice(0, 5);
-
-  const columns: Column<ServiceToggle>[] = [
-    {
-      key: "service",
-      header: "Service",
-      render: (row) => (
-        <span>
-          <span className="block text-foreground">{row.manifest.display_name}</span>
-          <span className="block text-muted-foreground text-xs">{row.manifest.category}</span>
-        </span>
-      ),
-      sortValue: (row) => row.manifest.display_name,
-    },
-    {
-      key: "risk",
-      header: "Notes",
-      hideOnStack: true,
-      className: "whitespace-normal",
-      render: (row) => <span className="text-muted-foreground text-xs">{row.manifest.risk_notes}</span>,
-    },
-    {
-      key: "mode",
-      header: "Mode",
-      render: (row) => <Badge variant="secondary">{row.mode}</Badge>,
-      sortValue: (row) => row.mode,
-    },
-    {
-      key: "actions",
-      header: "Set to",
-      align: "end",
-      render: (row) => (
-        <span className="flex justify-end gap-1">
-          {SERVICE_MODES.map((mode) => (
-            <Button
-              disabled={row.mode === mode}
-              isLoading={busy === `service-${row.manifest.service_id}-${mode}`}
-              key={mode}
-              onClick={() =>
-                void mutate({
-                  key: `service-${row.manifest.service_id}-${mode}`,
-                  action: () => api.updateService(row.manifest.service_id, mode),
-                  successTitle: "Service updated",
-                  successDetail: `${row.manifest.display_name} is now set to ${mode}.`,
-                  failureTitle: "Could not update service",
-                })
-              }
-              size="sm"
-              variant={row.mode === mode ? "default" : "outline"}
-            >
-              {mode}
-            </Button>
-          ))}
-        </span>
-      ),
-    },
-  ];
-
-  return (
-    <SectionCard
-      actions={
-        filtered.length > 5 && !search ? (
-          <Button onClick={() => setShowAll((current) => !current)} size="sm" variant="ghost">
-            {showAll ? "Show fewer" : `Show all ${formatCount(filtered.length)}`}
-          </Button>
-        ) : null
-      }
-      description="Built-in service manifests. Allow or block a whole service without hand-writing domain rules."
-      title="Services"
-    >
-      <TextField
-        className="mb-4"
-        label="Search services"
-        onChange={setSearch}
-        placeholder="Name or category"
-        searchTarget
-        value={search}
-      />
-      <DataTable
-        columns={columns}
-        empty={{
-          icon: ShieldIcon,
-          title: search ? "No services match that search" : "No services configured",
-          description: search
-            ? "Clear the search to see every built-in service."
-            : "The appliance did not report any built-in service manifests.",
-        }}
-        error={error}
-        loading={phase === "loading"}
-        onRetry={() => void reload()}
-        rowKey={(row) => row.manifest.service_id}
-        rows={visible}
-      />
-    </SectionCard>
   );
 }
 

@@ -87,14 +87,14 @@ longer release.
 A release candidate is not ready unless:
 
 - formatting, clippy, tests, audit, and deny checks pass
-- false-positive budget remains within the documented threshold
-- rollback and backup flows are validated
+- the protected-domain safety net still refuses a candidate list that would block a protected name (covered by `cargo test --workspace`)
+- an upgrade against a copy of the previous release's data directory is validated
 - release notes include migration or compatibility notes when relevant
 
 ## Contribution Model
 
 - Small, reviewable pull requests are preferred over large batches.
-- Every policy-changing feature needs audit logging and a rollback path.
+- Every policy-changing feature must refuse an unsafe candidate before activation rather than repair it afterwards.
 - Performance-sensitive DNS path changes should include measurements or a clear benchmark plan.
 - New user-facing controls should be rejected unless they fit the minimal UX contract.
 

@@ -61,11 +61,7 @@ jobs:
         run: cargo deny check
 
   # The reference deployment target is a Raspberry Pi 5, so aarch64 has to be a build the CI
-  # actually performs rather than one the docs assume. The classifier does byte-level feature
-  # extraction and parses a binary model file, which is exactly the kind of code that can compile
-  # on one architecture and misbehave on another, so the tests are run under emulation too.
-  # Timing budgets are suspended there (qemu is 10-50x slower than native and its numbers mean
-  # nothing); correctness is not.
+  # actually performs rather than one the docs assume.
   aarch64:
     name: aarch64 (Raspberry Pi target)
     runs-on: ubuntu-latest
@@ -89,13 +85,6 @@ jobs:
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: cargo build --release --locked --target aarch64-unknown-linux-gnu -p cogwheel-server
-
-      - name: Run the classifier suite under aarch64 emulation
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: qemu-aarch64-static -L /usr/aarch64-linux-gnu
-          COGWHEEL_PERF_ASSERTS: "off"
-        run: cargo test --release --target aarch64-unknown-linux-gnu -p cogwheel-classifier --all-features
 
   web:
     name: web
@@ -244,7 +233,7 @@ jobs:
           test "$(docker exec cogwheel-ci id -u)" = "10001"
           echo "runs as uid 10001"
 
-          for route in / /activity /devices /classifier /settings; do
+          for route in / /activity /devices /protection /settings; do
             code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://127.0.0.1:18080${route}")
             test "$code" = "200" || { echo "::error::GET ${route} -> ${code}"; exit 1; }
           done

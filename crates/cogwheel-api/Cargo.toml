@@ -9,13 +9,6 @@ workspace = true
 
 [dependencies]
 axum.workspace = true
-chrono.workspace = true
-config.workspace = true
-humantime-serde.workspace = true
-prometheus-client.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
-tracing.workspace = true
-uuid.workspace = true

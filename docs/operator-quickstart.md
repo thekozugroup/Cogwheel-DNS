@@ -24,9 +24,9 @@ and native systemd (`sudo ./scripts/install-native.sh`). See
 sh scripts/verify-install.sh
 ```
 
-Checks liveness, readiness, metrics, the web UI, an allowed lookup, a blocked
-lookup, DNS over TCP, and that state survives a restart. Exits non-zero on
-failure, so it is safe to run from cron.
+Checks liveness, readiness, the API, the web UI, the advertised resolver
+targets, an allowed lookup, a blocked lookup, DNS over TCP, and that state
+survives a restart. Exits non-zero on failure, so it is safe to run from cron.
 
 ## The one thing that goes wrong
 
@@ -43,7 +43,7 @@ equivalent: [DEPLOYMENT.md §8.1](../DEPLOYMENT.md#81-port-53-is-already-in-use)
 
 ## Networking decides a feature
 
-Per-device block profiles key on the DNS client's source IP. Host networking
+Per-device policy keys on the DNS client's source IP. Host networking
 preserves it; Docker bridge networking often rewrites it to the bridge gateway,
 which silently collapses every device into one. Default to host networking and
 verify with a query from a second machine —
@@ -55,7 +55,7 @@ verify with a query from a second machine —
 |---|---|---|---|
 | `dev` | `127.0.0.1:30080` | `127.0.0.1:30053` | local development |
 | `home` | `0.0.0.0:8080` | `0.0.0.0:5353` | household node (the image overrides DNS to `:53`) |
-| `smb` | `0.0.0.0:8080` | `0.0.0.0:53` | small business, stricter guard thresholds |
+| `smb` | `0.0.0.0:8080` | `0.0.0.0:53` | small business; DNS on `:53` and a slower refresh cadence |
 
 A profile only sets defaults; any explicit `COGWHEEL_*` variable wins over it.
 Full variable table: [DEPLOYMENT.md §9](../DEPLOYMENT.md#9-configuration-reference).
@@ -68,14 +68,14 @@ curl -s http://127.0.0.1:30080/health/live
 dig @127.0.0.1 -p 30053 example.com +short
 ```
 
-## Health and metrics endpoints
+## Health and runtime endpoints
 
 | Endpoint | Meaning |
 |---|---|
 | `GET /health/live` | liveness. What the container `HEALTHCHECK` probes. |
 | `GET /health/ready` | readiness. Returns **503 until storage, policy and the DNS listeners are all up**, and names which subsystem is lagging. Gate rolling upgrades on this, not on liveness. |
-| `GET /metrics` | Prometheus text. Today this is only `cogwheel_startups_total`. |
-| `GET /api/v1/runtime` | the numbers that actually matter: cache hits, upstream failures, fallbacks, mean latencies. |
+| `GET /api/v1/runtime` | the numbers that actually matter: queries, blocked, cache hits, upstream failures, fallbacks, mean latencies. |
+| `GET /api/v1/dashboard` | the same counters plus protection state, the active policy hash and rule count, and the top queried/blocked names of the last 24 hours. |
 
 ## Day-2 operations
 
@@ -83,9 +83,12 @@ dig @127.0.0.1 -p 30053 example.com +short
 # Where should clients point?
 curl -s http://127.0.0.1:8080/api/v1/resolver-access
 
-# Runtime health and false-positive budget before a change.
-curl -s http://127.0.0.1:8080/api/v1/runtime/health
-curl -s http://127.0.0.1:8080/api/v1/false-positive-budget
+# Counters and the policy in force, before and after a change.
+curl -s http://127.0.0.1:8080/api/v1/runtime
+curl -s http://127.0.0.1:8080/api/v1/dashboard
+
+# Refresh every enabled blocklist now (rate limited).
+curl -s -X POST http://127.0.0.1:8080/api/v1/sources/refresh
 
 # Logs
 docker logs -f cogwheel          # container install
@@ -93,23 +96,14 @@ journalctl -u cogwheel -f        # native install
 ```
 
 - Back up the data directory before any upgrade —
-  [DEPLOYMENT.md §11](../DEPLOYMENT.md#11-backup-and-restore). The
-  `/api/v1/backup` endpoint is a partial config export, not a full backup.
-- Use the load-test and resilience-drill endpoints for soak and failure
-  validation.
-- Roll back a bad ruleset with `POST /api/v1/rulesets/rollback`.
-
-## Optional: filter Tailscale exit-node DNS
-
-If the node advertises itself as a Tailscale exit node and you want tailnet
-traffic filtered too, install the host redirect rule:
-
-```sh
-sudo DNS_HOST_PORT=53 scripts/apply-tailscale-dns-intercept.sh
-```
-
-Authenticate the node with `tailscale up --advertise-exit-node --accept-dns=false`
-so exit-node traffic keeps flowing through Cogwheel.
+  [DEPLOYMENT.md §11](../DEPLOYMENT.md#11-backup-and-restore). The database
+  is one SQLite file in the volume; there is no export endpoint.
+- A refresh that fails verification, or that would block a protected name,
+  answers `"outcome": "rejected"` with the reasons in `notes`, and the policy
+  already in force keeps serving. Nothing needs rolling back.
+- Pause blocking for a few minutes from the sidebar (or
+  `POST /api/v1/runtime/pause {"minutes": 15}`) when you need to prove a
+  site breaks because of a list and not because of the network.
 
 ## Before shipping a change
 

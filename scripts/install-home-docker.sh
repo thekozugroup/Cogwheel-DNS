@@ -44,11 +44,4 @@ while [ "$i" -lt "$argc" ]; do
     i=$((i + 1))
 done
 
-if [ -n "${INSTALL_TAILSCALE:-}" ] && [ "${INSTALL_TAILSCALE}" = "1" ]; then
-    printf 'note: Tailscale bootstrap is no longer part of the installer.\n' >&2
-    printf '      Install Tailscale yourself, then run:\n' >&2
-    printf '        sudo DNS_HOST_PORT=%s %s/apply-tailscale-dns-intercept.sh\n' \
-           "${DNS_HOST_PORT:-53}" "$SCRIPT_DIR" >&2
-fi
-
 exec sh "$SCRIPT_DIR/install.sh" "$@"

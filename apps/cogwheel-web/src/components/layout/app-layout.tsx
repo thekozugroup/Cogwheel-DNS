@@ -9,9 +9,6 @@ import { Button } from "@/components/ui/button";
 import { SidebarInset, SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { Toaster } from "@/components/ui/toast";
 import { AppSidebar } from "@/components/layout/app-sidebar";
-import { CommandPalette } from "@/components/layout/command-palette";
-import { ShortcutsDialog } from "@/components/layout/shortcuts-dialog";
-import { DomainInspectorProvider } from "@/components/app/domain-inspector";
 
 /** True when the event target is a place a bare keystroke means something else. */
 function isTextEntry(target: EventTarget | null): boolean {
@@ -21,30 +18,13 @@ function isTextEntry(target: EventTarget | null): boolean {
   return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
 }
 
-function Shortcuts({
-  onOpenPalette,
-  onShowShortcuts,
-}: {
-  onOpenPalette: () => void;
-  onShowShortcuts: () => void;
-}) {
+/** ⌘/Ctrl + digit jumps between screens; a bare `/` focuses the screen's search field. */
+function Shortcuts() {
   const navigate = useNavigate();
 
   React.useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const modifier = event.metaKey || event.ctrlKey;
-
-      if (modifier && event.key.toLowerCase() === "k") {
-        event.preventDefault();
-        onOpenPalette();
-        return;
-      }
-
-      if (modifier && event.key === ",") {
-        event.preventDefault();
-        navigate("/settings");
-        return;
-      }
 
       if (modifier) {
         const destination = ALL_NAV.find((item) => item.digit === event.key);
@@ -57,12 +37,6 @@ function Shortcuts({
 
       if (isTextEntry(event.target)) return;
 
-      if (event.key === "?") {
-        event.preventDefault();
-        onShowShortcuts();
-        return;
-      }
-
       if (event.key === "/") {
         const search = document.querySelector<HTMLInputElement>('[data-screen-search="true"]');
         if (search) {
@@ -74,7 +48,7 @@ function Shortcuts({
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [navigate, onOpenPalette, onShowShortcuts]);
+  }, [navigate]);
 
   return null;
 }
@@ -104,8 +78,6 @@ function StaleBanner() {
 }
 
 export function AppLayout() {
-  const [paletteOpen, setPaletteOpen] = React.useState(false);
-  const [shortcutsOpen, setShortcutsOpen] = React.useState(false);
   const location = useLocation();
   const mainRef = React.useRef<HTMLDivElement>(null);
 
@@ -117,53 +89,32 @@ export function AppLayout() {
 
   return (
     <SidebarProvider>
-      <DomainInspectorProvider>
-        <AppSidebar onOpenPalette={() => setPaletteOpen(true)} />
-        <SidebarInset className="min-w-0">
-          <a
-            className={cn(
-              "sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-50",
-              "focus:rounded-lg focus:border focus:border-border focus:bg-card focus:px-3 focus:py-2 focus:text-sm",
-            )}
-            href="#main"
-          >
-            Skip to content
-          </a>
+      <AppSidebar />
+      <SidebarInset className="min-w-0">
+        <a
+          className={cn(
+            "sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-50",
+            "focus:rounded-lg focus:border focus:border-border focus:bg-card focus:px-3 focus:py-2 focus:text-sm",
+          )}
+          href="#main"
+        >
+          Skip to content
+        </a>
 
-          <header className="sticky top-0 z-20 flex h-12 shrink-0 items-center gap-2 border-border border-b bg-background/95 px-4 backdrop-blur sm:px-6">
-            <SidebarTrigger aria-label="Toggle sidebar" />
-            <span className="text-muted-foreground text-xs md:hidden">Cogwheel</span>
-            <div className="flex-1" />
-            <Button
-              aria-label="Open command palette"
-              onClick={() => setPaletteOpen(true)}
-              size="sm"
-              variant="outline"
-            >
-              Search
-              <span className="text-muted-foreground text-xs">⌘K</span>
-            </Button>
-          </header>
+        <header className="sticky top-0 z-20 flex h-12 shrink-0 items-center gap-2 border-border border-b bg-background/95 px-4 backdrop-blur sm:px-6">
+          <SidebarTrigger aria-label="Toggle sidebar" />
+          <span className="text-muted-foreground text-xs md:hidden">Cogwheel</span>
+        </header>
 
-          <StaleBanner />
+        <StaleBanner />
 
-          <div className="min-h-0 flex-1 overflow-y-auto" id="main" ref={mainRef}>
-            <Outlet />
-          </div>
-        </SidebarInset>
+        <div className="min-h-0 flex-1 overflow-y-auto" id="main" ref={mainRef}>
+          <Outlet />
+        </div>
+      </SidebarInset>
 
-        <Shortcuts
-          onOpenPalette={() => setPaletteOpen(true)}
-          onShowShortcuts={() => setShortcutsOpen(true)}
-        />
-        <CommandPalette
-          onOpenChange={setPaletteOpen}
-          onShowShortcuts={() => setShortcutsOpen(true)}
-          open={paletteOpen}
-        />
-        <ShortcutsDialog onOpenChange={setShortcutsOpen} open={shortcutsOpen} />
-        <Toaster />
-      </DomainInspectorProvider>
+      <Shortcuts />
+      <Toaster />
     </SidebarProvider>
   );
 }

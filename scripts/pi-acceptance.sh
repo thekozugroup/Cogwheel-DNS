@@ -7,8 +7,8 @@
 # Every check prints PASS or FAIL and the script exits non-zero if any FAIL.
 #
 # This differs from scripts/verify-install.sh: that one checks a deployment is wired up
-# correctly, this one measures the classifier on the real CPU and records the numbers the
-# documentation claims. Run it once per new hardware target.
+# correctly, this one proves the appliance resolves, filters and survives a restart on the
+# real hardware. Run it once per new hardware target.
 
 set -eu
 
@@ -121,65 +121,20 @@ else
     fail "could not resolve example.com through ${DNS_HOST}:${DNS_PORT}"
 fi
 
-# How many rules are actually loaded decides whether "not blocked" means "lists are still
-# compiling" or "filtering is genuinely broken" — without this the same FAIL means two very
-# different things on a fresh install.
-RULES="$(api /api/v1/rulesets | tr ',' '\n' | sed -n 's/.*"rule_count":\([0-9]*\).*/\1/p' | head -1 || true)"
-if [ -n "$RULES" ]; then
-    info "active ruleset: ${RULES} rules"
-fi
-
 BLOCKED="$(query doubleclick.net || true)"
 if printf '%s' "$BLOCKED" | grep -q '^0\.0\.0\.0$'; then
     pass "blocks doubleclick.net (returns 0.0.0.0)"
 elif [ -z "$BLOCKED" ]; then
     fail "no answer for doubleclick.net"
-elif [ "${RULES:-0}" -eq 0 ] 2>/dev/null; then
-    info "doubleclick.net -> $(printf '%s' "$BLOCKED" | tr '\n' ' ')"
-    fail "no blocklist rules are loaded yet — wait for the first refresh, then re-run"
 else
     info "doubleclick.net -> $(printf '%s' "$BLOCKED" | tr '\n' ' ')"
-    fail "${RULES} rules are loaded but doubleclick.net still resolved — filtering is not working"
-fi
-
-# ---------------------------------------------------------------- classifier
-
-head_ "Classifier"
-CLS="$(api /api/v1/classifier || true)"
-if [ -z "$CLS" ]; then
-    fail "classifier status endpoint did not respond"
-else
-    AUC="$(printf '%s' "$CLS" | tr ',' '\n' | sed -n 's/.*"rocAuc":\([0-9.]*\).*/\1/p' | head -1)"
-    RES="$(printf '%s' "$CLS" | tr ',' '\n' | sed -n 's/.*"residentBytes":\([0-9]*\).*/\1/p' | head -1)"
-    if [ -n "$AUC" ]; then
-        pass "model loaded, held-out ROC-AUC ${AUC}"
-    else
-        fail "could not read model quality"
-    fi
-    if [ -n "$RES" ]; then
-        info "model resident: $((RES / 1024)) KiB"
-    fi
-
-    # Inference on the real CPU. This is the number worth recording per hardware target.
-    START="$(date +%s%N)"
-    N=200
-    i=0
-    while [ "$i" -lt "$N" ]; do
-        curl -fsS --max-time 5 -X POST -H 'Content-Type: application/json' \
-            -d "{\"domain\":\"probe${i}.example.com\"}" \
-            "http://${HTTP}/api/v1/classifier/inspect" >/dev/null 2>&1 || true
-        i=$((i + 1))
-    done
-    END="$(date +%s%N)"
-    PER_MS=$(( (END - START) / 1000000 / N ))
-    info "${N} scored-via-HTTP round trips averaged ${PER_MS} ms each (includes HTTP overhead)"
-    info "for the raw inference number, run: cargo test --release -p cogwheel-classifier --test performance -- --nocapture"
+    fail "doubleclick.net still resolved — filtering is not working (on a fresh install the lists may still be downloading: wait for the first refresh, then re-run)"
 fi
 
 # ---------------------------------------------------------------- web
 
 head_ "Web control plane"
-for route in / /activity /devices /classifier /settings; do
+for route in / /activity /devices /protection /settings; do
     CODE="$(curl -fsS -o /dev/null -w '%{http_code}' --max-time 10 "http://${HTTP}${route}" 2>/dev/null || echo 000)"
     if [ "$CODE" = "200" ]; then
         pass "GET ${route} -> 200"

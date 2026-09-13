@@ -178,16 +178,9 @@ The unit runs as a dedicated non-root user with `ProtectSystem=strict`,
 `NoNewPrivileges=yes`, a capability bounding set of exactly
 `CAP_NET_BIND_SERVICE`, a seccomp filter, and memory/CPU/task limits.
 
-Two paths are writable, and only two:
-
-- `/var/lib/cogwheel` — the data directory, created by `StateDirectory=`.
-- `/usr/local/bin/.cogwheel_tailscale_state.json` — a single file, opened by
-  `ReadWritePaths=`. The server derives this path from the location of its own
-  binary, and it is where `POST /api/v1/tailscale/exit-node` records the state
-  it would roll back to. Without that one exception the endpoint fails with a
-  read-only filesystem error on a node that is otherwise perfectly healthy. The
-  *directory* stays read-only, so nothing the service does can replace a binary
-  in `/usr/local/bin`.
+One path is writable: `/var/lib/cogwheel`, the data directory created by
+`StateDirectory=`. Everything else, including `/usr/local/bin`, stays
+read-only, so nothing the service does can replace its own binary.
 
 ---
 
@@ -199,8 +192,7 @@ the source IP address of its DNS query. Internally the resolver keeps a
 that map falls through to the global policy.
 
 So the networking mode is not a deployment detail. It decides whether
-per-device profiles, per-device statistics and security-event attribution
-work at all.
+per-device profiles and per-device statistics work at all.
 
 ### Host networking (the default)
 
@@ -239,16 +231,17 @@ network_mode: host
   use, not the port the process bound.
 
 **Do not take this on trust — measure it.** Query the resolver from a second
-machine, then check what address was recorded:
+machine, then check which client the query was attributed to:
 
 ```sh
 dig @<cogwheel-host> example.com          # from another device on the LAN
-curl -s http://<cogwheel-host>:8080/api/v1/security-events | head -c 400
 ```
 
-If `client_ip` shows the Docker gateway rather than the querying device, switch
-to host networking, or give the container its own LAN address with a **macvlan**
-network — that preserves client IPs while keeping container isolation.
+Open the Activity page (`http://<cogwheel-host>:8080/activity`) and look at the
+client column for that query. If it shows the Docker gateway rather than the
+querying device, switch to host networking, or give the container its own LAN
+address with a **macvlan** network — that preserves client IPs while keeping
+container isolation.
 
 ---
 
@@ -302,7 +295,6 @@ Or check each item by hand:
 ```sh
 curl -fsS http://<host>:8080/health/live      # {"data":{"status":"ok"}}
 curl -fsS http://<host>:8080/health/ready     # {"data":{"status":"ready"}}
-curl -fsS http://<host>:8080/metrics | grep cogwheel_startups_total
 curl -fsS http://<host>:8080/api/v1/dashboard | head -c 200
 curl -fsSI http://<host>:8080/ | head -1      # 200 OK, the web UI
 ```
@@ -326,8 +318,7 @@ are ready:
 A node that is live but not ready is running and answering HTTP, but is not yet
 filtering. Do not send it traffic.
 
-`/metrics` currently exposes exactly one counter, `cogwheel_startups_total`.
-The operationally interesting numbers live in `GET /api/v1/runtime`.
+The operationally interesting counters live in `GET /api/v1/runtime`.
 
 ### Resolver
 
@@ -482,18 +473,7 @@ data volume and a `tmpfs` at `/tmp`. If the server needs to write somewhere
 else, you will see an `EROFS` error in the logs. Set `read_only: false` to get
 running again, then please report the path it needed.
 
-### 8.5 The dashboard says "degraded" on a healthy node
-
-The `home` profile leaves both runtime-guard tolerances at `0`, so a single
-transient upstream failure — a Wi-Fi blip, one ISP resolver timeout — flips
-runtime health to degraded and it stays there. Allow a small tolerance:
-
-```sh
-COGWHEEL_RUNTIME_GUARD__MAX_UPSTREAM_FAILURES_DELTA=2
-COGWHEEL_RUNTIME_GUARD__MAX_FALLBACK_SERVED_DELTA=5
-```
-
-### 8.6 Blocklists will not update
+### 8.5 Blocklists will not update
 
 The updater fetches sources over HTTPS. Check the host clock (TLS fails on a Pi
 with a wrong date and no RTC), then check egress:
@@ -503,14 +483,14 @@ docker exec cogwheel curl -fsSI https://example.com | head -1
 timedatectl status
 ```
 
-### 8.7 Web UI returns 404
+### 8.6 Web UI returns 404
 
 The server started without web assets. `COGWHEEL_WEB_DIST_DIR` must point at a
 directory containing `index.html`; the image sets `/app/web`. On a native
 install it is `/usr/local/share/cogwheel/web`. The startup log says either
 `serving bundled web assets` or `web assets not found; serving API routes only`.
 
-### 8.8 Nothing is filtered even though DNS works
+### 8.7 Nothing is filtered even though DNS works
 
 Clients are reaching a different resolver. Most often: the router hands out its
 own address for DNS, or IPv6 DNS is still pointing elsewhere
@@ -536,11 +516,8 @@ silently ignored rather than reported.
 | `COGWHEEL_UPSTREAM__SERVERS` | `1.1.1.1:53,1.0.0.1:53` | Comma-separated. `ip:port` is cleartext (UDP+TCP); `tls://ip#certname` is DNS-over-TLS and `https://ip#certname` is DNS-over-HTTPS. See [§9.1](#91-encrypting-queries-to-the-upstream-resolver). |
 | `COGWHEEL_UPDATER__REFRESH_INTERVAL_SECS` | `300` | Clamped to a 30 s floor. |
 | `COGWHEEL_BLOCKING__MODE` | `null_ip` | `null_ip`, `nxdomain`, `nodata` or `refused`. See [§9.2](#92-how-blocked-names-are-answered). |
-| `COGWHEEL_RETENTION__HISTORY_DAYS` | `30` | Days of classifier verdicts, audit events and notification deliveries to keep. `0` keeps everything forever and logs a warning. |
+| `COGWHEEL_RETENTION__HISTORY_DAYS` | `30` | Days of recorded history to keep. `0` keeps everything forever and logs a warning. |
 | `COGWHEEL_RETENTION__PRUNE_INTERVAL_SECS` | `3600` | How often the prune runs. Floored at 60 s. |
-| `COGWHEEL_RUNTIME_GUARD__PROBE_DOMAINS` | `example.com,connectivitycheck.gstatic.com` | Health-check probe targets. |
-| `COGWHEEL_RUNTIME_GUARD__MAX_UPSTREAM_FAILURES_DELTA` | `0` | See [§8.5](#85-the-dashboard-says-degraded-on-a-healthy-node). |
-| `COGWHEEL_RUNTIME_GUARD__MAX_FALLBACK_SERVED_DELTA` | `0` | See [§8.5](#85-the-dashboard-says-degraded-on-a-healthy-node). |
 | `COGWHEEL_WEB_DIST_DIR` | *(search path)* | Directory containing `index.html`. |
 | `RUST_LOG` | `info` | tracing filter. An `info` directive is always added, so this can only widen it. |
 
@@ -649,7 +626,7 @@ whenever the entry happens to age out.
 
 #### When a site breaks
 
-DNS filtering breaks sites in three distinct ways, and the fix differs:
+DNS filtering breaks sites in two distinct ways, and the fix differs:
 
 **1. Something it needs is on a blocklist.** The usual cause. Blocklists are
 maintained by other people and occasionally include a domain a site genuinely
@@ -661,15 +638,8 @@ depends on — a login provider, a payment iframe, a CDN.
 - Then narrow it: the Activity view shows what was blocked while the page
   loaded. Add the offending name to a device's allowed domains, or remove the
   list that supplied it (`/api/v1/settings/blocklists`).
-- `POST /api/v1/rulesets/rollback` reverts to the previous compiled ruleset if a
-  list update is what broke things.
 
-**2. The classifier got it wrong.** It ships in Monitor mode and blocks nothing
-until you turn it on, so this only applies once enforcement is enabled. Lower
-the sensitivity, or report the domain — the correction is stored, and adaptation
-only applies it if it does not make false positives worse.
-
-**3. It is not blocking at all.** Worth ruling out early, because it looks
+**2. It is not blocking at all.** Worth ruling out early, because it looks
 identical from the browser: a stale cached address, an upstream that is failing,
 or a device that has cached the old answer itself. `/api/v1/runtime` reports
 cache hits, expiries, upstream failures and fallback responses. Browsers and
@@ -683,10 +653,10 @@ leave a device with no route back to working — a clock that has drifted fails
 TLS everywhere, with errors that point nowhere near DNS.
 
 That protection is a **suffix** match, so it covers subdomains, which is where
-those lookups actually happen. It is deliberately a *subset* of the larger list
-that guards the classifier: broad domains like OS vendors and banks stay
-classifier-only, because a blocklist entry covering those is a choice someone
-made, and silently overruling it would be its own surprise.
+those lookups actually happen. It is deliberately short — 21 suffixes — and does
+not reach broad domains like OS vendors or banks: a blocklist entry covering
+those is a choice someone made, and silently overruling it would be its own
+surprise.
 
 ---
 
@@ -767,25 +737,6 @@ sudo systemctl start cogwheel
 
 Verify a restore with [§7](#7-post-install-verification-checklist) — a backup
 you have never restored is a hypothesis, not a backup.
-
-### The backup API is partial — know what it does not cover
-
-```sh
-curl -s http://<host>:8080/api/v1/backup > cogwheel-config.json
-```
-
-`GET /api/v1/backup` exports **sources, devices, classifier settings and
-notification settings only**. It omits block profiles, service toggles, sync
-settings, rulesets, audit events and security events.
-
-`POST /api/v1/backup/restore` is **additive, not a replacement**: existing
-records that are absent from the backup survive, and at present the classifier
-and notification sections of the payload are not durably applied. Treat the API
-as a convenience export of source and device lists, and use the data-directory
-backup above as your actual disaster-recovery path.
-
-The exported JSON contains the notification webhook URL in cleartext. Store it
-accordingly.
 
 ---
 

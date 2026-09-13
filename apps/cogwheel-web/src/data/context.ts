@@ -1,29 +1,10 @@
 import { createContext, useContext } from "react";
-import type {
-  ClassifierStatus,
-  DashboardSummary,
-  FederatedLearningSettings,
-  LatencyBudgetStatus,
-  ResolverAccessStatus,
-  SettingsSummary,
-  SyncNodeStatus,
-  TailscaleDnsCheckResult,
-  TailscaleStatus,
-  ThreatIntelSettings,
-} from "@/lib/api";
+import type { DashboardSummary, ResolverAccessStatus, SettingsSummary } from "@/lib/api";
 
 /** One snapshot of everything the control plane exposes as read state. */
 export type ControlPlaneSnapshot = {
   dashboard: DashboardSummary;
   settings: SettingsSummary;
-  /** null until the rewritten classifier endpoint answers; screens say so. */
-  classifier: ClassifierStatus | null;
-  syncStatus: SyncNodeStatus;
-  tailscale: TailscaleStatus;
-  tailscaleDns: TailscaleDnsCheckResult;
-  threatIntel: ThreatIntelSettings;
-  federatedLearning: FederatedLearningSettings;
-  latencyBudget: LatencyBudgetStatus;
   resolverAccess: ResolverAccessStatus;
 };
 

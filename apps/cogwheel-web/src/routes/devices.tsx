@@ -1,8 +1,8 @@
 import React from "react";
 import { useSearchParams } from "react-router-dom";
-import { LaptopIcon, PlusIcon, SearchIcon, XIcon } from "lucide-react";
-import { api, type DeviceRecord, type DeviceServiceOverride } from "@/lib/api";
-import { normaliseDeviceInput, serviceOverrideDomains, splitDomainList } from "@/lib/derive";
+import { LaptopIcon, PlusIcon } from "lucide-react";
+import { api, type DeviceRecord } from "@/lib/api";
+import { splitDomainList } from "@/lib/derive";
 import { formatCount } from "@/lib/format";
 import { notify } from "@/lib/toast";
 import { useCogwheel } from "@/data/context";
@@ -16,7 +16,6 @@ import { TextField } from "@/components/app/text-field";
 import { FieldRow } from "@/components/app/form-field";
 import { StatusPill } from "@/components/app/status-indicator";
 import { NoticeBanner } from "@/components/app/states";
-import { useDomainInspector } from "@/components/app/inspector-context";
 
 type Draft = {
   id?: string;
@@ -26,7 +25,6 @@ type Draft = {
   blocklist_profile_override: string;
   protection_override: DeviceRecord["protection_override"];
   allowed_domains: string;
-  service_overrides: DeviceServiceOverride[];
 };
 
 const BLANK: Draft = {
@@ -36,7 +34,6 @@ const BLANK: Draft = {
   blocklist_profile_override: "",
   protection_override: "inherit",
   allowed_domains: "",
-  service_overrides: [],
 };
 
 function toDraft(device: DeviceRecord): Draft {
@@ -48,18 +45,14 @@ function toDraft(device: DeviceRecord): Draft {
     blocklist_profile_override: device.blocklist_profile_override ?? "",
     protection_override: device.protection_override,
     allowed_domains: device.allowed_domains.join(", "),
-    service_overrides: device.service_overrides,
   };
 }
 
 export function DevicesScreen() {
   const { data, phase, error, busy, mutate, reload } = useCogwheel();
-  const { inspect } = useDomainInspector();
   const [params, setParams] = useSearchParams();
   const [draft, setDraft] = React.useState<Draft>(BLANK);
   const [search, setSearch] = React.useState("");
-  const [pendingService, setPendingService] = React.useState("");
-  const [pendingMode, setPendingMode] = React.useState<"allow" | "block">("allow");
 
   const devices = data.settings.devices;
   const selectedId = params.get("device");
@@ -86,10 +79,6 @@ export function DevicesScreen() {
   };
 
   const custom = draft.policy_mode === "custom";
-  const manifest = data.settings.services.find(
-    (service) => service.manifest.service_id === pendingService,
-  )?.manifest;
-  const previewDomains = manifest ? serviceOverrideDomains(manifest, pendingMode) : [];
 
   const filtered = React.useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -100,61 +89,24 @@ export function DevicesScreen() {
     );
   }, [devices, search]);
 
-  const addServiceOverride = () => {
-    if (!custom) {
-      notify.error("Custom mode required", "Switch the device to a custom assignment first.");
-      return;
-    }
-    if (!pendingService) {
-      notify.error("Service required", "Choose a service before adding a rule.");
-      return;
-    }
-    if (!manifest) {
-      notify.error("Unknown service", "That service is no longer offered by the control plane.");
-      return;
-    }
-    if (previewDomains.length === 0) {
-      notify.error(
-        "Service rule unavailable",
-        `${manifest.display_name} does not expand into any device-specific domains in ${pendingMode} mode.`,
-      );
-      return;
-    }
-    const existing = draft.service_overrides.find((rule) => rule.service_id === pendingService);
-    if (existing?.mode === pendingMode) {
-      notify.warning("Service rule already queued", `${manifest.display_name} is already set to ${pendingMode}.`);
-      return;
-    }
-
-    setDraft((current) => ({
-      ...current,
-      service_overrides: [
-        ...current.service_overrides.filter((rule) => rule.service_id !== pendingService),
-        { service_id: pendingService, mode: pendingMode },
-      ].sort((left, right) => left.service_id.localeCompare(right.service_id)),
-    }));
-    notify.success(
-      "Service rule queued",
-      `${manifest.display_name} expands into ${formatCount(previewDomains.length)} domain(s). Save the device to apply it.`,
-    );
-  };
-
   const save = async () => {
     if (!draft.name.trim() || !draft.ip_address.trim()) {
       notify.error("Name and address required", "A device needs both a friendly name and an IP address.");
       return;
     }
 
-    const payload = normaliseDeviceInput({
+    // The server forces the per-device fields back to their defaults whenever
+    // the mode is not custom; mirror that so the form never disagrees with
+    // what was actually stored.
+    const payload = {
       ...(draft.id ? { id: draft.id } : {}),
       name: draft.name.trim(),
       ip_address: draft.ip_address.trim(),
       policy_mode: draft.policy_mode,
-      blocklist_profile_override: draft.blocklist_profile_override || null,
-      protection_override: draft.protection_override,
-      allowed_domains: splitDomainList(draft.allowed_domains),
-      service_overrides: draft.service_overrides,
-    });
+      blocklist_profile_override: custom ? draft.blocklist_profile_override || null : null,
+      protection_override: custom ? draft.protection_override : ("inherit" as const),
+      allowed_domains: custom ? splitDomainList(draft.allowed_domains) : [],
+    };
 
     const result = await mutate({
       key: "device-submit",
@@ -204,13 +156,13 @@ export function DevicesScreen() {
         ),
     },
     {
-      key: "overrides",
-      header: "Service rules",
+      key: "allowed",
+      header: "Allowed domains",
       align: "end",
       hideOnStack: true,
       hideBelow: "2xl",
-      render: (row) => <span className="tabular">{formatCount(row.service_overrides.length)}</span>,
-      sortValue: (row) => row.service_overrides.length,
+      render: (row) => <span className="tabular">{formatCount(row.allowed_domains.length)}</span>,
+      sortValue: (row) => row.allowed_domains.length,
     },
   ];
 
@@ -334,101 +286,6 @@ export function DevicesScreen() {
                   value={draft.allowed_domains}
                 />
               </FieldRow>
-
-              <div className="rounded-xl border border-border p-4">
-                <p className="font-medium text-foreground text-sm">Service override</p>
-                <p className="mt-1 text-muted-foreground text-sm">
-                  Add a focused allow or block rule for a known service when this device needs a small
-                  exception.
-                </p>
-
-                <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                  <SelectField
-                    disabled={!custom}
-                    label="Service"
-                    onChange={setPendingService}
-                    options={data.settings.services.map((service) => ({
-                      value: service.manifest.service_id,
-                      label: service.manifest.display_name,
-                    }))}
-                    placeholder="Choose a service"
-                    value={pendingService}
-                  />
-                  <SelectField
-                    disabled={!custom}
-                    label="Rule"
-                    onChange={(value) => setPendingMode(value as "allow" | "block")}
-                    options={[
-                      { value: "allow", label: "Allow service" },
-                      { value: "block", label: "Block service" },
-                    ]}
-                    value={pendingMode}
-                  />
-                </div>
-
-                {manifest ? (
-                  <div className="mt-3 rounded-lg border border-border bg-muted/40 p-3">
-                    <p className="font-medium text-foreground text-sm">{manifest.display_name}</p>
-                    <p className="mt-1 text-muted-foreground text-xs">{manifest.risk_notes}</p>
-                    <div className="mt-2 flex flex-wrap gap-1.5">
-                      <Badge variant="secondary">{pendingMode}</Badge>
-                      <Badge variant="outline">{manifest.category}</Badge>
-                      <Badge variant="outline">{formatCount(previewDomains.length)} domains</Badge>
-                    </div>
-                    {previewDomains.length > 0 ? (
-                      <div className="mt-2 flex flex-wrap gap-1.5">
-                        {previewDomains.slice(0, 4).map((domain) => (
-                          <Badge key={domain} variant="outline">
-                            {domain}
-                          </Badge>
-                        ))}
-                      </div>
-                    ) : null}
-                  </div>
-                ) : null}
-
-                <Button
-                  className="mt-3"
-                  disabled={!custom || !pendingService}
-                  onClick={addServiceOverride}
-                  size="sm"
-                  variant="outline"
-                >
-                  <PlusIcon aria-hidden />
-                  Add service rule
-                </Button>
-
-                {draft.service_overrides.length > 0 ? (
-                  <ul className="mt-3 flex flex-wrap gap-1.5">
-                    {draft.service_overrides.map((rule) => {
-                      const info = data.settings.services.find(
-                        (service) => service.manifest.service_id === rule.service_id,
-                      )?.manifest;
-                      return (
-                        <li key={rule.service_id}>
-                          <button
-                            className="inline-flex items-center gap-1.5 rounded-full border border-border px-2 py-1 text-xs hover:bg-muted"
-                            onClick={() =>
-                              setDraft((current) => ({
-                                ...current,
-                                service_overrides: current.service_overrides.filter(
-                                  (entry) => entry.service_id !== rule.service_id,
-                                ),
-                              }))
-                            }
-                            title={info ? `${info.category} — ${info.risk_notes}` : "Custom device service rule"}
-                            type="button"
-                          >
-                            {info?.display_name ?? rule.service_id} — {rule.mode}
-                            <XIcon aria-hidden className="size-3" />
-                            <span className="sr-only">Remove this rule</span>
-                          </button>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                ) : null}
-              </div>
             </div>
           </SectionCard>
 
@@ -463,20 +320,6 @@ export function DevicesScreen() {
             />
           </SectionCard>
         </div>
-
-        <SectionCard
-          description="Look up any domain to see the classifier's verdict and the exact features behind it."
-          title="Troubleshoot a device"
-        >
-          <p className="text-muted-foreground text-sm">
-            When someone reports a broken site, inspect the domain first: the inspector shows whether a
-            blocklist rule or the model made the call.
-          </p>
-          <Button className="mt-3" onClick={() => inspect("doubleclick.net")} variant="outline">
-            <SearchIcon aria-hidden />
-            Open domain inspector
-          </Button>
-        </SectionCard>
       </PageSections>
     </PageShell>
   );

@@ -21,46 +21,6 @@ export function formatPercent(fraction: number | null | undefined, digits = 1): 
   return `${(fraction * 100).toFixed(digits)}%`;
 }
 
-export function formatProbability(value: number | null | undefined): string {
-  if (value === null || value === undefined || !Number.isFinite(value)) return DASH;
-  return value.toFixed(3);
-}
-
-export function formatMs(value: number | null | undefined, digits = 2): string {
-  if (value === null || value === undefined || !Number.isFinite(value)) return DASH;
-  return `${value.toFixed(digits)} ms`;
-}
-
-export function formatNanosAsMs(value: number | null | undefined): string {
-  if (value === null || value === undefined || !Number.isFinite(value)) return DASH;
-  return `${(value / 1_000_000).toFixed(3)} ms`;
-}
-
-export function formatBytes(value: number | null | undefined): string {
-  if (value === null || value === undefined || !Number.isFinite(value)) return DASH;
-  const units = ["B", "KB", "MB", "GB"];
-  let size = value;
-  let unit = 0;
-  while (size >= 1024 && unit < units.length - 1) {
-    size /= 1024;
-    unit += 1;
-  }
-  return `${size.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
-}
-
-export function formatDateTime(iso: string | null | undefined): string {
-  if (!iso) return DASH;
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return DASH;
-  return date.toLocaleString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
 export function formatTime(iso: string | null | undefined): string {
   if (!iso) return DASH;
   const date = new Date(iso);
@@ -93,11 +53,6 @@ export function formatDuration(totalSeconds: number): string {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = Math.floor(totalSeconds % 60);
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
-}
-
-export function shortHash(hash: string | null | undefined, length = 12): string {
-  if (!hash) return DASH;
-  return hash.slice(0, length);
 }
 
 /** Domains from the wire are untrusted text; keep rows from stretching the table. */

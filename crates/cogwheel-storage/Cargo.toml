@@ -16,11 +16,3 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
-cogwheel-policy = { path = "../cogwheel-policy" }
-ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
-base64.workspace = true
-# Only OsRng is needed, to seed ed25519 key generation. Depending on `rand_core`
-# directly rather than the full `rand` crate drops a dependency whose thread-local RNG
-# this code never touches, and with it RUSTSEC-2026-0097.
-rand_core = { version = "0.6", features = ["getrandom"] }
-getrandom = "0.4.2"

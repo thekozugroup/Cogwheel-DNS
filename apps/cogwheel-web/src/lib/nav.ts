@@ -1,19 +1,10 @@
-import {
-  ActivityIcon,
-  BrainCircuitIcon,
-  ChartNoAxesColumnIcon,
-  LaptopIcon,
-  LayoutDashboardIcon,
-  ServerCogIcon,
-  SettingsIcon,
-  ShieldIcon,
-} from "lucide-react";
+import { ActivityIcon, LaptopIcon, LayoutDashboardIcon, SettingsIcon, ShieldIcon } from "lucide-react";
 import type React from "react";
 
 export type NavItem = {
   to: string;
   label: string;
-  /** Shown in the sidebar and the command palette. */
+  /** Shown in the sidebar. */
   shortcut?: string;
   /** The digit ⌘/Ctrl combines with; `undefined` means no numeric shortcut. */
   digit?: string;
@@ -36,7 +27,7 @@ export const PRIMARY_NAV: NavItem[] = [
     shortcut: "⌘2",
     digit: "2",
     icon: ActivityIcon,
-    description: "Live query stream and recent risky events",
+    description: "Live query stream",
   },
   {
     to: "/devices",
@@ -52,40 +43,16 @@ export const PRIMARY_NAV: NavItem[] = [
     shortcut: "⌘4",
     digit: "4",
     icon: ShieldIcon,
-    description: "Blocklists, services and block profiles",
+    description: "Blocklists and block profiles",
   },
-  {
-    to: "/classifier",
-    label: "Classifier",
-    shortcut: "⌘5",
-    digit: "5",
-    icon: BrainCircuitIcon,
-    description: "Model status, sensitivity and the domain inspector",
-  },
-  {
-    to: "/insights",
-    label: "Insights",
-    shortcut: "⌘6",
-    digit: "6",
-    icon: ChartNoAxesColumnIcon,
-    description: "Top domains, severity mix and ruleset history",
-  },
-];
-
-export const SECONDARY_NAV: NavItem[] = [
   {
     to: "/settings",
     label: "Settings",
-    shortcut: "⌘,",
+    shortcut: "⌘5",
+    digit: "5",
     icon: SettingsIcon,
-    description: "Alerts, sync, upstream and threat intelligence",
-  },
-  {
-    to: "/system",
-    label: "System",
-    icon: ServerCogIcon,
-    description: "Diagnostics, backup, audit trail and drills",
+    description: "What the appliance stores, and where the rest is configured",
   },
 ];
 
-export const ALL_NAV = [...PRIMARY_NAV, ...SECONDARY_NAV];
+export const ALL_NAV = PRIMARY_NAV;

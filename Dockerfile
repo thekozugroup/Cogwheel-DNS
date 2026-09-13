@@ -127,7 +127,6 @@ FROM cook AS builder
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 COPY apps/cogwheel-server/ apps/cogwheel-server/
-COPY apps/cogwheel-desktop/ apps/cogwheel-desktop/
 
 # --locked: fail loudly if Cargo.lock does not satisfy the manifests, rather
 # than silently resolving different dependency versions than CI tested.
@@ -167,24 +166,20 @@ FROM debian:${DEBIAN_SUITE}-slim AS runtime
 #   and an operator debugging with curl inside the container needs a real trust
 #   store. Belt and braces, ~200 KB.
 # curl: the HEALTHCHECK probe. Nothing else in the image uses it.
-# iproute2: not decoration. GET /api/v1/resolver-access shells out to
-#   `ip -6 -o addr show scope global` to work out which addresses to tell the
-#   user to point their router at. Without `ip` on PATH that call fails
-#   silently and the dashboard simply omits every IPv6 target — and a client
-#   that keeps an IPv6 resolver configured bypasses an IPv4-only DNS setting
-#   entirely. A missing 2 MB package would present as a filtering bug.
 # libcap2-bin: provides setcap, used below to let the non-root binary bind :53.
-#   It is NOT purged after use, because `iproute2` has a hard
-#   `Depends: libcap2-bin` in Debian — removing it silently drags `ip` out of
-#   the image with it, which is exactly the "IPv6 targets vanish from the
-#   dashboard" failure described above. Leaving setcap in place is inert at
-#   runtime anyway: it needs CAP_SETFCAP and a writable filesystem, and the
-#   container has neither (cap_drop: ALL + read_only: true).
+#   It is deliberately left in the image rather than purged after use. Leaving
+#   setcap in place is inert at runtime: it needs CAP_SETFCAP and a writable
+#   filesystem, and the container has neither (cap_drop: ALL + read_only: true).
+#
+# No iproute2. The only thing the server shells out to is `hostname` /
+# `hostname -I` (GET /api/v1/resolver-access, to list the addresses a person
+# should point their router at), and `hostname` ships in the Essential
+# `hostname` package that every Debian base image already carries. Nothing
+# in the image needs `ip` on PATH.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates \
       curl \
-      iproute2 \
       libcap2-bin \
  && rm -rf /var/lib/apt/lists/*
 

@@ -1,7 +1,6 @@
 import { NavLink, useLocation } from "react-router-dom";
-import { ActivityIcon, CogIcon, HardDriveIcon, SearchIcon } from "lucide-react";
-import { cn } from "@/lib/utils";
-import { PRIMARY_NAV, SECONDARY_NAV, type NavItem } from "@/lib/nav";
+import { ActivityIcon, CogIcon, HardDriveIcon } from "lucide-react";
+import { PRIMARY_NAV, type NavItem } from "@/lib/nav";
 import { formatCount } from "@/lib/format";
 import { protectionState } from "@/lib/derive";
 import { useCogwheel } from "@/data/context";
@@ -16,7 +15,6 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
-  SidebarSeparator,
   useSidebar,
 } from "@/components/ui/sidebar";
 import { Kbd } from "@/components/ui/kbd";
@@ -49,7 +47,7 @@ function NavRow({ item, onNavigate }: { item: NavItem; onNavigate: () => void })
   );
 }
 
-export function AppSidebar({ onOpenPalette }: { onOpenPalette: () => void }) {
+export function AppSidebar() {
   const { data, error, phase } = useCogwheel();
   const { isMobile, setOpenMobile } = useSidebar();
 
@@ -59,7 +57,7 @@ export function AppSidebar({ onOpenPalette }: { onOpenPalette: () => void }) {
 
   const offline = Boolean(error) && phase === "ready" && data.dashboard.protection_status === "Loading";
   const state = protectionState(data.dashboard, offline);
-  const snapshot = data.dashboard.runtime_health.snapshot;
+  const snapshot = data.dashboard.runtime;
 
   const statusVariant =
     state.tone === "good"
@@ -98,19 +96,6 @@ export function AppSidebar({ onOpenPalette }: { onOpenPalette: () => void }) {
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
-
-        <SidebarSeparator />
-
-        <SidebarGroup>
-          <SidebarGroupLabel>Appliance</SidebarGroupLabel>
-          <SidebarGroupContent>
-            <SidebarMenu>
-              {SECONDARY_NAV.map((item) => (
-                <NavRow item={item} key={item.to} onNavigate={closeOnMobile} />
-              ))}
-            </SidebarMenu>
-          </SidebarGroupContent>
-        </SidebarGroup>
       </SidebarContent>
 
       <SidebarFooter className="gap-3 border-sidebar-border border-t group-data-[collapsible=icon]:hidden">
@@ -130,20 +115,6 @@ export function AppSidebar({ onOpenPalette }: { onOpenPalette: () => void }) {
         </div>
 
         <SnoozeControl />
-
-        <button
-          className={cn(
-            "flex w-full items-center gap-2 rounded-lg border border-sidebar-border px-2 py-1.5",
-            "text-muted-foreground text-xs hover:bg-sidebar-accent hover:text-foreground",
-            "focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2",
-          )}
-          onClick={onOpenPalette}
-          type="button"
-        >
-          <SearchIcon aria-hidden className="size-3.5" />
-          <span className="flex-1 text-left">Search &amp; commands</span>
-          <Kbd>⌘K</Kbd>
-        </button>
 
         <ThemeToggle />
       </SidebarFooter>

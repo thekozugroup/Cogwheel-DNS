@@ -53,42 +53,42 @@ Graded against the user's verbatim requirements.
 | 3.2 | Every destructive action has a confirmation naming the exact target |
 | 3.3 | Every mutation gives feedback (toast or inline) on success **and** failure |
 | 3.4 | Keyboard navigation works throughout; visible focus ring on every interactive element |
-| 3.5 | Command palette (⌘K) reaches every screen and the primary actions |
+| 3.5 | Keyboard shortcuts (⌘/Ctrl+1..5, `/` to focus search) reach every screen and the screen's search field |
 | 3.6 | Responsive down to 375px; sidebar collapses correctly; no horizontal body scroll |
 | 3.7 | `prefers-reduced-motion` is honoured |
 | 3.8 | Status is never conveyed by colour alone — always paired with icon and/or text |
 | 3.9 | No user-facing jargon without explanation; every non-obvious control has help text |
-| 3.10 | No feature from the previous UI was silently dropped (checked against the feature inventory) |
+| 3.10 | No screen exposes a control for a capability the server no longer has |
 
 ## D4 — Performance & Raspberry Pi 5 Fitness
 
 | # | Check |
 |---|---|
-| 4.1 | Classifier inference meets its documented p50/p99 latency budget, asserted by a test |
-| 4.2 | Classifier sustains its documented throughput floor (domains/sec/core), asserted by a test |
-| 4.3 | Model file and resident memory are within documented budgets, asserted by a test |
-| 4.4 | The DNS hot path never blocks on inference — verified by reading the code path, not by claim |
-| 4.5 | Inference queue is bounded with an explicit, documented drop policy under backpressure |
-| 4.6 | Classifier work is bounded to a documented CPU share; on-device training is time-budgeted |
+| 4.1 | A cache hit performs no upstream I/O and no policy evaluation — verified by reading `handle_wire_query`, not by claim |
+| 4.2 | Cached answers honour record TTLs within the documented floor and ceiling, asserted by a test |
+| 4.3 | A blocklist body larger than `MAX_SOURCE_BODY_BYTES` is rejected before it is parsed |
+| 4.4 | The DNS hot path never blocks on a blocklist fetch, a storage write or an event-stream subscriber — verified by reading the code path |
+| 4.5 | Event-stream fan-out is bounded (subscriber cap, per-subscriber buffer) with an explicit, documented drop policy under backpressure |
+| 4.6 | A dead or slow upstream cannot stall cache hits or blocked answers |
 | 4.7 | Web bundle is served gzipped/precompressed; initial JS payload is documented and reasonable |
 | 4.8 | No unbounded in-memory growth (caches have explicit capacity/TTL) |
 | 4.9 | Builds and runs on `linux/arm64`; no x86-only intrinsics or assumptions |
 | 4.10 | Measured numbers are recorded in docs, with the measurement method stated |
 
-## D5 — Classifier Quality
+## D5 — Filtering Safety
 
 | # | Check |
 |---|---|
-| 5.1 | Model is trained on a real, reproducible corpus from documented public sources |
-| 5.2 | Train/val/test are split by **registrable domain**; a leakage assertion exists and passes |
-| 5.3 | Reported ROC-AUC and PR-AUC come from a held-out test set, not the training set |
-| 5.4 | Operating thresholds are calibrated to target **false-positive rates**, and the FPR is reported |
-| 5.5 | A committed holdout set backs a regression test asserting minimum AUC and maximum FPR |
-| 5.6 | Per-verdict explanations are real (computed contributions), not templated strings |
-| 5.7 | A protected-domain allowlist exists that the classifier can never override |
-| 5.8 | On-device adaptation cannot promote a model that regresses validation FPR; rollback exists |
-| 5.9 | Classifier modes (Off/Monitor/Protect) and sensitivities map to documented calibrated thresholds |
-| 5.10 | First-sighting behaviour is defined and surfaced honestly in the UI |
+| 5.1 | The protected suffixes (`cogwheel_policy::PROTECTED_SUFFIXES`) are documented with the reason each is there |
+| 5.2 | Protection matches on a label boundary — subdomains covered, look-alikes not — asserted by a test |
+| 5.3 | A protected domain outranks every subscribed block rule, asserted by a test |
+| 5.4 | A candidate ruleset that would block a protected name is refused before activation and the policy in force keeps serving, asserted by a test |
+| 5.5 | A source whose invalid-line ratio exceeds its strictness threshold fails verification, asserted by a test |
+| 5.6 | Adblock modifier, path and regex rules are rejected rather than approximated |
+| 5.7 | An allow rule beats a block rule regardless of source order, asserted by a test |
+| 5.8 | Pausing protection answers every name unfiltered and resumes without a restart |
+| 5.9 | A device marked `bypass` receives unfiltered answers, and a device allow-list entry wins over its profile |
+| 5.10 | The block response mode is one of the four documented modes and applies to every blocked name |
 
 ## D6 — Deployment & Operability
 

@@ -1,29 +1,18 @@
 import React from "react";
-import { Link } from "react-router-dom";
-import {
-  ActivityIcon,
-  HardDriveIcon,
-  LaptopIcon,
-  PlayIcon,
-  RotateCwIcon,
-  ShieldOffIcon,
-} from "lucide-react";
+import { ActivityIcon, HardDriveIcon, PlayIcon, RotateCwIcon, ShieldOffIcon } from "lucide-react";
 import { api } from "@/lib/api";
-import { blockedRatio, protectionState, severityLabel, severityTone } from "@/lib/derive";
-import { formatCompact, formatCount, formatDuration, formatPercent, shortHash } from "@/lib/format";
+import { blockedRatio, protectionState } from "@/lib/derive";
+import { formatCompact, formatCount, formatDuration, formatPercent } from "@/lib/format";
 import { useCogwheel } from "@/data/context";
 import { Button } from "@/components/ui/button";
 import { PageHeader, PageSections, PageShell } from "@/components/app/page";
 import { SectionCard } from "@/components/app/section-card";
 import { StatTile } from "@/components/app/stat-tile";
-import { StatusIndicator, StatusPill } from "@/components/app/status-indicator";
+import { StatusIndicator } from "@/components/app/status-indicator";
 import { DataTable, type Column } from "@/components/app/data-table";
 import { EmptyState, LoadingSkeleton } from "@/components/app/states";
-import { useDomainInspector } from "@/components/app/inspector-context";
-import { LazySparkline } from "@/components/app/lazy-sparkline";
-import { useCounterSeries } from "@/hooks/use-counter-series";
 import { usePauseCountdown, useProtectionActions } from "@/hooks/use-protection";
-import type { DomainInsightEntry, SecurityEventRecord } from "@/lib/api";
+import type { DomainInsightEntry } from "@/lib/api";
 
 const IPV4 = /^\d{1,3}(\.\d{1,3}){3}$/;
 
@@ -32,20 +21,13 @@ const looksIpv6 = (target: string) => target.includes(":") && !target.includes("
 
 export function OverviewScreen() {
   const { data, phase, error, busy, mutate, reload } = useCogwheel();
-  const { inspect } = useDomainInspector();
   const { resume } = useProtectionActions();
   const remaining = usePauseCountdown();
 
   const loading = phase === "loading";
   const dashboard = data.dashboard;
-  const snapshot = dashboard.runtime_health.snapshot;
-  const blockedSeries = useCounterSeries(snapshot.blocked_total);
+  const snapshot = dashboard.runtime;
   const state = protectionState(dashboard, false);
-
-  const allowlistCount = React.useMemo(
-    () => data.settings.block_profiles.reduce((total, profile) => total + profile.allowlists.length, 0),
-    [data.settings.block_profiles],
-  );
 
   const domainColumns = (countHeader: string, tone: "neutral" | "blocked"): Column<DomainInsightEntry>[] => [
     {
@@ -64,32 +46,6 @@ export function OverviewScreen() {
         </span>
       ),
       sortValue: (row) => row.count,
-    },
-  ];
-
-  const eventColumns: Column<SecurityEventRecord>[] = [
-    {
-      key: "domain",
-      header: "Domain",
-      render: (row) => <span className="font-mono text-xs">{row.domain}</span>,
-    },
-    {
-      key: "device",
-      header: "Device",
-      render: (row) => row.device_name ?? "Unassigned device",
-    },
-    {
-      key: "client",
-      header: "Client IP",
-      hideOnStack: true,
-      hideBelow: "md",
-      render: (row) => <span className="font-mono text-xs">{row.client_ip}</span>,
-    },
-    {
-      key: "severity",
-      header: "Severity",
-      align: "end",
-      render: (row) => <StatusPill label={severityLabel(row.severity)} tone={severityTone(row.severity)} />,
     },
   ];
 
@@ -173,11 +129,6 @@ export function OverviewScreen() {
                   </Button>
                 ) : null
               }
-              hint={
-                dashboard.active_ruleset
-                  ? `Ruleset ${shortHash(dashboard.active_ruleset.hash)}`
-                  : "No active ruleset"
-              }
               label="Protection"
               tone={state.tone === "idle" ? "neutral" : state.tone}
               toneLabel={state.label}
@@ -191,25 +142,11 @@ export function OverviewScreen() {
             />
             <StatTile
               delta={`${formatCount(data.settings.blocklists.length)} configured sources`}
-              hint={`${formatCount(allowlistCount)} saved allowlist entries`}
               label="Enabled sources"
               value={formatCount(dashboard.enabled_source_count)}
             />
             <StatTile
               delta={`${formatPercent(blockedRatio(dashboard), 2)} of ${formatCompact(snapshot.queries_total)} queries`}
-              footer={
-                blockedSeries.length > 1 ? (
-                  <>
-                    <LazySparkline
-                      ariaLabel="Blocks per poll interval since this page was opened"
-                      data={blockedSeries}
-                    />
-                    <p className="mt-1 text-muted-foreground text-[11px]">
-                      Blocks per 5s poll, since this page was opened. The appliance keeps no history.
-                    </p>
-                  </>
-                ) : null
-              }
               hint="Observed by this node since it started"
               label="Blocked queries"
               value={formatCompact(snapshot.blocked_total)}
@@ -239,8 +176,6 @@ export function OverviewScreen() {
               error={error}
               loading={loading}
               onRetry={() => void reload()}
-              onRowClick={(row) => inspect(row.domain)}
-              rowActionLabel={(row) => `Inspect ${row.domain}`}
               rowKey={(row) => row.domain}
               rows={dashboard.domain_insights.top_queried_domains}
             />
@@ -258,8 +193,6 @@ export function OverviewScreen() {
               error={error}
               loading={loading}
               onRetry={() => void reload()}
-              onRowClick={(row) => inspect(row.domain)}
-              rowActionLabel={(row) => `Inspect ${row.domain}`}
               rowKey={(row) => row.domain}
               rows={dashboard.domain_insights.top_blocked_domains}
             />
@@ -290,12 +223,6 @@ export function OverviewScreen() {
                     <dd className="truncate font-mono text-foreground text-sm">{target}</dd>
                   </div>
                 ))}
-                <div className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2">
-                  <dt className="text-muted-foreground text-xs">Tailscale</dt>
-                  <dd className="truncate font-mono text-foreground text-sm">
-                    {data.resolverAccess.tailscale_ip ?? "Not available on this node"}
-                  </dd>
-                </div>
               </dl>
 
               {data.resolverAccess.notes.length > 0 ? (
@@ -318,67 +245,22 @@ export function OverviewScreen() {
           )}
         </SectionCard>
 
-        <div className="grid gap-6 xl:grid-cols-2">
-          <SectionCard description="Counters reported by the DNS runtime." title="Resolver summary">
-            <dl className="divide-y divide-border">
-              <SummaryRow label="Protection">
-                <StatusIndicator label={state.label} tone={state.tone} />
-              </SummaryRow>
-              <SummaryRow label="Active ruleset">
-                <span className="font-mono text-sm">
-                  {dashboard.active_ruleset ? shortHash(dashboard.active_ruleset.hash) : "None"}
-                </span>
-              </SummaryRow>
-              <SummaryRow label="Cache hits">
-                <span className="tabular">{formatCount(snapshot.cache_hits_total)}</span>
-              </SummaryRow>
-              <SummaryRow label="Fallback served">
-                <span className="tabular">{formatCount(snapshot.fallback_served_total)}</span>
-              </SummaryRow>
-              <SummaryRow label="Upstream failures">
-                <span className="tabular">{formatCount(snapshot.upstream_failures_total)}</span>
-              </SummaryRow>
-              <SummaryRow label="Runtime notes">
-                <span className="tabular">{formatCount(dashboard.runtime_health.notes.length)}</span>
-              </SummaryRow>
-            </dl>
-            {dashboard.runtime_health.notes.length > 0 ? (
-              <ul className="mt-3 space-y-1">
-                {dashboard.runtime_health.notes.map((note) => (
-                  <li className="text-muted-foreground text-sm" key={note}>
-                    {note}
-                  </li>
-                ))}
-              </ul>
-            ) : null}
-          </SectionCard>
-
-          <SectionCard
-            actions={
-              <Button asChild size="sm" variant="outline">
-                <Link to="/activity">See all</Link>
-              </Button>
-            }
-            description="The most recent classifier-flagged events."
-            title="Recent risky events"
-          >
-            <DataTable
-              columns={eventColumns}
-              empty={{
-                icon: LaptopIcon,
-                title: "No risky DNS events recorded",
-                description: "Events appear here when the classifier flags a domain above the alert threshold.",
-              }}
-              error={error}
-              loading={loading}
-              onRetry={() => void reload()}
-              onRowClick={(row) => inspect(row.domain)}
-              rowActionLabel={(row) => `Inspect ${row.domain}`}
-              rowKey={(row) => row.id}
-              rows={dashboard.recent_security_events.slice(0, 4)}
-            />
-          </SectionCard>
-        </div>
+        <SectionCard description="Counters reported by the DNS runtime." title="Resolver summary">
+          <dl className="divide-y divide-border">
+            <SummaryRow label="Protection">
+              <StatusIndicator label={state.label} tone={state.tone} />
+            </SummaryRow>
+            <SummaryRow label="Cache hits">
+              <span className="tabular">{formatCount(snapshot.cache_hits_total)}</span>
+            </SummaryRow>
+            <SummaryRow label="Fallback served">
+              <span className="tabular">{formatCount(snapshot.fallback_served_total)}</span>
+            </SummaryRow>
+            <SummaryRow label="Upstream failures">
+              <span className="tabular">{formatCount(snapshot.upstream_failures_total)}</span>
+            </SummaryRow>
+          </dl>
+        </SectionCard>
 
         <p className="text-muted-foreground text-xs">
           {loading

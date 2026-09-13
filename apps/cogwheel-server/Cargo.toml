@@ -12,7 +12,6 @@ anyhow.workspace = true
 axum.workspace = true
 chrono.workspace = true
 hickory-resolver.workspace = true
-prometheus-client.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -26,10 +25,7 @@ tracing-subscriber.workspace = true
 url.workspace = true
 uuid.workspace = true
 cogwheel-api = { path = "../../crates/cogwheel-api" }
-cogwheel-classifier = { path = "../../crates/cogwheel-classifier" }
 cogwheel-dns-core = { path = "../../crates/cogwheel-dns-core" }
 cogwheel-lists = { path = "../../crates/cogwheel-lists" }
 cogwheel-policy = { path = "../../crates/cogwheel-policy" }
-cogwheel-services = { path = "../../crates/cogwheel-services" }
 cogwheel-storage = { path = "../../crates/cogwheel-storage" }
-cogwheel-sync = { path = "../../crates/cogwheel-sync" }

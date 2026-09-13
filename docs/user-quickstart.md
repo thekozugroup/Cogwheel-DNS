@@ -23,50 +23,42 @@ a device with an IPv6 DNS server configured will ignore an IPv4-only setting.
 Ask your operator to set both addresses. See
 [DEPLOYMENT.md](../DEPLOYMENT.md#6-pointing-your-router-at-cogwheel).
 
+## The Five Screens
+
+- **Overview** — whether protection is on, how many queries were blocked, the
+  top queried and top blocked names of the last day, and the exact addresses
+  to type into a router.
+- **Activity** — every query as it happens, with the device that asked and
+  whether it was blocked. Pause the stream to read it; filter by device,
+  verdict or name.
+- **Devices** — give a device a name so it shows up by name in Activity, and
+  optionally its own policy: a profile, a list of names it may always reach,
+  or a full bypass.
+- **Protection** — the blocklists the appliance subscribes to (add one by URL,
+  turn it on or off, delete it, refresh now) and saved profiles built from the
+  OISD presets plus your own exceptions.
+- **Settings** — a read-only summary of what is stored. Upstream servers, bind
+  addresses and retention are set by the operator in the environment file.
+
+The sidebar also has the pause control (5, 15 or 60 minutes, with a countdown)
+and the light/dark toggle.
+
 ## First Things to Configure
 
-Start with the small set of user-facing controls:
-
-1. Pick a blocklist preset: `Essential`, `Balanced`, or `Aggressive`.
-2. Set classifier mode: `Off`, `Monitor`, or `Protect`.
-3. Adjust sensitivity only if needed.
-
-Everything else stays under advanced diagnostics and recovery flows.
-
-## What the Main Dashboard Shows
-
-- Runtime health and protection status
-- Recent audit and security activity
-- Notification delivery health
-- Sync status for multi-node setups
-- Tailscale exit-node and DNS filtering status
-- False-positive budget readiness
-
-## Safe Recovery Features
-
-Cogwheel includes:
-
-- Backup and restore APIs for recovery
-- Rollback-aware Tailscale controls
-- Resilience drills to validate operations
-- Load-test tools for operator validation
+1. Add a blocklist on the Protection screen. OISD Small is a good first list;
+   OISD Big blocks more and breaks more.
+2. Name the devices you care about on the Devices screen.
+3. Leave everything else at its default.
 
 ## If Browsing Breaks
 
 Try these steps in order:
 
-1. Switch to a less aggressive blocklist preset.
-2. Move classifier mode from `Protect` to `Monitor`.
-3. Review recent security or audit events in the dashboard.
-4. Ask your operator to restore from backup or roll back a recent change.
-
-## If You Use Tailscale
-
-When exit-node mode is enabled, Cogwheel can filter DNS for tailnet traffic.
-
-Check the Tailscale card for:
-
-- whether Tailscale is installed
-- whether the daemon is running
-- whether exit-node mode is active
-- DNS filtering guidance and rollback controls
+1. Pause protection from the sidebar. If the site works while paused, a list is
+   blocking something it needs; if it still fails, the problem is not Cogwheel.
+2. Look for the site's names in Activity with the verdict filter set to
+   *Blocked*, then add the one it needs to the device's allowed names, or
+   switch to a smaller list.
+3. If a list update ever refuses to install, that is deliberate: a list that
+   would block the names your devices need to stay online is rejected and the
+   previous list keeps working. Nothing needs undoing.

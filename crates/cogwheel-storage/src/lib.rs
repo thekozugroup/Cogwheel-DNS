@@ -1,15 +1,10 @@
 use chrono::{DateTime, Utc};
-use cogwheel_policy::RulesetArtifact;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use uuid::Uuid;
-
-use base64::Engine as _;
-use ed25519_dalek::{Signer, SigningKey};
-use rand_core::OsRng;
 
 const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_ruleset_artifacts.sql");
@@ -24,7 +19,6 @@ const MIGRATION_0010: &str = include_str!("../migrations/0010_config_version.sql
 const MIGRATION_0011: &str = include_str!("../migrations/0011_retention_indexes.sql");
 
 pub const SCHEMA_VERSION: u32 = 11;
-pub const CONFIG_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -76,13 +70,6 @@ fn row_uuid_opt(column: usize, value: Option<&str>) -> rusqlite::Result<Option<U
 #[derive(Debug, Clone)]
 pub struct Storage {
     connection: Arc<Mutex<Connection>>,
-    node_identity: Arc<NodeIdentity>,
-}
-
-#[derive(Debug, Clone)]
-pub struct NodeIdentity {
-    pub key: Arc<SigningKey>,
-    pub public_b64: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,15 +82,6 @@ pub struct SourceRecord {
     pub refresh_interval_minutes: i64,
     pub profile: String,
     pub verification_strictness: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RulesetRecord {
-    pub id: Uuid,
-    pub hash: String,
-    pub status: String,
-    pub created_at: DateTime<Utc>,
-    pub artifact_json: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,76 +153,7 @@ pub struct NotificationDeliveryRecord {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SyncEnvelope {
-    pub node_public_key: String,
-    pub timestamp: DateTime<Utc>,
-    pub nonce: String,
-    pub payload_b64: String,
-    pub signature_b64: String,
-}
-
-fn sync_signing_message(timestamp: &DateTime<Utc>, nonce: &str, payload: &[u8]) -> Vec<u8> {
-    let mut message = timestamp.to_rfc3339().into_bytes();
-    message.push(b'|');
-    message.extend_from_slice(nonce.as_bytes());
-    message.push(b'|');
-    message.extend_from_slice(payload);
-    message
-}
-
 impl Storage {
-    pub fn sign_sync_payload(&self, payload: &[u8]) -> SyncEnvelope {
-        let timestamp = Utc::now();
-        let nonce = Uuid::new_v4().to_string();
-        let message = sync_signing_message(&timestamp, &nonce, payload);
-        let signature = self.node_identity.key.sign(&message);
-        let signature_b64 =
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature.to_bytes());
-        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload);
-
-        SyncEnvelope {
-            node_public_key: self.node_identity.public_b64.clone(),
-            timestamp,
-            nonce,
-            payload_b64,
-            signature_b64,
-        }
-    }
-
-    pub fn verify_sync_envelope(envelope: &SyncEnvelope) -> Result<Vec<u8>, StorageError> {
-        use ed25519_dalek::Signature;
-        use ed25519_dalek::{Verifier, VerifyingKey};
-
-        let pub_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(&envelope.node_public_key)
-            .map_err(|_| StorageError::Internal("invalid public key base64".to_string()))?;
-        let pub_bytes_array: [u8; 32] = pub_bytes
-            .try_into()
-            .map_err(|_| StorageError::Internal("invalid public key length".to_string()))?;
-        let verifying_key = VerifyingKey::from_bytes(&pub_bytes_array)
-            .map_err(|_| StorageError::Internal("invalid verifying key bytes".to_string()))?;
-
-        let sig_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(&envelope.signature_b64)
-            .map_err(|_| StorageError::Internal("invalid signature base64".to_string()))?;
-        let sig_bytes_array: [u8; 64] = sig_bytes
-            .try_into()
-            .map_err(|_| StorageError::Internal("invalid signature length".to_string()))?;
-        let signature = Signature::from_bytes(&sig_bytes_array);
-
-        let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(&envelope.payload_b64)
-            .map_err(|_| StorageError::Internal("invalid payload base64".to_string()))?;
-        let message = sync_signing_message(&envelope.timestamp, &envelope.nonce, &payload_bytes);
-
-        verifying_key
-            .verify(&message, &signature)
-            .map_err(|_| StorageError::Internal("signature verification failed".to_string()))?;
-
-        Ok(payload_bytes)
-    }
-
     pub async fn connect(database_url: &str) -> Result<Self, StorageError> {
         let path = database_url
             .strip_prefix("sqlite://")
@@ -258,46 +167,9 @@ impl Storage {
         connection.pragma_update(None, "foreign_keys", "ON")?;
         apply_migrations(&connection)?;
 
-        let node_identity_b64: Option<String> = connection
-            .query_row(
-                "SELECT value FROM settings WHERE key = 'node_identity_v1'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()?;
-
-        let signing_key = if let Some(b64) = node_identity_b64 {
-            let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .decode(&b64)
-                .map_err(|_| StorageError::Internal("invalid identity base64".to_string()))?;
-            let bytes_array: [u8; 32] = bytes
-                .try_into()
-                .map_err(|_| StorageError::Internal("invalid identity length".to_string()))?;
-            SigningKey::from_bytes(&bytes_array)
-        } else {
-            let key = SigningKey::generate(&mut OsRng);
-            let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key.to_bytes());
-            connection.execute(
-                "INSERT INTO settings (key, value, updated_at) VALUES ('node_identity_v1', ?1, CURRENT_TIMESTAMP)",
-                params![b64],
-            )?;
-            key
-        };
-
-        let public_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(signing_key.verifying_key().to_bytes());
-
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
-            node_identity: Arc::new(NodeIdentity {
-                key: Arc::new(signing_key),
-                public_b64,
-            }),
         })
-    }
-
-    pub fn identity(&self) -> Arc<NodeIdentity> {
-        self.node_identity.clone()
     }
 
     pub async fn upsert_setting(&self, key: &str, value: &str) -> Result<(), StorageError> {
@@ -545,86 +417,6 @@ impl Storage {
             .map_err(StorageError::from)
     }
 
-    pub async fn record_ruleset(&self, ruleset: &RulesetRecord) -> Result<(), StorageError> {
-        let connection = lock_connection(&self.connection)?;
-        connection.execute(
-            "INSERT INTO rulesets (id, hash, status, created_at, artifact_json) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                ruleset.id.to_string(),
-                ruleset.hash,
-                ruleset.status,
-                ruleset.created_at.to_rfc3339(),
-                ruleset.artifact_json,
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub async fn list_rulesets(&self) -> Result<Vec<RulesetRecord>, StorageError> {
-        let connection = lock_connection(&self.connection)?;
-        let mut statement = connection.prepare(
-            "SELECT id, hash, status, created_at, artifact_json FROM rulesets ORDER BY created_at DESC",
-        )?;
-        let rows = statement.query_map([], decode_ruleset_row)?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(StorageError::from)
-    }
-
-    pub async fn activate_ruleset(&self, ruleset_id: Uuid) -> Result<(), StorageError> {
-        let mut connection = lock_connection(&self.connection)?;
-        let transaction = connection.transaction()?;
-        transaction.execute(
-            "UPDATE rulesets SET status = 'previous' WHERE status = 'active'",
-            [],
-        )?;
-        transaction.execute(
-            "UPDATE rulesets SET status = 'active' WHERE id = ?1",
-            params![ruleset_id.to_string()],
-        )?;
-        transaction.execute(
-            "UPDATE active_ruleset SET ruleset_id = ?1, activated_at = CURRENT_TIMESTAMP WHERE slot = 1",
-            params![ruleset_id.to_string()],
-        )?;
-        transaction.commit()?;
-        Ok(())
-    }
-
-    pub async fn active_ruleset(&self) -> Result<Option<RulesetRecord>, StorageError> {
-        let connection = lock_connection(&self.connection)?;
-        connection
-            .query_row(
-                "SELECT id, hash, status, created_at, artifact_json FROM rulesets WHERE status = 'active' LIMIT 1",
-                [],
-                decode_ruleset_row,
-            )
-            .optional()
-            .map_err(StorageError::from)
-    }
-
-    pub async fn previous_ruleset(&self) -> Result<Option<RulesetRecord>, StorageError> {
-        let connection = lock_connection(&self.connection)?;
-        connection
-            .query_row(
-                "SELECT id, hash, status, created_at, artifact_json FROM rulesets WHERE status = 'previous' ORDER BY created_at DESC LIMIT 1",
-                [],
-                decode_ruleset_row,
-            )
-            .optional()
-            .map_err(StorageError::from)
-    }
-
-    pub async fn rollback_to_previous_ruleset(
-        &self,
-    ) -> Result<Option<RulesetArtifact>, StorageError> {
-        let Some(previous) = self.previous_ruleset().await? else {
-            return Ok(None);
-        };
-
-        self.activate_ruleset(previous.id).await?;
-        let artifact = serde_json::from_str::<RulesetArtifact>(&previous.artifact_json)?;
-        Ok(Some(artifact))
-    }
-
     pub async fn record_audit_event(&self, event: &AuditEvent) -> Result<(), StorageError> {
         let connection = lock_connection(&self.connection)?;
         connection.execute(
@@ -709,13 +501,6 @@ impl Storage {
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(StorageError::from)
     }
-
-    pub fn get_config_version(&self) -> Result<u32, StorageError> {
-        let connection = lock_connection(&self.connection)?;
-        let mut statement = connection.prepare("SELECT version FROM config_schema WHERE id = 1")?;
-        let version: u32 = statement.query_row([], |row| row.get(0))?;
-        Ok(version)
-    }
 }
 
 /// Whether a migration error just means "this migration is already applied".
@@ -763,16 +548,6 @@ fn apply_migrations(connection: &Connection) -> Result<(), StorageError> {
         }
     }
     Ok(())
-}
-
-fn decode_ruleset_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RulesetRecord> {
-    Ok(RulesetRecord {
-        id: row_uuid(0, &row.get::<_, String>(0)?)?,
-        hash: row.get(1)?,
-        status: row.get(2)?,
-        created_at: parse_datetime(&row.get::<_, String>(3)?).map_err(to_sqlite_error)?,
-        artifact_json: row.get(4)?,
-    })
 }
 
 fn parse_datetime(value: &str) -> Result<DateTime<Utc>, chrono::ParseError> {

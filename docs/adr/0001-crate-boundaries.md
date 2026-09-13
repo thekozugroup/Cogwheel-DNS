@@ -2,63 +2,77 @@
 
 ## Status
 
-Accepted
+Accepted. Revised when the workspace was cut down to the DNS-filtering core;
+the previous version of this record, and the crates it described, are on the
+`archive/full-featured` branch.
 
 ## Context
 
-Cogwheel is a Rust monorepo with a DNS fast path, control-plane APIs, sync flows, and operator-facing UI. The roadmap already fixes the intended workspace layout, but the project still needs an explicit architecture decision record describing which crate owns which responsibility so future work does not blur boundaries or reintroduce coupling.
-
-The most important constraint is that the DNS serving path stays deterministic, low-allocation, and operational even when control-plane or background jobs fail.
+Cogwheel is a Rust workspace with one hot path (answering DNS queries) and one
+control plane (an HTTP API and a React UI that configure it). The hot path must
+stay deterministic, low-allocation and able to keep answering when a background
+job fails: a blocklist refresh, a storage write, a browser holding an event
+stream open. Recording which crate owns which responsibility is what keeps that
+path from quietly growing dependencies on the control plane.
 
 ## Decision
 
-The workspace uses the following crate ownership model:
+The workspace has five library crates, one binary and one web app:
 
-- `crates/cogwheel-dns-core`
-  - Owns DNS request parsing, response generation, cache access, upstream forwarding, and deterministic runtime stats.
-  - Must not depend on web/UI concerns.
 - `crates/cogwheel-policy`
-  - Owns rule precedence, allow/deny/rewrite resolution, and compiled policy decisions.
-  - Exposes pure decision primitives consumed by the DNS path.
+  - Owns the rule model (`Rule`, `RulePattern`, `RuleAction`), the compiled
+    `RulesetArtifact`, `PolicyEngine::evaluate`, `BlockMode`, domain
+    normalisation and the `PROTECTED_SUFFIXES` safety net.
+  - Pure: no I/O and no path dependencies. Everything else that filters is
+    built on it.
 - `crates/cogwheel-lists`
-  - Owns blocklist fetch, parse, normalize, verify, compile, and staged activation workflows.
-  - Produces artifacts that can be consumed by policy/runtime code without network access.
-- `crates/cogwheel-services`
-  - Owns curated service bundles, service toggles, and exception manifests.
-  - Must compile down to policy-compatible artifacts rather than bypass policy rules.
-- `crates/cogwheel-classifier`
-  - Owns feature extraction, model inference, and risk scoring.
-  - May inform control or monitor paths, but must not make the DNS hot path non-deterministic.
-- `crates/cogwheel-sync`
-  - Owns node identity, signed envelopes, revision conflict resolution, replication profiles, and replay protection.
-  - Must remain transport-agnostic from the perspective of the rest of the workspace.
+  - Owns blocklist fetch, parse (`domains`, `hosts`, Adblock), verification and
+    compilation into a `PolicyEngine`.
+  - Control plane only: it talks HTTP, so it is never on the DNS path.
+  - Depends on `cogwheel-policy`.
+- `crates/cogwheel-dns-core`
+  - Owns the UDP/TCP listeners, request parsing, per-client policy selection,
+    the TTL-aware response cache, CNAME uncloaking, upstream forwarding, the
+    pause switch and the runtime counters.
+  - Depends on `cogwheel-policy` only. Must not depend on HTTP clients, storage
+    or the web app; a test in the crate enforces the first.
 - `crates/cogwheel-storage`
-  - Owns migrations, SQLx repositories, persistence models, and audit-event writes.
-  - Provides storage-facing APIs for higher layers; schema details stay encapsulated here.
+  - Owns the SQLite schema, migrations, the `sources`, `devices` and
+    `settings` repositories, and history pruning. Schema details stay inside it.
+  - No path dependencies.
 - `crates/cogwheel-api`
-  - Owns shared API request/response types, envelopes, and API-facing validation contracts.
-  - Must not own runtime orchestration or direct storage side effects.
+  - Owns environment configuration (`AppConfig`), the `ApiEnvelope` response
+    shape, the readiness tracker, the `/health/*` routes and the upstream
+    endpoint parser.
+  - No path dependencies; no runtime orchestration or storage side effects.
 - `apps/cogwheel-server`
-  - Owns process wiring, configuration loading, route registration, background task orchestration, and runtime composition.
-  - Acts as the integration boundary for all crates above.
+  - Owns process wiring, route registration, the refresh scheduler, the
+    retention task, the SSE event bus and every `/api/v1` handler.
+  - The only crate allowed to depend on all of the above.
 - `apps/cogwheel-web`
-  - Owns operator UI and advanced diagnostics.
-  - Talks to the backend only through typed API contracts.
-- `apps/cogwheel-desktop`
-  - Optional packaging layer for native distribution around the web UI.
-  - Must not fork core backend logic.
+  - Owns the operator UI. Talks to the server only through the typed client in
+    `src/lib/api.ts`.
 
 ## Boundary Rules
 
-- The DNS hot path must not depend directly on frontend, HTTP, or storage migration details.
-- Background update, classifier, sync, and resilience tasks must degrade without taking down DNS serving.
-- Cross-crate sharing should prefer typed contracts and compiled artifacts over leaking internal structs.
-- New features should land in a library crate first when they introduce reusable domain behavior; app crates should mostly compose existing crates.
-- Policy-changing actions must continue to flow through storage-backed audit logging regardless of which surface triggers them.
+- The DNS hot path depends on `cogwheel-policy` and nothing else in the
+  workspace.
+- Blocklist refreshes, storage writes and event-stream fan-out degrade without
+  taking DNS serving down: a failed refresh keeps the policy already in force,
+  and a slow event subscriber loses frames rather than slowing resolution.
+- A candidate policy that would block a protected name is refused before
+  activation; nothing rolls a live policy back after the fact.
+- Cross-crate sharing prefers compiled artifacts (`PolicyEngine`,
+  `RulesetArtifact`) over leaking internal structs.
+- Reusable domain behaviour lands in a library crate; the server composes.
+- Any change to the path-dependency graph updates this ADR first and the
+  regression test in `crates/cogwheel-api/src/lib.rs`
+  (`crate_path_dependencies_match_the_adr_boundaries`) in the same change.
 
 ## Consequences
 
-- Future refactors have a documented default boundary to follow.
-- The workspace remains easier to test because domain logic stays in crates and app crates mostly orchestrate.
-- Some short-term duplication may remain acceptable if it prevents DNS-path coupling to control-plane code.
-- If a feature needs to cross these boundaries, a new ADR is required instead of ad hoc coupling.
+- Refactors have a documented default boundary to follow.
+- Domain logic stays testable in isolation because the crates carry no process
+  wiring.
+- A feature that needs to cross these boundaries needs a new ADR, not ad hoc
+  coupling.

@@ -25,10 +25,7 @@ TIMEOUT=5
 SKIP_RESTART=no
 CONTAINER_NAME="${COGWHEEL_CONTAINER_NAME:-cogwheel}"
 
-# A domain the bootstrap blocklist always contains. The server seeds a
-# reserved source on first start whose payload is
-# "ads.example.com\ntracker.example.com", so this is blocked on a stock
-# install with no configuration at all.
+# Blocked on a stock install before any list is configured.
 BLOCKED_DOMAIN=ads.example.com
 # Never on a blocklist, and reserved by RFC 2606 so it cannot be bought.
 ALLOWED_DOMAIN=example.com
@@ -151,13 +148,6 @@ else
         pass "readiness  GET /health/ready -> 200 {\"data\":{\"status\":\"ready\"}}"
     else
         fail "readiness  GET /health/ready" "got HTTP $code"
-    fi
-
-    code=$(http_get /metrics)
-    if [ "$code" = 200 ] && grep -q 'cogwheel_startups_total' "$BODY_FILE"; then
-        pass "metrics    GET /metrics -> 200, exposes cogwheel_startups_total"
-    else
-        fail "metrics    GET /metrics" "got HTTP $code, or cogwheel_startups_total missing"
     fi
 
     code=$(http_get /api/v1/dashboard)

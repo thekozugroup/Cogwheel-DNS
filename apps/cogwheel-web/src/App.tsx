@@ -7,8 +7,8 @@ import { OverviewScreen } from "@/routes/overview";
 
 /**
  * Overview is bundled eagerly because it is the landing screen; every other
- * screen is split out so the appliance does not ship Recharts and the whole
- * settings surface to someone who only wanted to check whether blocking is on.
+ * screen is split out so the appliance does not ship the editing surfaces to
+ * someone who only wanted to check whether blocking is on.
  */
 const ActivityScreen = React.lazy(() =>
   import("@/routes/activity").then((module) => ({ default: module.ActivityScreen })),
@@ -19,17 +19,8 @@ const DevicesScreen = React.lazy(() =>
 const ProtectionScreen = React.lazy(() =>
   import("@/routes/protection").then((module) => ({ default: module.ProtectionScreen })),
 );
-const ClassifierScreen = React.lazy(() =>
-  import("@/routes/classifier").then((module) => ({ default: module.ClassifierScreen })),
-);
-const InsightsScreen = React.lazy(() =>
-  import("@/routes/insights").then((module) => ({ default: module.InsightsScreen })),
-);
 const SettingsScreen = React.lazy(() =>
   import("@/routes/settings").then((module) => ({ default: module.SettingsScreen })),
-);
-const SystemScreen = React.lazy(() =>
-  import("@/routes/system").then((module) => ({ default: module.SystemScreen })),
 );
 
 function ScreenFallback() {
@@ -77,34 +68,10 @@ export function App() {
         <Route
           element={
             <Lazy>
-              <ClassifierScreen />
-            </Lazy>
-          }
-          path="classifier"
-        />
-        <Route
-          element={
-            <Lazy>
-              <InsightsScreen />
-            </Lazy>
-          }
-          path="insights"
-        />
-        <Route
-          element={
-            <Lazy>
               <SettingsScreen />
             </Lazy>
           }
           path="settings"
-        />
-        <Route
-          element={
-            <Lazy>
-              <SystemScreen />
-            </Lazy>
-          }
-          path="system"
         />
         <Route element={<Navigate replace to="/" />} path="*" />
       </Route>

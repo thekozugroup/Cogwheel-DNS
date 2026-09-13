@@ -26,8 +26,8 @@
 //! # Hot path
 //!
 //! [`PolicyEngine::evaluate`] runs once per DNS query that misses the response cache, so its
-//! allocation and complexity behaviour is part of the product's latency budget. See its own doc
-//! comment for what that behaviour actually is today.
+//! allocation and complexity behaviour is paid on every cache miss. See its own doc comment for
+//! what that behaviour actually is today.
 //!
 //! # Normalisation
 //!
@@ -42,6 +42,53 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use uuid::Uuid;
+
+/// Domain suffixes that a subscribed blocklist is never allowed to take out.
+///
+/// Every entry is infrastructure a device needs in order to *stay* on the
+/// network and to *tell you* what is wrong when it is not: resolver bootstrap
+/// and captive-portal detection, NTP (a drifted clock fails certificate
+/// validation for every TLS connection, and the symptom points nowhere near
+/// DNS), and the certificate-status endpoints of the major CAs. Blocking any of
+/// them looks nothing like "the ad blocker broke this site" -- it looks like
+/// the device is broken -- which is why they are protected here rather than
+/// left to whichever list happens to be subscribed.
+///
+/// These outrank subscribed lists, and only subscribed lists: a rule the
+/// operator wrote by hand still wins, because that is a choice someone made
+/// deliberately, whereas a list entry covering `pool.ntp.org` is almost always
+/// an accident upstream. Deliberately absent are banking, government,
+/// OS-vendor and health domains -- blocking those is bad, but it is visible,
+/// attributable and reversible by the person who did it.
+///
+/// Matched on a label boundary, like every other suffix in this crate:
+/// `time.apple.com` also covers `ntp.time.apple.com`, but never `notapple.com`.
+pub const PROTECTED_SUFFIXES: [&str; 21] = [
+    // Resolver bootstrap and connectivity checks.
+    "one.one.one.one",
+    "dns.google",
+    "resolver1.opendns.com",
+    "cloudflare-dns.com",
+    "quad9.net",
+    "connectivity-check.ubuntu.com",
+    "captive.apple.com",
+    "detectportal.firefox.com",
+    "msftconnecttest.com",
+    "msftncsi.com",
+    "connectivitycheck.gstatic.com",
+    // Time. A wrong clock breaks TLS everywhere.
+    "pool.ntp.org",
+    "ntp.org",
+    "time.apple.com",
+    "time.windows.com",
+    "time.google.com",
+    // Certificate validation.
+    "digicert.com",
+    "letsencrypt.org",
+    "sectigo.com",
+    "globalsign.com",
+    "identrust.com",
+];
 
 /// What a client receives for a query resolved to [`DecisionKind::Blocked`].
 ///

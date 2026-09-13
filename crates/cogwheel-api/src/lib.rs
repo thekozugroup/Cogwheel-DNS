@@ -1,10 +1,8 @@
 use axum::extract::{FromRef, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::get;
 use axum::{Json, Router};
-use prometheus_client::encoding::text::encode;
-use prometheus_client::registry::Registry;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
@@ -106,26 +104,6 @@ impl Default for UpdaterConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RuntimeGuardConfig {
-    pub probe_domains: Vec<String>,
-    pub max_upstream_failures_delta: u64,
-    pub max_fallback_served_delta: u64,
-}
-
-impl Default for RuntimeGuardConfig {
-    fn default() -> Self {
-        Self {
-            probe_domains: vec![
-                "example.com".to_string(),
-                "connectivitycheck.gstatic.com".to_string(),
-            ],
-            max_upstream_failures_delta: 0,
-            max_fallback_served_delta: 0,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppConfig {
     pub profile: DeploymentProfile,
@@ -133,7 +111,6 @@ pub struct AppConfig {
     pub storage: StorageConfig,
     pub upstream: UpstreamConfig,
     pub updater: UpdaterConfig,
-    pub runtime_guard: RuntimeGuardConfig,
     pub blocking: BlockingConfig,
     pub retention: RetentionConfig,
 }
@@ -141,9 +118,8 @@ pub struct AppConfig {
 /// How long observed history is kept before it is deleted.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RetentionConfig {
-    /// Days of classifier verdicts, audit events and notification deliveries
-    /// to keep. `0` disables pruning and keeps everything forever, which is
-    /// what every version before this one did.
+    /// Days of observed history to keep. `0` disables pruning and keeps
+    /// everything forever, which is what every version before this one did.
     pub history_days: u32,
     /// How often the prune runs. Hourly by default: often enough that the
     /// window is honoured closely, rare enough to be invisible on a Pi.
@@ -264,25 +240,6 @@ impl AppConfig {
                 .parse::<u64>()
                 .map_err(|_| ApiError::InvalidEnv(value.clone()))?;
         }
-        if let Some(value) = env_get("COGWHEEL_RUNTIME_GUARD__PROBE_DOMAINS") {
-            config.runtime_guard.probe_domains = value
-                .split(',')
-                .map(str::trim)
-                .filter(|item| !item.is_empty())
-                .map(ToString::to_string)
-                .collect();
-        }
-        if let Some(value) = env_get("COGWHEEL_RUNTIME_GUARD__MAX_UPSTREAM_FAILURES_DELTA") {
-            config.runtime_guard.max_upstream_failures_delta = value
-                .parse::<u64>()
-                .map_err(|_| ApiError::InvalidEnv(value.clone()))?;
-        }
-        if let Some(value) = env_get("COGWHEEL_RUNTIME_GUARD__MAX_FALLBACK_SERVED_DELTA") {
-            config.runtime_guard.max_fallback_served_delta = value
-                .parse::<u64>()
-                .map_err(|_| ApiError::InvalidEnv(value.clone()))?;
-        }
-
         Ok(config)
     }
 
@@ -302,8 +259,6 @@ impl AppConfig {
                     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30053);
                 config.storage.database_url = "sqlite://data/cogwheel-dev.db".to_string();
                 config.updater.refresh_interval_secs = 120;
-                config.runtime_guard.max_upstream_failures_delta = 2;
-                config.runtime_guard.max_fallback_served_delta = 5;
             }
             DeploymentProfile::Home => {
                 config.server.http_bind_addr =
@@ -324,8 +279,6 @@ impl AppConfig {
                     SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 53);
                 config.storage.database_url = "sqlite://data/cogwheel-smb.db".to_string();
                 config.updater.refresh_interval_secs = 600;
-                config.runtime_guard.max_upstream_failures_delta = 1;
-                config.runtime_guard.max_fallback_served_delta = 2;
             }
         }
 
@@ -335,7 +288,6 @@ impl AppConfig {
 
 #[derive(Debug, Clone)]
 pub struct ApiState {
-    pub registry: Arc<Registry>,
     /// Subsystem readiness, reported by `/health/ready`.
     pub readiness: Arc<Readiness>,
 }
@@ -391,7 +343,7 @@ impl Readiness {
 pub struct ReadinessDetail {
     /// Storage open and migrated.
     pub storage: bool,
-    /// Initial ruleset compiled and installed.
+    /// Initial policy compiled and installed.
     pub policy: bool,
     /// UDP and TCP DNS listeners bound.
     pub dns_listeners: bool,
@@ -420,8 +372,6 @@ pub struct HealthResponse {
 pub enum ApiError {
     #[error("invalid environment value: {0}")]
     InvalidEnv(String),
-    #[error("internal server error")]
-    Internal,
 }
 
 impl IntoResponse for ApiError {
@@ -439,8 +389,6 @@ where
     Router::new()
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
-        .route("/health/check", post(live))
-        .route("/metrics", get(metrics))
         .with_state(state)
 }
 
@@ -469,12 +417,6 @@ async fn ready(State(state): State<ApiState>) -> Response {
         StatusCode::SERVICE_UNAVAILABLE
     };
     (code, body).into_response()
-}
-
-async fn metrics(State(state): State<ApiState>) -> Result<Response, ApiError> {
-    let mut output = String::new();
-    encode(&mut output, &state.registry).map_err(|_| ApiError::Internal)?;
-    Ok((StatusCode::OK, output).into_response())
 }
 
 #[cfg(test)]
@@ -538,24 +480,13 @@ mod tests {
             .expect("workspace root");
 
         let expected = [
+            ("crates/cogwheel-policy/Cargo.toml", &[][..]),
             (
                 "crates/cogwheel-dns-core/Cargo.toml",
-                &["cogwheel-classifier", "cogwheel-policy"][..],
-            ),
-            ("crates/cogwheel-classifier/Cargo.toml", &[][..]),
-            (
-                "crates/cogwheel-lists/Cargo.toml",
-                &["cogwheel-policy", "cogwheel-services"][..],
-            ),
-            (
-                "crates/cogwheel-services/Cargo.toml",
                 &["cogwheel-policy"][..],
             ),
-            (
-                "crates/cogwheel-storage/Cargo.toml",
-                &["cogwheel-policy"][..],
-            ),
-            ("crates/cogwheel-sync/Cargo.toml", &[][..]),
+            ("crates/cogwheel-lists/Cargo.toml", &["cogwheel-policy"][..]),
+            ("crates/cogwheel-storage/Cargo.toml", &[][..]),
             ("crates/cogwheel-api/Cargo.toml", &[][..]),
         ];
 

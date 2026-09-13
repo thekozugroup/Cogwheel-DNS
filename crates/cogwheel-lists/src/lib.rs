@@ -11,9 +11,6 @@
 //! 3. [`compile_ruleset`] / [`build_policy_engine`] flatten verified sources into a
 //!    [`RulesetArtifact`] / [`PolicyEngine`] ready to serve queries.
 //!
-//! [`synthetic_source`] produces a [`ParsedSource`] outside this pipeline, for rules that were
-//! never fetched from anywhere.
-//!
 //! # Untrusted input
 //!
 //! A source's body is attacker-influenced: the operator picks the URL, but whoever controls that
@@ -75,16 +72,14 @@ pub struct SourceDefinition {
 /// and folded into a ruleset by [`compile_ruleset`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParsedSource {
-    /// The source this was parsed from, or the synthetic definition built by
-    /// [`synthetic_source`].
+    /// The source this was parsed from.
     pub source: SourceDefinition,
     /// When parsing happened (not necessarily when the body was fetched over the network).
     pub fetched_at: DateTime<Utc>,
     /// Reserved for conditional-GET support; always `None` today, since fetching neither sends
     /// nor records an ETag.
     pub etag: Option<String>,
-    /// Hex SHA-256 of the input: the raw body bytes for a fetched source, or the rules themselves
-    /// for a synthetic one (see [`synthetic_source`]).
+    /// Hex SHA-256 of the raw body bytes.
     pub checksum: String,
     /// Rules successfully parsed from this source.
     pub rules: Vec<Rule>,
@@ -107,59 +102,6 @@ pub struct VerificationResult {
     pub notes: Vec<String>,
 }
 
-/// The placeholder URL carried by sources that were synthesised rather than fetched.
-///
-/// Parsed once from a string literal that is a valid data URL by inspection. Keeping it in a
-/// `LazyLock` means the single unavoidable assertion lives here rather than at every call site,
-/// and it is evaluated the first time a synthetic source is built rather than on every call.
-static SYNTHETIC_SOURCE_URL: std::sync::LazyLock<Url> = std::sync::LazyLock::new(|| {
-    #[allow(
-        clippy::expect_used,
-        reason = "the literal is a constant, valid data URL; failure is not reachable at runtime"
-    )]
-    Url::parse("data:text/plain,").expect("synthetic source URL literal is valid")
-});
-
-/// Build a [`ParsedSource`] from rules that were assembled in memory rather than fetched.
-///
-/// A "synthetic" source is one with no upstream body at all — currently used for per-device
-/// service toggles (`synthetic_source("service-toggles", ...)` in `apps/cogwheel-server`), which
-/// compile to [`Rule`]s the same way a fetched blocklist does but have nothing to download. It
-/// carries a placeholder `data:` URL, `SourceKind::Domains`, `profile: "shared"` and
-/// `verification_strictness: "balanced"`, and afterward is indistinguishable from a fetched
-/// source to everything downstream ([`verify_candidate`], [`compile_ruleset`]).
-///
-/// `checksum` is computed from the rules themselves (the same `action:pattern:source` scheme
-/// [`RulesetArtifact::new`] uses for hashing), since there is no body to hash.
-pub fn synthetic_source(name: &str, rules: Vec<Rule>) -> ParsedSource {
-    let source = SourceDefinition {
-        id: Uuid::new_v4(),
-        name: name.to_string(),
-        url: SYNTHETIC_SOURCE_URL.clone(),
-        kind: SourceKind::Domains,
-        enabled: true,
-        profile: "shared".to_string(),
-        verification_strictness: "balanced".to_string(),
-    };
-
-    let mut hasher = Sha256::new();
-    for rule in &rules {
-        hasher.update(format!(
-            "{:?}:{:?}:{}",
-            rule.action, rule.pattern, rule.source
-        ));
-    }
-
-    ParsedSource {
-        source,
-        fetched_at: Utc::now(),
-        etag: None,
-        checksum: format!("{:x}", hasher.finalize()),
-        rules,
-        invalid_lines: 0,
-    }
-}
-
 /// Fetch a source over HTTP(S) and parse it into rules.
 ///
 /// # Errors
@@ -174,7 +116,7 @@ pub async fn fetch_and_parse_source(
     Ok(parse_source(source, &body))
 }
 
-/// Parse a fetched (or synthetic) body into rules, tolerating bad lines instead of failing.
+/// Parse a fetched body into rules, tolerating bad lines instead of failing.
 ///
 /// Blank lines and lines starting with `#` or `!` are skipped. Every other line is handed to the
 /// parser for `source.kind`; a line the parser rejects increments
@@ -552,21 +494,6 @@ mod tests {
             verification.blocked_protected_domains,
             vec!["connectivitycheck.gstatic.com"]
         );
-    }
-
-    #[test]
-    fn synthetic_source_preserves_rules() {
-        let source = synthetic_source(
-            "service-toggles",
-            vec![Rule {
-                pattern: RulePattern::Suffix("tiktokv.com".to_string()),
-                action: RuleAction::Block,
-                source: "service:tiktok".to_string(),
-                comment: None,
-            }],
-        );
-        assert_eq!(source.source.name, "service-toggles");
-        assert_eq!(source.rules.len(), 1);
     }
 
     #[test]

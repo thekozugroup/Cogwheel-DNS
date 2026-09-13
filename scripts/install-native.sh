@@ -14,8 +14,6 @@
 #
 # Layout it produces:
 #   /usr/local/bin/cogwheel-server         binary
-#   /usr/local/bin/.cogwheel_tailscale_state.json
-#                                          Tailscale exit-node rollback state
 #   /usr/local/share/cogwheel/web          web assets
 #   /etc/cogwheel/cogwheel.env             configuration (preserved on upgrade)
 #   /var/lib/cogwheel                      SQLite database, owned by cogwheel
@@ -30,10 +28,6 @@ INSTALLER_VERSION="1.0.0"
 SERVICE_USER=cogwheel
 SERVICE_GROUP=cogwheel
 BIN_PATH=/usr/local/bin/cogwheel-server
-# The server derives this path itself, from dirname(current_exe()); it is not
-# configurable. deploy/cogwheel.service grants write access to this one file so
-# the Tailscale exit-node endpoint is not defeated by ProtectSystem=strict.
-TAILSCALE_STATE="$(dirname "$BIN_PATH")/.cogwheel_tailscale_state.json"
 WEB_DIR=/usr/local/share/cogwheel/web
 CONFIG_DIR=/etc/cogwheel
 ENV_FILE="$CONFIG_DIR/cogwheel.env"
@@ -211,21 +205,6 @@ install_files() {
     # unit (or was created by hand).
     install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0750 "$DATA_DIR"
     step "Data directory $DATA_DIR ready"
-
-    # The Tailscale exit-node endpoint writes its rollback state to a path the
-    # server derives from its own location, which lives under a directory that
-    # ProtectSystem=strict keeps read-only. The unit's ReadWritePaths= opens
-    # that single file, and ReadWritePaths only opens a path that exists -- so
-    # create it here, owned by the service user. An existing file is left
-    # alone: it holds the state an in-flight rollback would need.
-    if [ -e "$TAILSCALE_STATE" ]; then
-        chown "$SERVICE_USER:$SERVICE_GROUP" "$TAILSCALE_STATE"
-        chmod 0640 "$TAILSCALE_STATE"
-        step "Kept existing Tailscale state file $TAILSCALE_STATE"
-    else
-        install -m 0640 -o "$SERVICE_USER" -g "$SERVICE_GROUP" /dev/null "$TAILSCALE_STATE"
-        step "Created Tailscale state file $TAILSCALE_STATE"
-    fi
 }
 
 detect_advertised_targets() {
@@ -439,7 +418,6 @@ do_uninstall() {
     fi
 
     rm -f "$BIN_PATH"
-    rm -f "$TAILSCALE_STATE"
     rm -rf "$WEB_DIR"
     rm -f "$ENV_FILE"
     rmdir "$CONFIG_DIR" 2>/dev/null || true
