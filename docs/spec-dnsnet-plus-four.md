@@ -33,7 +33,7 @@ Path-dependency graph (enforced by the ADR test, moved to the server crate):
 dns-core → policy; lists → policy; storage → (none); server → policy, lists,
 dns-core, storage.
 
-### 1.1 cogwheel-policy (~400 LOC, no I/O, deps: serde only) — DONE in Phase 2
+### 1.1 cogwheel-policy (735 LOC measured, no I/O, deps: serde only) — DONE in Phase 2
 - `pub const PROTECTED_SUFFIXES: [&str; 21]`.
 - `pub enum BlockMode { NullIp, NxDomain, NoData, Refused }` — `Copy`.
 - `pub enum Action { Allow, Block }` (Copy).
@@ -47,14 +47,18 @@ dns-core, storage.
 - `pub struct Policy { index, household, by_ip, all_mask, block_mode }`.
   Reserved scope ids: `SCOPE_HOUSEHOLD = 0`, `SCOPE_UNFILTERED = 1`. Device
   scopes start at 2 and are interned by signature (§6).
-- `pub enum Verdict { Allow(Reason), Block(Reason, u8 /*slot*/) }` (Copy) with
-  `pub enum Reason { NoMatch, DeviceRule, HouseholdRule, Protected, ListAllow, List, Cname, Paused, Unfiltered }`.
+- `pub enum Verdict { Allow(Reason, u8 /*slot*/), Block(Reason, u8 /*slot*/) }` (Copy)
+  with `pub enum Reason { NoMatch, DeviceRule, HouseholdRule, Protected, ListAllow, List, Cname, Paused, Unfiltered }`.
+  Both arms carry the slot because an `@@` exception has to be attributable to
+  the list that granted it exactly as a block is: `Verdict::slot()` is
+  `Some(slot)` for `ListAllow`, `List` and `Cname` and `None` on every tier no
+  list decided, where the field itself is `0`.
 - `pub fn evaluate(&Policy, &Scope, &str) -> Verdict` — allocation-free.
   `pub fn evaluate_lists(&Policy, mask, &str) -> Verdict` = protected + list
   tiers only (CNAME re-check and `GET /check`).
 - `normalize_domain`, `normalize_rule_domain` (also strips a leading `*.`).
 
-### 1.2 cogwheel-lists (~450 LOC) — DONE in Phase 2
+### 1.2 cogwheel-lists (443 LOC measured) — DONE in Phase 2
 - `fetch_source_body(client, url, etag, last_modified) -> Result<FetchOutcome, FetchError>`
   where `FetchOutcome::{NotModified, Body{ text, etag, last_modified }}`; 32 MiB
   streaming cap; `data:` URLs kept.
@@ -71,15 +75,15 @@ dns-core, storage.
 - `protected_hits(index) -> Vec<&'static str>`: surfaced as a per-list `note`,
   never a rejection (protection is enforced at evaluation).
 
-### 1.3 cogwheel-dns-core (~950 LOC) — DONE in Phase 2
+### 1.3 cogwheel-dns-core (1,651 LOC measured) — DONE in Phase 2
 - `upstream.rs` (moved from cogwheel-api) plus `build_resolver(servers)` with
   `ResolverOpts { timeout: 2 s, attempts: 2, cache_size: 0, try_tcp_on_error:
   true, preserve_intermediates: true }`.
 - `DnsRuntime` (§5), `serve_with_ready_signal`, the TCP handler.
 - TTL clamp (5 s floor, 1 h ceiling, 60 s negative), `error_response_for_payload`,
-  `build_base_response`, `build_blocked_response`, `build_ip_response`.
+  `servfail`, `build_base_response`, `build_blocked_response`.
 
-### 1.4 cogwheel-storage (~700 LOC, deps: rusqlite(bundled), serde, serde_json, thiserror, tokio, tracing)
+### 1.4 cogwheel-storage (1,760 LOC measured, deps: rusqlite(bundled), serde, serde_json, thiserror, tokio, tracing)
 - One `Arc<Mutex<Connection>>`; PRAGMAs journal_mode=WAL, synchronous=NORMAL,
   wal_autocheckpoint=1000, foreign_keys=ON, busy_timeout=5000, cache_size=-1024
   (the page cache is 1 MiB of the process's stated memory budget rather than
@@ -103,7 +107,7 @@ dns-core, storage.
   by row cap; rollup upsert arithmetic; HISTORY_DAYS=0 writes rollups but no log
   rows.
 
-### 1.5 apps/cogwheel-server (~1,900 LOC across modules)
+### 1.5 apps/cogwheel-server (3,680 LOC measured, across modules)
 `main.rs` (CLI `--version/--help`, init_tracing, startup order, background
 tasks, graceful shutdown), `config.rs` (AppConfig from env), `http.rs` (router,
 `/health/live`, `/health/ready` + `Readiness`, `ApiEnvelope`, `ApiError`, SPA
@@ -191,15 +195,25 @@ After open: `seed_if_empty` (§2.4).
 1. `VACUUM INTO '<db path>.pre-v1'` (remove a stale file of that name first). A
    plain file copy is NOT used because the WAL may hold unflushed pages.
 2. `BEGIN IMMEDIATE`.
-3. Create the seven v1 tables under `_v1` names.
-4. `INSERT INTO sources_v1 … SELECT … FROM sources WHERE id <> '00000000-0000-0000-0000-000000000001'`
+3. Rename the three legacy tables whose names v1 reuses out of the way —
+   `settings`→`settings_v0`, `sources`→`sources_v0`, `devices`→`devices_v0`
+   (SQLite rewrites a child's `REFERENCES devices` when its parent is
+   renamed, so `security_events` follows `devices` across without a separate
+   step) — then execute `schema_v1.sql` itself, the same file a fresh install
+   runs, to create the seven v1 tables under their real names. One definition
+   of what v1 is: an upgraded database is the fresh schema by construction,
+   with every foreign key already pointing at the final table names, rather
+   than a second copy of the DDL kept in step with it by hand. (`schema_v1.sql`
+   also sets `PRAGMA user_version = 1` as its last statement, so nothing
+   later in this sequence needs to.)
+4. `INSERT INTO sources … SELECT … FROM sources_v0 WHERE id <> '00000000-0000-0000-0000-000000000001'`
    (the built-in 2-name `baseline` data: URL is dropped;
    `refresh_interval_minutes`, `profile`, `verification_strictness` dropped).
-5. `INSERT INTO devices_v1 … CASE WHEN policy_mode='custom' AND protection_override='bypass' THEN 0 ELSE 1 END, 1, …`
+5. `INSERT INTO devices … CASE WHEN policy_mode='custom' AND protection_override='bypass' THEN 0 ELSE 1 END, 1, … FROM devices_v0`
    — every device keeps its id, name and IP; a bypass device keeps bypassing;
    `all_lists` is always 1 (a `blocklist_profile_override` never affected DNS, so
    it is NOT mapped; each such device is named in a startup WARN).
-6. `INSERT INTO rules (domain, action, device_id, created_at) SELECT lower(trim(j.value)), 'allow', d.id, unixepoch() FROM devices d, json_each(d.allowed_domains_json) j WHERE d.policy_mode='custom' AND j.value <> ''`
+6. `INSERT INTO rules (domain, action, device_id, created_at) SELECT lower(trim(j.value)), 'allow', d.id, unixepoch() FROM devices_v0 d, json_each(d.allowed_domains_json) j WHERE d.policy_mode='custom' AND j.value <> ''`
    (global-mode devices had their allowed_domains ignored at runtime, so
    importing them would change behaviour; skipped with a WARN naming the
    device). `service_overrides_json` is discarded (WARN). `block_profiles`
@@ -207,10 +221,17 @@ After open: `seed_if_empty` (§2.4).
 7. If the baseline source row was present: seed `ads.example.com` and
    `tracker.example.com` as household block rules so an upgraded install keeps
    answering `0.0.0.0` for the names DEPLOYMENT.md §7 uses.
-8. `DROP TABLE` rulesets, active_ruleset, audit_events, security_events,
-   notification_deliveries, config_schema, config_migrations, settings, sources,
-   devices (drop the two indexes first). `ALTER TABLE … RENAME` the `_v1`
-   tables. `PRAGMA user_version = 1`. `COMMIT`.
+8. Drop the three legacy indexes first (`idx_notification_deliveries_created_at`,
+   `idx_security_events_created_at`, `idx_audit_events_created_at` — `DROP
+   TABLE` would take them anyway, but naming them is easier to audit against
+   this list). Then `DROP TABLE`, children before parents: active_ruleset,
+   rulesets, security_events, audit_events, notification_deliveries,
+   config_migrations, config_schema, settings_v0, sources_v0, devices_v0.
+   `active_ruleset.ruleset_id` references `rulesets`, and
+   `security_events.device_id` references `devices_v0` (rewritten by step 3's
+   rename); with `foreign_keys=ON`, `DROP TABLE` on the referenced side runs
+   an implicit `DELETE FROM` that fails while a child row still points at it,
+   so each child has to go before its parent. `COMMIT`.
 9. On any error: `ROLLBACK`, log the `.pre-v1` path, exit non-zero (the old
    image still boots the untouched v0 file).
 
@@ -355,7 +376,14 @@ localStorage cache keys kept; `mutate()` unchanged.
   rules still apply — stated inline), **Rules for this device**: domain +
   Allow/Block add row and a list with delete; Delete device (ConfirmDialog).
 - **Devices table**: Name, IP, Filtering (StatusPill), Lists ("All" / "n of m"),
-  Rules (count), Queries / Blocked (24 h), Last seen.
+  Rules (count), Queries / Blocked (24 h), Last seen. It sheds columns on its own
+  container width, not the viewport's — it sits in the narrower half of the grid,
+  so a wider window can mean a narrower table — in this order: Rules, then Lists
+  and Last seen together, then the table itself for stacked cards, which render
+  every field. Name, IP, Filtering and Queries / Blocked never go. Rules goes
+  first because that count is also on the form beside the table; a last-seen is
+  nowhere else on the page, so a column order that hid it from every desktop
+  width would show a 1440px browser strictly less than a phone.
 - **Unnamed clients** SectionCard: IP, queries/blocked 24 h, last seen, "Name
   this device" → prefills the form (`?ip=` also honoured).
 
@@ -391,16 +419,33 @@ pub struct DnsRuntime {
     resolver: TokioResolver,
     policy: RwLock<Arc<Policy>>,
     pause_until: AtomicU64,
-    cache: moka::future::Cache<CacheKey, Arc<CachedWire>>, // max 10_000, ttl 24 h = STALE ceiling
+    cache: WireCache,                              // max 10_000, ttl 24 h = STALE ceiling
+    cache_epoch: AtomicU64,                        // bumped by every policy swap
     miss_permits: Arc<Semaphore>,                  // 512
     log_tx: mpsc::Sender<LogEntry>,                // bounded 8_192, try_send
     stats: DnsRuntimeStats,
-    block_mode: BlockMode,
 }
 pub struct CacheKey { scope: u32, qtype: u16, domain: Arc<str> }
-pub struct CachedWire { bytes: Box<[u8]>, truncated: Option<Box<[u8]>>, fresh_until: Instant, blocked: bool, verdict: Verdict }
-pub struct LogEntry { ts: u32, client: IpAddr, domain: Arc<str>, qtype: u16, verdict: Verdict }
+pub struct CachedWire { bytes: Box<[u8]>, truncated: Option<Box<[u8]>>, fresh_until: Instant, stale_until: Instant, blocked: bool, verdict: Verdict }
+pub struct LogEntry { ts: u32, client: IpAddr, domain: Arc<str>, qtype: u16, verdict: Verdict, list: Option<Arc<str>> }
 ```
+There is no `block_mode` on the runtime: it reads `policy.block_mode`, so the
+mode a name is blocked with cannot drift from the policy that blocked it.
+`cache_epoch` lets a miss decided under a policy that has since been swapped out
+tell that its answer came back too late to cache. `CachedWire` carries
+`stale_until` as well as `fresh_until` because the 24 h ceiling is fixed when the
+upstream last confirmed the answer; serving it stale through an outage must not
+push that ceiling further out. `LogEntry` carries the resolved list name rather
+than the slot, because slots are positions in the enabled-list order and a
+toggle renumbers every slot above it while rows are still in the flush window.
+
+Not `moka`: `WireCache` is a hand-rolled `HashMap` + insertion-order `VecDeque`
+sharded 16 ways behind independent `RwLock`s. Every entry already carries its
+own `fresh_until`/stale ceiling, so an LRU's recency tracking buys nothing an
+eviction order does not already have, and a plain shard is cheaper to probe
+inline on the receive loop than a concurrent cache with its own maintenance
+thread. `invalidate_all()` walks all 16 shards and clears each.
+
 Stats: queries_total, cache_hits_total, cache_expired_total, blocked_total,
 upstream_failures_total, stale_served_total, cname_blocks_total, dropped_total,
 log_dropped_total, hit/miss latency totals+samples.
@@ -588,7 +633,8 @@ Common gate G: `cargo fmt --all -- --check` · `cargo clippy --workspace
 `cargo deny check` · `cd apps/cogwheel-web && npm ci && npm run lint && npx tsc
 --noEmit && npm run build` · `for f in scripts/*.sh; do sh -n $f; done &&
 shellcheck scripts/*.sh` · `actionlint .github/workflows/*.yml` ·
-`docker buildx build --check .` · the ci.yml image smoke · `sh
+`docker buildx build --check .` · the ci.yml image smoke, which includes the
+v0→v1 upgrade of a real file by the shipped image · `sh
 scripts/verify-install.sh`.
 
 Benchmark gate B: release binary on 127.0.0.1:35353 / :38080 with a real list
@@ -606,7 +652,11 @@ conditional GET and body cache (§2.7); `policy_build.rs` with scope interning
 persisted; `hostname -I` connect targets; web: `api.ts` (22 calls), provider (5
 fields), `nav.ts` (5 entries), the five pages (§4), `presets.ts`; scripts and CI
 updated.
-Gate: G + a manual v0→v1 upgrade test + benchmark gate B.
+Gate: G + benchmark gate B. The v0→v1 upgrade was a manual step, which is to
+say nothing that runs; it is now a step of the ci.yml image job, which seeds a v0
+file from the same eleven fixtures the Rust test uses, starts the shipped image
+on a volume holding it, and asserts ready, the `.pre-v1` backup and a device
+carried across with its original id.
 **Phase 4 — docs, ADR, Pi numbers.** Rewrite the docs of §9; fill §12's "after"
 column; measure on a Pi 5 when one is available.
 
@@ -616,7 +666,7 @@ column; measure on a Pi 5 when one is available.
 
 | Metric | Before (85ef5a6) | After Phase 2 (measured) | Target |
 |---|---|---|---|
-| Rust LOC | 19,512 in 10 members | 8,730 in 6 | ≤ 4,600 excl. tests |
+| Rust LOC (excl. tests) | 19,512 in 10 members | 8,730 in 6 | ≤ 8,600 in 5 — 8,269 measured, see §12.1 |
 | Web LOC (src) | 17,222 | 10,496 | ≤ 8,000 |
 | HTTP routes | 44 + 4 | 16 + 2 | 20 + 2 |
 | Sidebar pages | 8 | 5 (Phase 3) | 5 |
@@ -625,11 +675,11 @@ column; measure on a Pi 5 when one is available.
 | SQLite tables | 12 | 12 (Phase 3) | 7 |
 | Binary (x86_64, stripped) | 15,707,800 B | 12,679,416 B | ≤ 14 MB |
 | Threads | 6 | 5 | 5 |
-| RSS with oisd small loaded | 52.62 MB (HWM 62.11) | 26.31 MB (HWM 27.99) | ≤ 45 MB |
+| RSS with oisd small loaded (method: §12.2) | 52.62 MB (HWM 62.11) | 26.31 MB (HWM 27.99) | ≤ 45 MB |
 | Cache hit, server-internal | 4.651 µs | 2.270 µs | ≤ 4.65 µs |
 | Cache hit, client p50 / p99 | 0.055 / 0.107 ms | 0.048 / 0.100 ms | no regression |
 | Blocked p50 / p99 | 0.054 / 0.106 ms | 0.050 / 0.104 ms | no regression |
-| First-time blocked miss (55,852 rules) | 1,151.8 µs | 27.05 µs p50 | ≤ 50 µs |
+| First-time blocked miss (55,852 rules, §12.3) | 1,151.8 µs | 27.05 µs p50 | ≤ 50 µs |
 | Throughput (4×25,000) | 25,234 QPS | 64,088 QPS | ≥ 25.2k |
 | Server CPU per query | 44.3 µs | 19.9 µs | — |
 | List activation | 489 ms | 30 ms | — |
@@ -640,3 +690,99 @@ column; measure on a Pi 5 when one is available.
 
 Benchmarks were taken on a 4-vCPU x86_64 sandbox, not a Pi 5; treat them as
 relative reference points. No Raspberry Pi 5 measurement exists yet.
+
+### 12.1 The Rust LOC target is derived from a measurement, not guessed
+
+The `≤ 4,600` that stood in this row was written before any of this code
+existed. It was a guess, it was never derived from the work the product has to
+do, and the tree has now been read line by line against it. The figure below is
+what the five crates actually are, counted as: every `.rs` file under a crate's
+`src/`, minus the files that exist only for tests (`src/tests.rs`, `src/tests/`,
+`alloc_guard.rs`) and minus every `#[cfg(test)]` module inside the rest. The
+`tests/` directories and those excluded files are 5,908 further lines.
+
+| Crate | Lines | Of which comment | What needs them |
+|---|---|---|---|
+| `apps/cogwheel-server` | 3,680 | 722 | 22 routes across eight handler modules, the §3 envelope and its two rejection wrappers, config from twelve environment variables, the §6 policy build with scope interning, the §2.7 refresh pipeline, the §7 query-log writer, retention, and startup/shutdown for four background tasks |
+| `cogwheel-storage` | 1,760 | 517 | seven tables, a guarded one-way v0→v1 upgrade, a batched log writer with hourly rollups in the same transaction, keyset paging, a bounded top-ten, and two retention bounds — every method `async` over `spawn_blocking` |
+| `cogwheel-dns-core` | 1,651 | 397 | a forwarder with a sharded wire cache, serve-stale, EDNS truncation, CNAME re-check, a bounded miss pipeline, UDP and TCP listeners, and DoT/DoH upstream parsing |
+| `cogwheel-policy` | 735 | 220 | the seven-tier precedence of §6, the 64-slot bitmask index, rule sets with label-boundary matching, scopes, and one normaliser |
+| `cogwheel-lists` | 443 | 109 | conditional GET with a streaming 32 MiB cap, three list grammars, verification, and the protected-name note |
+| **Total** | **8,269** | **1,965** | |
+
+Two figures put that in proportion. Roughly a quarter of it — 1,965 lines — is
+comment, which is this codebase's house style: every non-obvious decision says
+why it was made, and several of those comments are the only record of a measured
+result. Strip them and the blank lines and 5,658 lines of code remain. And the
+comparison people reach for does not hold either: DNSNet's Rust core is about
+1,000 lines, and it has no HTTP API, no SQLite, no per-device model and no
+persisted query log — four of the things this document exists to specify.
+
+A pass looking specifically for incidental complexity — duplicated logic,
+hand-rolled code a dependency provides, abstractions with one caller, builders
+that add a layer without adding safety — found and removed 130 lines (the
+largest: the v0→v1 upgrade now executes `schema_v1.sql` itself instead of
+carrying a second copy of the DDL, and the Overview serialises the runtime's own
+snapshot instead of copying it field by field into a near-identical struct).
+That is what was there. The remaining 8,269 is the product: 4,600 was never
+reachable without deleting features this spec requires.
+
+The target in the table is therefore `≤ 8,600`, not the reading: the measurement
+plus roughly one phase of headroom. A target set to whatever the tree happens to
+be is a row that can never fail, and every other row in §12 is a bound met with
+room to spare. Phase 4 has 331 lines of room; needing more than that means
+coming back here and arguing the ceiling up, which is the point of having one.
+
+### 12.2 What the RSS row is a measurement of
+
+RSS moves with *how* the list arrived, not only with how much is in it, so the
+number means nothing without its method beside it. Four readings of the same
+binary (11,083,000 B) against the same 55,951-line `oisd-small.txt`, each taken
+the way `scripts/bench/run.py` takes it — `VmHWM` from `/proc/<pid>/status`,
+after `/health/ready` and after the list has finished compiling, before a single
+query is answered and before the list-toggle timing that follows — were 30.47,
+30.36, 30.41 and 30.32 MB: a 0.15 MB spread. 30.4 MB is the figure Phase 4
+should put in the column, and this paragraph is what has to travel with it.
+
+Readings taken any other way are lower, and what differs is transient allocation
+the allocator has not handed back, not anything live:
+
+| How the same 55,989-name index got there | VmHWM |
+|---|---|
+| Compiled at boot from an already-cached body | 17.00 MB |
+| Fetched over HTTPS at run time into an empty policy | 24.46 MB |
+| Added through `POST /api/v1/lists` while a policy is live (the harness) | 30.41 MB |
+
+The household's steady state is the first row; the harness deliberately measures
+the third, because that is the peak an appliance has to survive. Quoting one of
+them without saying which invites exactly the "it regressed against Phase 2"
+reading that the Phase 2 number cannot support either. If Phase 4 wants it lower
+rather than merely stated, the lever is glibc arena retention — `malloc_trim(0)`
+on the blocking pool once `compile_index` returns, or `M_ARENA_MAX=2` — and it
+should be measured on a Pi 5 first, because it buys an `unsafe` call and a
+glibc-only path to move a number already 14 MB under target.
+
+### 12.3 The Phase 2 first-time-blocked-miss figure is not comparable
+
+Read straight, that row says a first-time blocked miss went from 27.05 µs to
+about 45 µs: a 65% regression on the metric the product exists for. It did not.
+The 27.05 µs predates `scripts/bench`, which first appears in the Phase 3
+commit, and it was not taken through the UDP client path — nothing in this tree
+can reproduce it.
+
+What the harness measures is a client-side round trip: build a query, send it on
+a UDP socket, wait for the datagram back. That path has a floor; the floor is
+most of the number, and it moves with the machine. Over the same four runs as
+§12.2, a *cached* blocked answer — strictly less work than a first-time block —
+took 41.46, 42.39, 40.86 and 45.91 µs p50, while a first-time blocked miss
+against 55,951 rules took 44.96, 45.67, 46.78 and 49.53 µs. The floor moved 5 µs
+between runs; the difference between the two did not. The comparable Phase 3
+figure is therefore that difference — the marginal cost of a first block over a
+cached one: 3.3 to 5.9 µs, call it 4 — and it is why the row reads within a
+hair of its 50 µs target on a loaded sandbox while the work being measured is
+under a tenth of that. The server-internal cache-hit row above (1.4–1.7 µs on
+these runs) is the one taken without the socket.
+
+Phase 4 fills this column on a Pi 5. It should record the harness's own floor
+beside the figure, and it should not chase 27.05 µs, which no run of this
+harness can reach.

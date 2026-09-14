@@ -91,6 +91,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the DNS listeners are given to finish an in-flight query on shutdown.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// What is logged when `RUST_LOG` says nothing.
+const DEFAULT_LOG_FILTER: &str = "info";
+
 fn main() -> Result<()> {
     // Before the runtime exists: once it has workers, growing the descriptor table costs an RCU
     // grace period per doubling, paid on whichever worker's `socket()` call crosses the
@@ -280,11 +283,26 @@ async fn wait_for_signal() {
 }
 
 fn init_tracing() {
+    let spelled = std::env::var(EnvFilter::DEFAULT_ENV).ok();
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::from_default_env()
-                .add_directive(tracing::level_filters::LevelFilter::INFO.into()),
-        )
+        .with_env_filter(log_filter(spelled.as_deref()))
         .json()
         .init();
+}
+
+/// The log filter for a given `RUST_LOG` spelling, `None` when it is unset.
+///
+/// The default belongs in the absent case and nowhere else. This was
+/// `EnvFilter::from_default_env().add_directive(INFO)`, which reads as "info unless RUST_LOG says
+/// otherwise" and did the opposite for the spelling people actually use: a bare `RUST_LOG=debug`
+/// is a directive with no target, so is the added `info`, and the later one wins — `debug` came
+/// out as info, with nothing to say why. A directive naming a target — `cogwheel_dns_core=debug`
+/// — was more specific than the added one and did work, which is what kept this hidden.
+fn log_filter(spelled: Option<&str>) -> EnvFilter {
+    match spelled.map(str::trim).filter(|value| !value.is_empty()) {
+        // `EnvFilter::new` keeps the directives it understands and warns on stderr about the
+        // rest, which is how §8 treats the configuration it does not recognise.
+        Some(value) => EnvFilter::new(value),
+        None => EnvFilter::new(DEFAULT_LOG_FILTER),
+    }
 }

@@ -194,9 +194,10 @@ fn absorb(
         }
 
         // With `HISTORY_DAYS=0` the flush writes hourly counts and no rows, and those read only
-        // the client, the hour and whether it was blocked. Building the rest would be two
-        // `String`s per answered query, allocated and dropped without anything ever reading
-        // them — on the one configuration whose whole point is to keep no browsing history.
+        // the client, the hour and whether it was blocked — so the rest is left at its default
+        // rather than built. Building it would be two `String`s per answered query, allocated and
+        // dropped without anything ever reading them, on the one configuration whose whole point
+        // is to keep no browsing history.
         pending.push(if write_rows {
             QueryLogEntry {
                 ts,
@@ -212,7 +213,7 @@ fn absorb(
                 ts,
                 client,
                 blocked,
-                ..QueryLogEntry::counted_only()
+                ..QueryLogEntry::default()
             }
         });
     }

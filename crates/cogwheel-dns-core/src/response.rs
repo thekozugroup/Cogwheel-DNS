@@ -54,14 +54,19 @@ pub(crate) fn cacheable_for(response: &Message) -> Duration {
         })
 }
 
+/// SERVFAIL for a request that parsed, echoing its id and opcode so the client can match it.
+pub(crate) fn servfail(request: &Message) -> Message {
+    Message::error_msg(
+        request.metadata.id,
+        request.metadata.op_code,
+        ResponseCode::ServFail,
+    )
+}
+
 /// SERVFAIL for a datagram whose handling blew up after it was received.
 pub(crate) fn error_response_for_payload(payload: &[u8]) -> Message {
     match Message::from_vec(payload) {
-        Ok(request) => Message::error_msg(
-            request.metadata.id,
-            request.metadata.op_code,
-            ResponseCode::ServFail,
-        ),
+        Ok(request) => servfail(&request),
         Err(_) => Message::error_msg(0, OpCode::Query, ResponseCode::ServFail),
     }
 }
@@ -82,39 +87,28 @@ pub(crate) fn build_base_response(request: &Message, code: ResponseCode) -> Mess
     response
 }
 
+/// The answer a blocked name gets, per the policy's mode.
+///
+/// `null_ip` is the only mode that fills the answer section, and it answers the all-zeros address
+/// of the family that was asked for — any other record type gets NOERROR with nothing, because
+/// there is no "this is blocked" value to put in an MX or a TXT. The one-minute TTL is a stub's
+/// memory of the block, short so that unblocking a name is visible in about a minute rather than
+/// for however long a client decided to hold it.
 pub(crate) fn build_blocked_response(request: &Message, mode: BlockMode) -> Message {
-    match mode {
-        BlockMode::NxDomain => build_base_response(request, ResponseCode::NXDomain),
-        BlockMode::NoData => build_base_response(request, ResponseCode::NoError),
-        BlockMode::Refused => build_base_response(request, ResponseCode::Refused),
-        BlockMode::NullIp => build_ip_response(
-            request,
-            Some(Ipv4Addr::new(0, 0, 0, 0)),
-            Some(Ipv6Addr::UNSPECIFIED),
-        ),
-    }
-}
-
-pub(crate) fn build_ip_response(
-    request: &Message,
-    ipv4: Option<Ipv4Addr>,
-    ipv6: Option<Ipv6Addr>,
-) -> Message {
-    let mut response = build_base_response(request, ResponseCode::NoError);
-    for query in &request.queries {
-        let name = query.name().clone();
-        match query.query_type() {
-            RecordType::A => {
-                if let Some(address) = ipv4 {
-                    response.add_answer(Record::from_rdata(name, 60, RData::A(A(address))));
-                }
-            }
-            RecordType::AAAA => {
-                if let Some(address) = ipv6 {
-                    response.add_answer(Record::from_rdata(name, 60, RData::AAAA(AAAA(address))));
-                }
-            }
-            _ => {}
+    let code = match mode {
+        BlockMode::NxDomain => ResponseCode::NXDomain,
+        BlockMode::Refused => ResponseCode::Refused,
+        BlockMode::NullIp | BlockMode::NoData => ResponseCode::NoError,
+    };
+    let mut response = build_base_response(request, code);
+    if mode == BlockMode::NullIp {
+        for query in &request.queries {
+            let unspecified = match query.query_type() {
+                RecordType::A => RData::A(A(Ipv4Addr::UNSPECIFIED)),
+                RecordType::AAAA => RData::AAAA(AAAA(Ipv6Addr::UNSPECIFIED)),
+                _ => continue,
+            };
+            response.add_answer(Record::from_rdata(query.name().clone(), 60, unspecified));
         }
     }
     response

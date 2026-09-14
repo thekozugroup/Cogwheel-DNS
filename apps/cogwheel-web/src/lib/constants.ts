@@ -83,4 +83,11 @@ export const ACTIVITY_BUFFER_LIMIT = 500;
 /** Rows fetched per page of query-log history. */
 export const ACTIVITY_PAGE_SIZE = 200;
 
+/**
+ * How often the live stream reports itself to a screen reader. A household
+ * resolver answers several queries a second; anything finer than this reads as
+ * one uninterrupted sentence and makes the rest of the page unreachable.
+ */
+export const ACTIVITY_ANNOUNCE_INTERVAL_MS = 20_000;
+
 export const PAUSE_OPTIONS = [5, 15, 60] as const;

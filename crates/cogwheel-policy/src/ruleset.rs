@@ -30,11 +30,6 @@ impl RuleSet {
         }
     }
 
-    /// The rule stored for exactly `domain`, ignoring parents.
-    pub fn get(&self, domain: &str) -> Option<Action> {
-        self.0.get(domain).copied()
-    }
-
     /// The action for `name` after checking it and each parent on a label boundary.
     ///
     /// Any matching allow wins over any matching block, whichever is more specific: a household
@@ -53,11 +48,6 @@ impl RuleSet {
             }
         }
         blocked.then_some(Action::Block)
-    }
-
-    /// Number of rules.
-    pub fn len(&self) -> usize {
-        self.0.len()
     }
 
     /// Whether there are no rules.

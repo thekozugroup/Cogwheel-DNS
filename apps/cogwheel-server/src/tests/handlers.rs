@@ -159,6 +159,25 @@ async fn a_device_can_be_limited_to_chosen_lists() {
     .await
     .expect_err("a selection naming no list");
     assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
+
+    // And the refused create left nothing behind. A device row with `all_lists` off and no
+    // selection is subscribed to no list at all: it would resolve everything for that address,
+    // for ever, after a request its owner was told had failed.
+    let catalogue = devices::list(State(harness.state.clone()))
+        .await
+        .expect("list")
+        .data;
+    assert_eq!(catalogue.devices.len(), 1, "{:?}", catalogue.devices);
+    assert_eq!(catalogue.devices[0].name, "Tablet");
+    assert!(
+        !harness
+            .state
+            .runtime
+            .current_policy()
+            .by_ip
+            .contains_key(&"192.168.1.21".parse().expect("address")),
+        "and no scope was minted for the address it named"
+    );
 }
 
 // --------------------------------------------------------------------- rules
@@ -336,6 +355,58 @@ async fn the_sixty_fifth_enabled_list_is_refused() {
     .await
     .expect_err("enabling the 65th");
     assert_eq!(refused.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn two_creates_racing_for_the_last_slot_cannot_both_take_it() {
+    let harness = Harness::new().await;
+    for slot in 0..63 {
+        harness
+            .state
+            .storage
+            .insert_source(NewSource {
+                id: None,
+                name: format!("list {slot}"),
+                url: format!("data:text/plain,slot{slot}.example.com"),
+                kind: "domains".to_owned(),
+                enabled: true,
+            })
+            .await
+            .expect("seed an enabled list");
+    }
+
+    // Both see room for one more before either inserts. Only the count and the insert being one
+    // step under the refresh gate stops them both taking the 64th slot and leaving a 65th list
+    // that `enabled_slots` would drop without telling anyone.
+    let (first, second) = tokio::join!(
+        lists::create(
+            State(harness.state.clone()),
+            ApiJson(list_input("racer a", ADS_LIST, "domains")),
+        ),
+        lists::create(
+            State(harness.state.clone()),
+            ApiJson(list_input("racer b", ADS_LIST, "domains")),
+        ),
+    );
+    assert_eq!(
+        [first.is_err(), second.is_err()]
+            .into_iter()
+            .filter(|refused| *refused)
+            .count(),
+        1,
+        "exactly one of the two racers is refused"
+    );
+
+    let enabled = harness
+        .state
+        .storage
+        .list_sources()
+        .await
+        .expect("read the lists back")
+        .into_iter()
+        .filter(|source| source.enabled)
+        .count();
+    assert_eq!(enabled, 64);
 }
 
 #[tokio::test]
@@ -553,6 +624,11 @@ async fn check_reports_which_step_decided() {
     let decided = verdict(&harness, "tracker.ads.example.com", None).await;
     assert_eq!((decided.verdict, decided.reason), ("block", Reason::List));
     assert_eq!(decided.list.as_deref(), Some("ads"));
+
+    // 11. The CNAME re-check is the one step this route cannot report: it reads the answer the
+    // upstream returned, which `/check` never asks for. It is covered end to end against a stub
+    // upstream in cogwheel-dns-core, by `a_cname_to_a_blocked_target_is_blocked_with_reason_cname`
+    // and `the_cname_recheck_runs_only_below_the_steps_above_it`.
 
     // 3. Filtering off resolves everything.
     let decided = verdict(&harness, "ads.example.com", Some("192.168.1.30")).await;

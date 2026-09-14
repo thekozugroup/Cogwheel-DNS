@@ -9,7 +9,7 @@ use crate::config::{AppConfig, Profile};
 use crate::http::{ApiJson, ApiQuery, Readiness};
 use crate::querylog::EventBus;
 use crate::state::{Cached, RefreshGate, ScopeAllocator, ServerState, TOP_DOMAIN_TTL};
-use crate::{CliAction, parse_cli};
+use crate::{CliAction, log_filter, parse_cli};
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -287,6 +287,16 @@ fn path_dependencies(manifest: &str) -> Vec<&str> {
     dependencies
 }
 
+/// The workspace root, from this crate's own manifest path.
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("apps dir")
+        .parent()
+        .expect("workspace root")
+        .to_owned()
+}
+
 /// The longest a source file in this tree may be.
 ///
 /// Not a style preference: a file this long is one nobody re-reads before changing, and the two
@@ -301,14 +311,10 @@ const MAX_FILE_LINES: usize = 800;
 /// script, which is to say nothing that fails a build.
 #[test]
 fn the_source_tree_keeps_the_shape_the_spec_fixes() {
-    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("apps dir")
-        .parent()
-        .expect("workspace root");
+    let workspace_root = workspace_root();
 
     let mut over_budget = Vec::new();
-    let mut queue = vec![workspace_root.to_owned()];
+    let mut queue = vec![workspace_root.clone()];
     while let Some(directory) = queue.pop() {
         let entries = std::fs::read_dir(&directory).expect("read a source directory");
         for entry in entries.flatten() {
@@ -361,6 +367,51 @@ fn the_source_tree_keeps_the_shape_the_spec_fixes() {
         ],
         "api/ drifted from the module list in spec section 1.5; amend the spec first if the new \
          shape is the right one"
+    );
+}
+
+/// A source file the build needs but git does not know about compiles here and nowhere else: a
+/// clean clone of the commit is missing it. `alloc_guard.rs` reached a release gate exactly that
+/// way — declared by `cogwheel-dns-core`, linked into its test binary, and never `git add`ed —
+/// and nothing in the build noticed, because the file was on disk for everyone who ran it.
+///
+/// Asks git rather than diffing the walk above: `.gitignore` is the project's own answer to "this
+/// file is deliberately not committed", so only the files it does not cover are a mistake.
+#[test]
+fn every_source_file_is_known_to_git() {
+    let workspace_root = workspace_root();
+    if !workspace_root.join(".git").exists() {
+        // A source tarball or a vendored build has nothing to ask.
+        return;
+    }
+    let Ok(listing) = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&workspace_root)
+        .args(["ls-files", "--others", "--exclude-standard"])
+        .output()
+    else {
+        return;
+    };
+    assert!(
+        listing.status.success(),
+        "git ls-files failed: {}",
+        String::from_utf8_lossy(&listing.stderr)
+    );
+
+    let stray: Vec<&str> = std::str::from_utf8(&listing.stdout)
+        .expect("git paths are utf-8 here")
+        .lines()
+        .filter(|path| {
+            matches!(
+                Path::new(path).extension().and_then(|ext| ext.to_str()),
+                Some("rs" | "ts" | "tsx" | "css" | "sql")
+            )
+        })
+        .collect();
+    assert!(
+        stray.is_empty(),
+        "these source files are untracked, so a clean clone of this commit does not build: \
+         {stray:#?} — `git add` them, or ignore them if they really are scratch"
     );
 }
 
@@ -588,6 +639,30 @@ fn failed(action: CliAction) -> String {
         CliAction::Fail(message) => message,
         other => format!("expected Fail, got {other:?}"),
     }
+}
+
+/// `RUST_LOG` has to mean what it says in every spelling, because the one people reach for
+/// during an incident is the bare level.
+#[test]
+fn rust_log_is_read_the_way_it_is_spelled() {
+    use tracing::level_filters::LevelFilter;
+
+    assert_eq!(
+        log_filter(None).max_level_hint(),
+        Some(LevelFilter::INFO),
+        "an unset RUST_LOG is info"
+    );
+    assert_eq!(
+        log_filter(Some("debug")).max_level_hint(),
+        Some(LevelFilter::DEBUG),
+        "a bare level is the level, not the default"
+    );
+    let targeted = log_filter(Some("cogwheel_dns_core=trace,warn"));
+    assert_eq!(targeted.max_level_hint(), Some(LevelFilter::TRACE));
+    assert!(
+        targeted.to_string().contains("cogwheel_dns_core=trace"),
+        "a targeted directive survives: {targeted}"
+    );
 }
 
 #[test]

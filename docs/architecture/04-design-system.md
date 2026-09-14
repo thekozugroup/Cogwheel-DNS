@@ -321,7 +321,7 @@ Cogwheel                         ← wordmark + cogwheel mark, links to Overview
   Overview            ⌘1
   Activity            ⌘2         ← live query stream
   Devices             ⌘3
-  Protection          ⌘4         ← blocklists and block profiles
+  Lists               ⌘4         ← subscribed blocklists and household rules
   Settings            ⌘5         ← read-only summary
 ─────────────────────────────
   [pause control]   Protection active / paused for mm:ss

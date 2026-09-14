@@ -5,7 +5,11 @@ import { api, errorMessage, type QueryRow, type StreamQueryEvent } from "@/lib/a
 import { checkSentence, qtypeLabel, reasonLabel } from "@/lib/derive";
 import { formatClock, pluralize } from "@/lib/format";
 import { notify } from "@/lib/toast";
-import { ACTIVITY_BUFFER_LIMIT, ACTIVITY_PAGE_SIZE } from "@/lib/constants";
+import {
+  ACTIVITY_ANNOUNCE_INTERVAL_MS,
+  ACTIVITY_BUFFER_LIMIT,
+  ACTIVITY_PAGE_SIZE,
+} from "@/lib/constants";
 import { useCogwheel } from "@/data/context";
 import { useQueryStream } from "@/hooks/use-event-stream";
 import { Button } from "@/components/ui/button";
@@ -61,6 +65,14 @@ export function ActivityScreen() {
   const [clearing, setClearing] = React.useState(false);
   const [why, setWhy] = React.useState<string | null>(null);
 
+  // Screen readers and a live table do not mix: wrapping the table in a live
+  // region read out every column of every arriving row, and with Live on by
+  // default that is the page's opening move. A periodic count carries the one
+  // thing the region was there to say — that rows are still landing — and
+  // leaves the table itself to be read on request.
+  const arrived = React.useRef(0);
+  const [announcement, setAnnouncement] = React.useState("");
+
   const filters = React.useMemo(
     () => ({
       client: device !== "all" && device !== "unnamed" ? device : undefined,
@@ -106,6 +118,7 @@ export function ActivityScreen() {
       if (filters.unnamed && frame.deviceName) return;
       if (filters.blocked !== undefined && frame.blocked !== filters.blocked) return;
       if (filters.q && !frame.domain.toLowerCase().includes(filters.q.toLowerCase())) return;
+      arrived.current += 1;
 
       setRows((current) => {
         // The writer flushes to SQLite every 5 s, so a frame and its log row can
@@ -121,6 +134,22 @@ export function ActivityScreen() {
   );
 
   const stream = useQueryStream(live, onFrame);
+
+  React.useEffect(() => {
+    arrived.current = 0;
+    setAnnouncement("");
+    if (!live) return;
+    // A running total rather than a per-tick count: an unchanged sentence is an
+    // unchanged state, and React not re-rendering it is exactly the silence a
+    // stalled stream should get.
+    const timer = window.setInterval(() => {
+      if (arrived.current === 0) return;
+      setAnnouncement(
+        `${pluralize(arrived.current, "new query", "new queries")} since Live was switched on.`,
+      );
+    }, ACTIVITY_ANNOUNCE_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [live]);
 
   const loadOlder = async () => {
     if (nextBefore === null) return;
@@ -353,23 +382,25 @@ export function ActivityScreen() {
             />
           ) : null}
 
-          <div aria-live="polite" role="log">
-            <DataTable
-              columns={columns}
-              empty={{
-                icon: ActivityIcon,
-                title: "No queries yet",
-                description:
-                  "Point a device's DNS at the address on Overview, then reload a page on it — the queries land here within seconds.",
-              }}
-              error={error}
-              loading={loading}
-              onRetry={() => void reload()}
-              rowKey={(row) => row.key}
-              rows={rows}
-              stackBelow="xl"
-            />
-          </div>
+          <p aria-live="polite" className="sr-only">
+            {announcement}
+          </p>
+
+          <DataTable
+            columns={columns}
+            empty={{
+              icon: ActivityIcon,
+              title: "No queries yet",
+              description:
+                "Point a device's DNS at the address on Overview, then reload a page on it — the queries land here within seconds.",
+            }}
+            error={error}
+            loading={loading}
+            onRetry={() => void reload()}
+            rowKey={(row) => row.key}
+            rows={rows}
+            stackBelow="xl"
+          />
         </SectionCard>
       </PageSections>
 

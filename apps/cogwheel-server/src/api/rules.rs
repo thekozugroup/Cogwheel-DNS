@@ -89,20 +89,14 @@ pub async fn remove(
     let id: i64 = id
         .parse()
         .map_err(|_| ApiError::not_found("That rule does not exist."))?;
-    // Read before deleting: which rebuild this needs depends on whether the rule applied to
-    // everyone, and after the delete there is nothing left to ask.
-    let household = state
+    // The delete hands back the row it took, because which rebuild this needs depends on whether
+    // the rule applied to everyone and there is nothing left to ask afterwards.
+    let deleted = state
         .storage
-        .list_rules(None)
+        .delete_rule(id)
         .await?
-        .into_iter()
-        .find(|rule| rule.id == id)
-        .map(|rule| rule.device_id.is_none())
         .ok_or_else(|| ApiError::not_found("That rule does not exist."))?;
-    if !state.storage.delete_rule(id).await? {
-        return Err(ApiError::not_found("That rule does not exist."));
-    }
-    rebuild(&state, rebuild_kind(household)).await?;
+    rebuild(&state, rebuild_kind(deleted.device_id.is_none())).await?;
     ok(Deleted { deleted: true })
 }
 

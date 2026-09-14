@@ -26,7 +26,7 @@ const HANG: u8 = 2;
 
 type Zone = HashMap<(String, RecordType), Vec<Record>>;
 
-fn name(owner: &str) -> Name {
+pub(crate) fn name(owner: &str) -> Name {
     Name::from_ascii(format!("{owner}.")).expect("valid test name")
 }
 
@@ -62,7 +62,7 @@ fn v4(response: &Message) -> Vec<Ipv4Addr> {
 
 /// A policy with one list (slot 0) blocking `blocked`, the given household rules, and
 /// `block_mode` `null_ip`.
-fn policy(
+pub(crate) fn policy(
     blocked: &[&str],
     household: &[(&str, Action)],
     by_ip: HashMap<IpAddr, Scope>,
@@ -85,7 +85,7 @@ fn policy(
     ))
 }
 
-fn resolver_for(upstream: SocketAddr) -> TokioResolver {
+pub(crate) fn resolver_for(upstream: SocketAddr) -> TokioResolver {
     let mut udp = ConnectionConfig::udp();
     udp.port = upstream.port();
     let name_server = NameServerConfig::new(upstream.ip(), true, vec![udp]);
@@ -325,15 +325,71 @@ async fn a_cname_to_a_blocked_target_is_blocked_with_reason_cname() {
     assert_eq!(snapshot.cname_blocks_total, 1);
     assert_eq!(snapshot.blocked_total, 1);
     assert_eq!(snapshot.upstream_failures_total, 0);
+    let logged = harness.next_log().await;
+    assert_eq!(logged.verdict, Verdict::Block(Reason::Cname, 0));
     assert_eq!(
-        harness.next_log().await.verdict,
-        Verdict::Block(Reason::Cname, 0)
+        logged.list.as_deref(),
+        Some("test list"),
+        "Activity has to be able to say which list the alias matched"
     );
 
     // The block is cached like any other, so the second query never reaches the upstream.
     harness.query("alias.test", RecordType::A).await;
     assert_eq!(harness.stub.queries.load(Ordering::Relaxed), 1);
     assert_eq!(harness.runtime.snapshot().blocked_total, 2);
+}
+
+/// §6 step 11 sits below steps 4 to 10, and end to end is where that shows: the re-check runs
+/// only for a name nothing earlier had an opinion about, and what it runs against the target is
+/// steps 8 to 10 — so a protected target is spared there too.
+#[tokio::test]
+async fn the_cname_recheck_runs_only_below_the_steps_above_it() {
+    let zone = zone(&[
+        (
+            "allowed.test",
+            RecordType::A,
+            vec![
+                cname("allowed.test", "tracker.test"),
+                a("tracker.test", [192, 0, 2, 9]),
+            ],
+        ),
+        (
+            "clock.test",
+            RecordType::A,
+            vec![
+                cname("clock.test", "ntp.time.apple.com"),
+                a("ntp.time.apple.com", [192, 0, 2, 10]),
+            ],
+        ),
+    ]);
+    let mut harness = Harness::start(
+        zone,
+        policy(
+            &["tracker.test", "time.apple.com"],
+            &[("allowed.test", Action::Allow)],
+            HashMap::new(),
+        ),
+    )
+    .await;
+
+    // Step 6 decided this name, so the alias behind it is never looked at: a rule is about the
+    // name a person typed, and re-checking it would make an explicit allow mean nothing.
+    let allowed = harness.query("allowed.test", RecordType::A).await;
+    assert_eq!(v4(&allowed), vec![Ipv4Addr::new(192, 0, 2, 9)]);
+    assert_eq!(
+        harness.next_log().await.verdict,
+        Verdict::allow(Reason::HouseholdRule)
+    );
+
+    // Nothing matched this one, so the re-check does run — and finds a protected target, which
+    // step 8 spares however wrong the subscribed list is about it.
+    let protected = harness.query("clock.test", RecordType::A).await;
+    assert_eq!(v4(&protected), vec![Ipv4Addr::new(192, 0, 2, 10)]);
+    assert_eq!(
+        harness.next_log().await.verdict,
+        Verdict::allow(Reason::NoMatch)
+    );
+    assert_eq!(harness.runtime.snapshot().cname_blocks_total, 0);
 }
 
 /// An unknown client and a device whose settings equal the household's produce the same key,
@@ -595,13 +651,6 @@ async fn a_policy_swap_during_a_miss_does_not_cache_the_old_verdict() {
     assert_eq!(harness.runtime.snapshot().cache_hits_total, 0);
 }
 
-#[test]
-fn reserving_descriptors_reports_how_many_were_opened() {
-    assert_eq!(reserve_descriptor_table(0), 0);
-    // Well inside any sane RLIMIT_NOFILE, so all of them fit.
-    assert_eq!(reserve_descriptor_table(128), 128);
-}
-
 #[tokio::test]
 async fn runtime_snapshot_starts_at_zero() {
     let (runtime, _log_rx) = DnsRuntime::new(
@@ -666,6 +715,40 @@ fn the_truncated_form_is_sent_only_when_the_answer_cannot_fit() {
     assert_eq!(&wire_for(&small, &request, 512)[..], &small.bytes[..]);
 }
 
+/// The stack-buffer spelling and hickory's own must agree on every name a stub can ask for, or
+/// the key would carry a form no list entry has.
+#[test]
+fn the_name_written_into_the_key_matches_hickorys_ascii_form() {
+    let mut buffer = [0u8; MAX_NAME_BYTES];
+    for owner in [
+        "Ads.Example.COM.",
+        "xn--80ak6aa92e.test",
+        "_dmarc.example.com",
+        "*.example.com",
+        "com",
+    ] {
+        let parsed = Name::from_ascii(owner).expect("valid test name");
+        let mut spelled = parsed.to_ascii();
+        spelled.make_ascii_lowercase();
+        let expected = spelled.trim_end_matches('.');
+        assert_eq!(
+            ascii_lowercase(&parsed, &mut buffer),
+            Some(expected),
+            "{owner}"
+        );
+    }
+
+    // A label carrying a byte hickory escapes is spelled the allocating way instead, because
+    // agreeing with `to_ascii` matters more than saving the allocation on a name nothing asks for.
+    let escaped = Name::from_ascii("a\\.b.test.").expect("valid test name");
+    assert_eq!(
+        escaped.iter().count(),
+        2,
+        "the dot is inside the first label"
+    );
+    assert_eq!(ascii_lowercase(&escaped, &mut buffer), None);
+}
+
 #[test]
 fn cname_targets_are_checked_against_the_list_tier_only() {
     let policy = policy(&["tracker.test", "time.apple.com"], &[], HashMap::new());
@@ -688,55 +771,6 @@ fn extract_cname_target_reads_record_data() {
     let record = cname("alias.example.com", "tracker.example.com");
     assert_eq!(cname_target(&record), Some(&name("tracker.example.com")));
     assert_eq!(cname_target(&a("alias.example.com", [192, 0, 2, 1])), None);
-}
-
-/// The text of one function in `source`, from its signature to its closing brace.
-fn function_body<'a>(source: &'a str, function: &str) -> &'a str {
-    let signature = format!("fn {function}(");
-    let Some(at) = source.find(&signature) else {
-        unreachable!("{function} is not defined in the source it was looked for in");
-    };
-    let line_start = source[..at].rfind('\n').map_or(0, |newline| newline + 1);
-    let prefix = &source[line_start..at];
-    let indent = prefix.len() - prefix.trim_start().len();
-    let close = format!("\n{}}}\n", " ".repeat(indent));
-    let end = source[at..]
-        .find(&close)
-        .map_or(source.len(), |offset| at + offset);
-    &source[line_start..end]
-}
-
-/// The hit path is a parse, a probe and a memcpy. Anything that builds a `String` per query
-/// is a regression the benchmarks would take a release to notice; this notices at `cargo test`.
-#[test]
-fn the_hit_path_builds_no_strings() {
-    // Two files because the hit path spans them: the listener and the byte-shuffling live in
-    // serve.rs, the decision and the bookkeeping in lib.rs.
-    let hit_path = [
-        (include_str!("serve.rs"), "handle_udp"),
-        (include_str!("lib.rs"), "admit"),
-        (include_str!("lib.rs"), "probe"),
-        (include_str!("lib.rs"), "count_hit"),
-        (include_str!("lib.rs"), "log"),
-        (include_str!("serve.rs"), "wire_for"),
-        (include_str!("serve.rs"), "patch_header"),
-    ];
-    let forbidden = [
-        "to_string()",
-        "format!(",
-        "String::from",
-        "String::new",
-        ".to_owned()",
-    ];
-    for (source, function) in hit_path {
-        let body = function_body(source, function);
-        for pattern in forbidden {
-            assert!(
-                !body.contains(pattern),
-                "{function} uses {pattern} on the cache-hit path"
-            );
-        }
-    }
 }
 
 #[test]

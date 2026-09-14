@@ -11,7 +11,7 @@ Current guardrails:
 - Fetching blocklists over HTTP lives in `crates/cogwheel-lists` and the
   server, never in the hot path.
 - The test `hot_path_crates_remain_llm_and_network_independent` in
-  `crates/cogwheel-dns-core/src/lib.rs` fails if the crate's manifest gains a
+  `crates/cogwheel-dns-core/src/tests.rs` fails if the crate's manifest gains a
   known HTTP-client or LLM-style dependency such as `reqwest`, `ureq`, `surf`,
   `async-openai`, `openai-api-rs`, `ollama-rs`, `rig-core` or `langchain-rust`.
 

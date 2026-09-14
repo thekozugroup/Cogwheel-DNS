@@ -63,6 +63,21 @@ pub async fn rebuild(state: &ServerState, kind: Rebuild) -> Result<PolicyStats, 
     let device_lists = state.storage.list_device_lists(None).await?;
     let rules = state.storage.list_rules(None).await?;
 
+    // `enabled_slots` takes only the first 64. The API refuses a 65th under the refresh gate, so
+    // reaching this means the database was edited behind the server's back — and a list with no
+    // slot still shows a rule count and a green "Last updated" while contributing no bits to any
+    // mask. Name it, rather than let filtering go missing quietly.
+    for dropped in sources
+        .iter()
+        .filter(|source| source.enabled)
+        .skip(MAX_LIST_SLOTS)
+    {
+        tracing::error!(
+            list = %dropped.name,
+            "more than {MAX_LIST_SLOTS} lists are enabled; this one has no slot and filters nothing"
+        );
+    }
+
     // Slots are assigned from this list, so an index built from a different one cannot be
     // reused: the masks it produced would name lists by the wrong bit.
     let enabled: Vec<String> = enabled_slots(&sources)

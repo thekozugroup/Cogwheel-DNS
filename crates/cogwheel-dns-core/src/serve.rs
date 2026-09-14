@@ -1,17 +1,17 @@
 //! The UDP and TCP listeners, and what happens between a datagram arriving and bytes going back.
 //!
-//! Split out from the runtime itself because these are the parts with a socket in hand: a hit is
-//! answered inside the receive loop, and only a miss is handed to a task. Everything that decides
-//! *what* the answer is lives beside `DnsRuntime`.
+//! Split out from the runtime itself because these are the parts with a socket in hand: a hit and
+//! a block are answered inside the receive loop, and only a miss that has to ask the upstream is
+//! handed to a task. Everything that decides *what* the answer is lives beside `DnsRuntime`.
 
-use super::response::error_response_for_payload;
+use super::response::{error_response_for_payload, servfail};
 use super::{
     Admitted, CachedWire, DnsRuntime, DnsRuntimeConfig, MAX_UDP_WORKERS, Probe, RD_BIT, UDP_BUFFER,
     bump,
 };
 use anyhow::{Context, Result};
 use cogwheel_policy::{Reason, Verdict};
-use hickory_proto::op::{Message, ResponseCode};
+use hickory_proto::op::Message;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
@@ -94,7 +94,8 @@ impl DnsRuntime {
         }
     }
 
-    /// One UDP datagram: answer a hit here, hand a miss to a task, never wait on the upstream.
+    /// One UDP datagram: answer a hit or a block here, hand the rest to a task, never wait on
+    /// the upstream.
     async fn handle_udp(
         self: &Arc<Self>,
         socket: &Arc<UdpSocket>,
@@ -126,14 +127,22 @@ impl DnsRuntime {
                 self.log(&admitted, entry.verdict);
             }
             Probe::Miss(stale) => {
+                let verdict = self.decide(&admitted);
+                // A block is answered here, in the loop, and not handed to a task. The whole of
+                // it is a policy lookup and one encode — there is no upstream in a block, so
+                // there is nothing to wait for, and deferring it would add a scheduling hop to
+                // the one query shape a blocklist exists for. It also leaves the miss permits
+                // for the misses that can actually park on the network.
+                if verdict.is_blocked() {
+                    self.finish_udp_miss(socket, admitted, verdict, stale, peer)
+                        .await;
+                    return Ok(());
+                }
                 let Ok(permit) = Arc::clone(&self.miss_permits).try_acquire_owned() else {
                     bump(&self.stats.dropped_total);
-                    let servfail = Message::error_msg(
-                        admitted.request.metadata.id,
-                        admitted.request.metadata.op_code,
-                        ResponseCode::ServFail,
-                    );
-                    socket.send_to(&servfail.to_vec()?, peer).await?;
+                    socket
+                        .send_to(&servfail(&admitted.request).to_vec()?, peer)
+                        .await?;
                     return Ok(());
                 };
                 let runtime = Arc::clone(self);
@@ -141,7 +150,7 @@ impl DnsRuntime {
                 tokio::spawn(async move {
                     let _permit = permit;
                     runtime
-                        .finish_udp_miss(&socket, admitted, stale, peer)
+                        .finish_udp_miss(&socket, admitted, verdict, stale, peer)
                         .await;
                 });
             }
@@ -153,22 +162,18 @@ impl DnsRuntime {
         &self,
         socket: &UdpSocket,
         admitted: Admitted,
+        verdict: Verdict,
         stale: Option<Arc<CachedWire>>,
         peer: SocketAddr,
     ) {
-        let (bytes, verdict) = match self.resolve_miss(&admitted, stale).await {
+        let (bytes, verdict) = match self.resolve_miss(&admitted, verdict, stale).await {
             Ok(wire) => (
                 wire_for(&wire, &admitted.request, admitted.edns_max),
                 wire.verdict,
             ),
             Err(error) => {
                 tracing::warn!(%error, domain = %admitted.key.domain, "failed to resolve query");
-                let servfail = Message::error_msg(
-                    admitted.request.metadata.id,
-                    admitted.request.metadata.op_code,
-                    ResponseCode::ServFail,
-                );
-                match servfail.to_vec() {
+                match servfail(&admitted.request).to_vec() {
                     Ok(bytes) => (bytes, Verdict::allow(Reason::NoMatch)),
                     Err(error) => {
                         tracing::warn!(%error, "failed to encode servfail");
@@ -238,7 +243,10 @@ impl DnsRuntime {
                 self.count_hit(&entry);
                 (entry, true)
             }
-            Probe::Miss(stale) => (self.resolve_miss(&admitted, stale).await?, false),
+            Probe::Miss(stale) => {
+                let verdict = self.decide(&admitted);
+                (self.resolve_miss(&admitted, verdict, stale).await?, false)
+            }
         };
         let bytes = wire_for(&wire, &admitted.request, usize::MAX);
         if hit {

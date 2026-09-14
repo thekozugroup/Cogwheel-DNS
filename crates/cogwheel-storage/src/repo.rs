@@ -319,18 +319,33 @@ impl Storage {
             .await
     }
 
-    /// Create or replace a device, returning the stored row.
+    /// Create or replace a device together with the lists it subscribes to, returning the stored
+    /// row.
+    ///
+    /// One method and one transaction rather than an upsert followed by a selection write,
+    /// because the two are one change: a selection naming a list that does not exist would
+    /// otherwise leave a device row with `all_lists = 0` and no `device_lists` rows behind, and
+    /// that device matches no list at all — it resolves everything, silently, after a request the
+    /// caller was told had failed.
     ///
     /// The conflict target is the id alone, on purpose: a request that re-uses another device's IP
-    /// is a mistake worth a 409, not an instruction to silently merge two devices into one.
+    /// is a mistake worth a 409, not an instruction to silently merge two devices into one. The
+    /// selection is replaced rather than merged, because the UI sends all of it every time;
+    /// duplicates within one request collapse against the primary key.
     ///
     /// # Errors
     ///
-    /// A duplicate `ip_address` is a [`StorageError::is_unique_violation`].
-    pub async fn upsert_device(&self, device: DeviceUpsert) -> Result<Device, StorageError> {
+    /// A duplicate `ip_address` is a [`StorageError::is_unique_violation`] and a `source_id` that
+    /// names no list is a [`StorageError::is_foreign_key_violation`]. Neither writes anything.
+    pub async fn upsert_device(
+        &self,
+        device: DeviceUpsert,
+        source_ids: Vec<String>,
+    ) -> Result<Device, StorageError> {
         self.with_connection(move |connection| {
-            let now = now_seconds(connection)?;
-            Ok(connection.query_row(
+            let transaction = connection.transaction()?;
+            let now = now_seconds(&transaction)?;
+            let stored = transaction.query_row(
                 &format!(
                     "INSERT INTO devices (id, name, ip_address, filtering, all_lists, created_at, updated_at)
                      VALUES (COALESCE(?1, {NEW_UUID}), ?2, ?3, ?4, ?5, ?6, ?6)
@@ -350,7 +365,18 @@ impl Storage {
                     now
                 ],
                 Device::from_row,
-            )?)
+            )?;
+            transaction.execute("DELETE FROM device_lists WHERE device_id = ?1", [&stored.id])?;
+            {
+                let mut insert = transaction.prepare(
+                    "INSERT OR IGNORE INTO device_lists (device_id, source_id) VALUES (?1, ?2)",
+                )?;
+                for source_id in &source_ids {
+                    insert.execute(params![stored.id, source_id])?;
+                }
+            }
+            transaction.commit()?;
+            Ok(stored)
         })
         .await
     }
@@ -376,42 +402,6 @@ impl Storage {
                 "WHERE (?1 IS NULL OR device_id = ?1) ORDER BY device_id, source_id",
                 [&device_id],
             )
-        })
-        .await
-    }
-
-    /// Replace a device's list subscriptions with exactly `source_ids`.
-    ///
-    /// Replace rather than merge because the UI sends the full selection every time; duplicates in
-    /// the request collapse against the primary key.
-    ///
-    /// # Errors
-    ///
-    /// An id that names no list is a [`StorageError::is_foreign_key_violation`], and nothing is
-    /// written — the delete and the inserts share one transaction, so a bad id cannot leave the
-    /// device with no lists at all.
-    pub async fn set_device_lists(
-        &self,
-        device_id: &str,
-        source_ids: Vec<String>,
-    ) -> Result<(), StorageError> {
-        let device_id = device_id.to_owned();
-        self.with_connection(move |connection| {
-            let transaction = connection.transaction()?;
-            transaction.execute(
-                "DELETE FROM device_lists WHERE device_id = ?1",
-                [&device_id],
-            )?;
-            {
-                let mut insert = transaction.prepare(
-                    "INSERT OR IGNORE INTO device_lists (device_id, source_id) VALUES (?1, ?2)",
-                )?;
-                for source_id in &source_ids {
-                    insert.execute(params![device_id, source_id])?;
-                }
-            }
-            transaction.commit()?;
-            Ok(())
         })
         .await
     }
@@ -473,9 +463,27 @@ impl Storage {
         .await
     }
 
-    /// Remove a rule. Returns whether a row was there to remove.
-    pub async fn delete_rule(&self, id: i64) -> Result<bool, StorageError> {
-        self.delete("DELETE FROM rules WHERE id = ?1", id).await
+    /// Remove a rule, returning the row that was removed, or `None` if the id names nothing.
+    ///
+    /// The row comes back because which policy rebuild a delete needs turns on whether the rule
+    /// applied to everyone, and after the delete there is nothing left to ask. Read and delete are
+    /// one statement apart rather than in a transaction because this crate has one connection and
+    /// the caller holds its mutex for both.
+    pub async fn delete_rule(&self, id: i64) -> Result<Option<Rule>, StorageError> {
+        self.with_connection(move |connection| {
+            let rule = connection
+                .query_row(
+                    &format!("{SELECT_RULES} WHERE r.id = ?1"),
+                    [id],
+                    Rule::from_row,
+                )
+                .optional()?;
+            if rule.is_some() {
+                connection.execute("DELETE FROM rules WHERE id = ?1", [id])?;
+            }
+            Ok(rule)
+        })
+        .await
     }
 
     // ---- settings ---------------------------------------------------------------------------
@@ -599,7 +607,7 @@ impl Storage {
         .await
     }
 
-    /// The shared body of the four deletes-by-id.
+    /// The shared body of the deletes-by-id.
     async fn delete<I>(&self, sql: &'static str, id: I) -> Result<bool, StorageError>
     where
         I: rusqlite::ToSql + Send + 'static,

@@ -368,12 +368,27 @@ fn verdict_slot_is_only_reported_for_list_tiers() {
 
 #[test]
 fn reason_round_trips_through_its_stored_form() {
-    for value in 0..=8u8 {
+    // Both spellings pinned outright rather than compared against each other: the numbers are
+    // what `query_log.reason` holds and the names are what `GET /api/v1/queries` answers with, so
+    // neither can be renumbered or re-worded without a migration.
+    const WIRE: [&str; 9] = [
+        "no_match",
+        "device_rule",
+        "household_rule",
+        "protected",
+        "list_allow",
+        "list",
+        "cname",
+        "paused",
+        "unfiltered",
+    ];
+    for (value, spelling) in WIRE.into_iter().enumerate() {
+        let value = u8::try_from(value).expect("nine codes");
         let reason = Reason::from_u8(value).expect("every code below 9 is a reason");
         assert_eq!(reason.as_u8(), value);
         assert_eq!(
             serde_json::to_string(&reason).expect("serialises"),
-            format!("\"{}\"", reason.as_str())
+            format!("\"{spelling}\"")
         );
     }
     assert_eq!(Reason::from_u8(9), None);
@@ -387,9 +402,7 @@ fn rule_set_upserts_and_walks_boundaries() {
         set.insert("example.com", Action::Allow),
         Some(Action::Block)
     );
-    assert_eq!(set.len(), 1);
-    assert_eq!(set.get("example.com"), Some(Action::Allow));
-    assert_eq!(set.get("www.example.com"), None);
+    assert_eq!(set.get_at_boundaries("example.com"), Some(Action::Allow));
     assert_eq!(
         set.get_at_boundaries("www.example.com"),
         Some(Action::Allow)
@@ -413,7 +426,7 @@ fn slots_beyond_the_mask_width_are_ignored() {
     builder.name(64, "overflow");
     let index = builder.build();
     assert!(index.is_empty());
-    assert!(index.names().is_empty());
+    assert!(index.name(64).is_none());
 }
 
 #[test]

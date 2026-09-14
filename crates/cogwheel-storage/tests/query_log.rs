@@ -198,13 +198,16 @@ async fn paging_walks_the_log_newest_first() {
 async fn page_filters_narrow_the_log() {
     let (_dir, storage) = fresh("filters").await;
     storage
-        .upsert_device(DeviceUpsert {
-            id: None,
-            name: "Kids Tablet".to_owned(),
-            ip_address: "10.0.0.1".to_owned(),
-            filtering: true,
-            all_lists: true,
-        })
+        .upsert_device(
+            DeviceUpsert {
+                id: None,
+                name: "Kids Tablet".to_owned(),
+                ip_address: "10.0.0.1".to_owned(),
+                filtering: true,
+                all_lists: true,
+            },
+            Vec::new(),
+        )
         .await
         .expect("device");
     storage
@@ -306,13 +309,16 @@ async fn page_filters_narrow_the_log() {
 async fn unnamed_clients_are_the_ones_without_a_device_row() {
     let (_dir, storage) = fresh("unnamed").await;
     storage
-        .upsert_device(DeviceUpsert {
-            id: None,
-            name: "Kids Tablet".to_owned(),
-            ip_address: "10.0.0.1".to_owned(),
-            filtering: true,
-            all_lists: true,
-        })
+        .upsert_device(
+            DeviceUpsert {
+                id: None,
+                name: "Kids Tablet".to_owned(),
+                ip_address: "10.0.0.1".to_owned(),
+                filtering: true,
+                all_lists: true,
+            },
+            Vec::new(),
+        )
         .await
         .expect("device");
     storage
@@ -351,38 +357,73 @@ async fn top_domains_ranks_blocked_and_queried_separately() {
         batch.push(entry(NOW, "10.0.0.1", "cdn.example.com", false));
     }
     batch.push(entry(NOW, "10.0.0.1", "tracker.example.com", true));
-    // Before the window: counted by neither.
+    // Before the window, and logged after the rows that are inside it: counted by neither table,
+    // and it must not take the window's own rows out of the bounded scan with it.
     batch.push(entry(NOW - 2 * DAY, "10.0.0.1", "old.example.com", true));
     storage
         .insert_batch_with_rollups(batch, true)
         .await
         .expect("batch");
 
-    let blocked = storage
-        .top_domains(true, NOW - DAY, 10)
-        .await
-        .expect("top blocked");
+    let top = storage.top_domains(NOW - DAY, 10).await.expect("top ten");
     assert_eq!(
-        blocked
+        top.blocked
             .iter()
             .map(|row| (row.domain.as_str(), row.count))
             .collect::<Vec<_>>(),
         [("ads.example.com", 5), ("tracker.example.com", 1)]
     );
+    assert_eq!(top.queried[0].domain, "cdn.example.com");
+    assert_eq!(top.queried[0].count, 9);
+    assert_eq!(
+        top.queried.len(),
+        3,
+        "allowed and blocked names both count as queried"
+    );
 
-    let queried = storage
-        .top_domains(false, NOW - DAY, 10)
-        .await
-        .expect("top queried");
-    assert_eq!(queried[0].domain, "cdn.example.com");
-    assert_eq!(queried[0].count, 9);
-    assert_eq!(queried.len(), 3, "allowed and blocked names both count");
+    let capped = storage.top_domains(NOW - DAY, 1).await.expect("limit");
+    assert_eq!(capped.blocked.len(), 1);
+    assert_eq!(capped.queried.len(), 1);
+}
 
-    let capped = storage
-        .top_domains(false, NOW - DAY, 1)
+/// The bound the scan takes is derived from the rollups and is an over-estimate, so a log far
+/// longer than the window still answers for the whole window.
+#[tokio::test]
+async fn top_domains_counts_the_whole_window_of_a_long_log() {
+    let (_dir, storage) = fresh("top-window").await;
+    // Three days of log, one row per minute, with the window's names distinguishable from the
+    // ones that came before it.
+    let minutes = 3 * 24 * 60;
+    let batch: Vec<QueryLogEntry> = (0..minutes)
+        .map(|minute| {
+            let ts = NOW - (minutes - minute) * 60;
+            let inside = ts >= NOW - DAY;
+            entry(
+                ts,
+                "10.0.0.1",
+                if inside {
+                    "new.example.com"
+                } else {
+                    "old.example.com"
+                },
+                true,
+            )
+        })
+        .collect();
+    storage
+        .insert_batch_with_rollups(batch, true)
         .await
-        .expect("limit");
-    assert_eq!(capped.len(), 1);
+        .expect("batch");
+
+    let top = storage.top_domains(NOW - DAY, 10).await.expect("top ten");
+    assert_eq!(
+        top.blocked
+            .iter()
+            .map(|row| (row.domain.as_str(), row.count))
+            .collect::<Vec<_>>(),
+        [("new.example.com", 24 * 60)],
+        "every row of the window, and nothing older"
+    );
 }
 
 #[tokio::test]

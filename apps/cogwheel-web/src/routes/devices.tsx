@@ -1,6 +1,6 @@
 import React from "react";
 import { useSearchParams } from "react-router-dom";
-import { LaptopIcon, PlusIcon, Trash2Icon } from "lucide-react";
+import { LaptopIcon, Trash2Icon, XIcon } from "lucide-react";
 import { api, type Device, type DeviceInput, type RuleAction } from "@/lib/api";
 import { isIpAddress, isRuleDomain, normalizeDomain } from "@/lib/derive";
 import { formatCount, formatRelative } from "@/lib/format";
@@ -83,6 +83,7 @@ export function DevicesScreen() {
   };
 
   const editing = devices.find((device) => device.id === draft.id) ?? null;
+  const started = draft.id !== null || draft.name !== "" || draft.ip_address !== "";
   const ipError = draft.ip_address && !isIpAddress(draft.ip_address) ? "Not an IP address." : undefined;
   const valid = Boolean(draft.name.trim()) && isIpAddress(draft.ip_address);
 
@@ -160,7 +161,7 @@ export function DevicesScreen() {
     {
       key: "lists",
       header: "Lists",
-      hideBelow: "xl",
+      hideBelow: "lg",
       render: (row) =>
         row.all_lists ? "All" : `${formatCount(row.lists.length)} of ${formatCount(enabledLists.length)}`,
     },
@@ -185,7 +186,7 @@ export function DevicesScreen() {
       key: "seen",
       header: "Last seen",
       align: "end",
-      hideBelow: "2xl",
+      hideBelow: "lg",
       render: (row) => (
         <span className="text-muted-foreground text-xs">{formatRelative(row.last_seen_at)}</span>
       ),
@@ -196,17 +197,22 @@ export function DevicesScreen() {
     <PageShell>
       <PageHeader
         actions={
-          <Button onClick={() => select(null)} variant="outline">
-            <PlusIcon aria-hidden />
-            Add device
-          </Button>
+          // All this button can do is empty the form, so it is only drawn when
+          // there is something in it, and says which of the two emptyings it is.
+          // Adding a device is the form's own footer button, a few pixels below.
+          started ? (
+            <Button onClick={() => select(null)} variant="outline">
+              <XIcon aria-hidden />
+              {draft.id ? "Cancel edit" : "Clear form"}
+            </Button>
+          ) : null
         }
         description="Give the addresses on your network names, then decide what each one filters."
         title="Devices"
       />
 
       <PageSections>
-        <div className="grid gap-6 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+        <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
           <SectionCard
             footer={
               <div className="flex flex-wrap items-center gap-2">
@@ -370,6 +376,20 @@ export function DevicesScreen() {
 
           <div className="flex flex-col gap-6">
             <SectionCard title={`Devices (${formatCount(devices.length)})`}>
+              {/* This table lives in the narrower half of a two-column grid, so its
+                  container is 544px on a 1440px window and caps at 553px however
+                  wide the window gets — not the 1104px the page has. Measured
+                  minimum content widths: 406px for the four columns below @lg,
+                  541px for the six at @lg, 589px for all seven at @xl. So the
+                  desktop case is the six at @lg, @xl is reached only between about
+                  960px and 1280px where the page is still one column, and @md is
+                  the last width that holds a table at all; a phone's ~279px
+                  container falls through to cards. Last seen is one of the six
+                  rather than Rules: the card form renders every field, so a column
+                  the desktop cannot reach at any width would show a 1440px browser
+                  strictly less than a 375px phone, and a rule count is on the
+                  device's own edit form beside this table while a last-seen is
+                  nowhere else on the page. */}
               <DataTable
                 columns={columns}
                 empty={{
@@ -385,7 +405,7 @@ export function DevicesScreen() {
                 rowActionLabel={(row) => `Edit ${row.name}`}
                 rowKey={(row) => row.id}
                 rows={devices}
-                stackBelow="xl"
+                stackBelow="md"
               />
             </SectionCard>
 

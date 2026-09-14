@@ -207,12 +207,6 @@ impl RefreshGate {
     }
 }
 
-/// The Overview's two top-ten tables, memoized together because they are one scan apiece.
-pub type TopDomains = (
-    Vec<cogwheel_storage::DomainCount>,
-    Vec<cogwheel_storage::DomainCount>,
-);
-
 /// Everything shared between handlers and background tasks.
 #[derive(Clone)]
 pub struct ServerState {
@@ -237,7 +231,7 @@ pub struct ServerState {
     /// compiled from the lists the refresh is about to replace.
     pub rebuild_lock: Arc<tokio::sync::Mutex<()>>,
     pub refresh_gate: Arc<RefreshGate>,
-    pub top_domains: Arc<Cached<TopDomains>>,
+    pub top_domains: Arc<Cached<cogwheel_storage::TopDomains>>,
     /// Addresses to point a router at, memoized because discovering them shells out.
     pub connect_targets: Arc<Cached<Vec<String>>>,
     pub http: reqwest::Client,

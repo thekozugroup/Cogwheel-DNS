@@ -130,26 +130,12 @@ pub async fn refresh_leased(
 
 /// Fetch one list, record what happened against its row, and cache the body on success.
 async fn refresh_one(state: &ServerState, source: &Source) -> RefreshResult {
-    let report = |outcome: Outcome, rule_count: i64, note: Option<String>| RefreshResult {
-        id: source.id.clone(),
-        name: source.name.clone(),
-        outcome,
-        rule_count,
-        note,
-    };
     let at = now_secs();
 
     let url = match Url::parse(&source.url) {
         Ok(url) => url,
         Err(error) => {
-            return failed(
-                state,
-                source,
-                at,
-                format!("the url is not valid: {error}"),
-                report,
-            )
-            .await;
+            return failed(state, source, at, format!("the url is not valid: {error}")).await;
         }
     };
     // A conditional GET is only honest while the body it refers to is still on disk. With the
@@ -175,9 +161,9 @@ async fn refresh_one(state: &ServerState, source: &Source) -> RefreshResult {
         }) => (text, etag, last_modified),
         Ok(FetchOutcome::NotModified) => {
             record(state, source, FetchStatus::Unchanged { at }).await;
-            return report(Outcome::Unchanged, source.rule_count, source.note.clone());
+            return kept(source, Outcome::Unchanged);
         }
-        Err(error) => return failed(state, source, at, error.to_string(), report).await,
+        Err(error) => return failed(state, source, at, error.to_string()).await,
     };
 
     let kind = SourceKind::from_str(&source.kind).unwrap_or(SourceKind::Domains);
@@ -186,7 +172,7 @@ async fn refresh_one(state: &ServerState, source: &Source) -> RefreshResult {
         // A rejected body is not written: the previous one keeps filtering, and the reason is on
         // the list's row for the operator to read.
         record(state, source, FetchStatus::Failed { at, error: reason }).await;
-        return report(Outcome::Rejected, source.rule_count, source.note.clone());
+        return kept(source, Outcome::Rejected);
     }
 
     let note = protected_note(&source.name, &parsed);
@@ -200,7 +186,6 @@ async fn refresh_one(state: &ServerState, source: &Source) -> RefreshResult {
             source,
             at,
             format!("could not write the cache file: {error}"),
-            report,
         )
         .await;
     }
@@ -216,23 +201,31 @@ async fn refresh_one(state: &ServerState, source: &Source) -> RefreshResult {
         },
     )
     .await;
-    report(Outcome::Updated, rule_count, note)
+    row(source, Outcome::Updated, rule_count, note)
+}
+
+/// The row a list contributes when its previous body is still the one in force: whatever that
+/// body already said about it, under the outcome that left it there.
+fn kept(source: &Source, outcome: Outcome) -> RefreshResult {
+    row(source, outcome, source.rule_count, source.note.clone())
+}
+
+/// One row of a refresh's report, for the list it is about.
+fn row(source: &Source, outcome: Outcome, rule_count: i64, note: Option<String>) -> RefreshResult {
+    RefreshResult {
+        id: source.id.clone(),
+        name: source.name.clone(),
+        outcome,
+        rule_count,
+        note,
+    }
 }
 
 /// Record a failed fetch and report it, keeping whatever body was already cached.
-async fn failed<F>(
-    state: &ServerState,
-    source: &Source,
-    at: i64,
-    error: String,
-    report: F,
-) -> RefreshResult
-where
-    F: Fn(Outcome, i64, Option<String>) -> RefreshResult,
-{
+async fn failed(state: &ServerState, source: &Source, at: i64, error: String) -> RefreshResult {
     tracing::warn!(list = %source.name, url = %source.url, %error, "list refresh failed");
     record(state, source, FetchStatus::Failed { at, error }).await;
-    report(Outcome::Failed, source.rule_count, source.note.clone())
+    kept(source, Outcome::Failed)
 }
 
 /// Write a fetch outcome to the list's row; a storage failure here is logged, not propagated.

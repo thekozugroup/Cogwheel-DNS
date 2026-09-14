@@ -61,13 +61,16 @@ Three concepts, matching the sidebar:
 - **Devices** — name an address on your network, give it its own filtering switch, its own list
   selection, its own rules, and see its own activity log with counts.
 
+One read: the **query log** (the Activity page) — every query as it happens, which device asked,
+and whether it was blocked and why.
+
 A blocked lookup gets a null address back immediately; everything else is forwarded upstream and
 cached, subject to the record's own TTL.
 
 ## Stack
 
-- **Rust** — Axum, Hickory DNS, Moka cache, SQLite via rusqlite. An `aarch64` build is just a
-  cross-build.
+- **Rust** — Axum, Hickory DNS, a hand-rolled sharded wire-answer cache, SQLite via rusqlite. An
+  `aarch64` build is just a cross-build.
 - **React 19** — Vite, TypeScript, [Shark UI](https://shark.vini.one/), Tailwind CSS v4, self-hosted
   Inter. No CDN requests, because the appliance may sit on a LAN with no internet route.
 - **Docker** — multi-arch images for `linux/amd64` and `linux/arm64`.
@@ -80,8 +83,9 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cd apps/cogwheel-web && npm ci && npm run build
 ```
 
-Design and architecture notes live in [docs/architecture/](./docs/architecture/);
-the pre-Phase-3 descriptions they replaced are kept in
+The full contract — every route, the schema, the block-precedence order — is
+[docs/spec-dnsnet-plus-four.md](./docs/spec-dnsnet-plus-four.md). Design and architecture notes live
+in [docs/architecture/](./docs/architecture/); the pre-Phase-3 descriptions they replaced are kept in
 [docs/archive/](./docs/archive/).
 
 ## Benchmarks

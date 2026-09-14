@@ -1,6 +1,6 @@
 //! Subscribed lists: the catalogue, the editor and the refresh button (§3 routes 16–20).
 
-use crate::api::Deleted;
+use crate::api::{Deleted, non_empty};
 use crate::http::{ApiError, ApiJson, ApiResult, ok};
 use crate::policy_build::{MAX_LIST_SLOTS, Rebuild, rebuild};
 use crate::refresh::{self, Outcome, RefreshResult, RefreshTarget, source_is_due};
@@ -148,10 +148,13 @@ pub async fn create(
     let url = valid_url(&input.url)?;
     let kind = valid_kind(&input.kind)?;
     let enabled = input.enabled.unwrap_or(true);
+    // Taken before the count, the way `update` does it: the check and the insert have to be one
+    // step or two creates at 64 enabled lists both pass it and both insert, and the extra list
+    // is then dropped silently by `enabled_slots` instead of refused.
+    let lease = state.refresh_gate.acquire().await;
     if enabled {
         refuse_65th(&state, None).await?;
     }
-    let lease = state.refresh_gate.acquire().await;
 
     let source = state
         .storage
@@ -167,12 +170,6 @@ pub async fn create(
     tracing::info!(list = %source.name, url = %source.url, "list added");
 
     let (outcome, note) = fetch_now(&state, &source.id, &lease).await?;
-    if outcome != Outcome::Updated {
-        // Even with nothing downloaded the list now holds a slot, and slots are assigned from
-        // the enabled set: the policy has to be rebuilt against it before anything else reads a
-        // mask.
-        rebuild(&state, Rebuild::Lists).await?;
-    }
     let list = reread(&state, &source.id).await?;
     ok(ListCreated {
         list,
@@ -232,10 +229,7 @@ pub async fn update(
         // rather than after it: with no cached body the fetch is unconditional (see refresh.rs),
         // which is what stops a server answering 304 for a file this list no longer points at.
         refresh::remove_body(&state.lists_dir, &id).await;
-        let (outcome, _) = fetch_now(&state, &id, &lease).await?;
-        if outcome != Outcome::Updated {
-            rebuild(&state, Rebuild::Lists).await?;
-        }
+        fetch_now(&state, &id, &lease).await?;
     } else {
         rebuild(&state, Rebuild::Lists).await?;
     }
@@ -270,19 +264,28 @@ pub async fn refresh(
     ok(refresh::refresh(&state, target, true).await?)
 }
 
-/// Fetch one list as part of a write, under the gate the caller is already holding.
+/// Fetch one list as part of a write, under the gate the caller is already holding, leaving a
+/// policy compiled from the enabled set however the fetch went.
+///
+/// A fetch that installed a body rebuilds inside `refresh_leased`; one that did not still has to,
+/// because the list holds a slot either way and slots are assigned from the enabled set — a mask
+/// read before that rebuild would name the wrong lists.
 async fn fetch_now(
     state: &ServerState,
     id: &str,
     lease: &RefreshLease<'_>,
 ) -> Result<(Outcome, Option<String>), ApiError> {
     let results = refresh::refresh_leased(state, RefreshTarget::One(id.to_owned()), lease).await?;
-    Ok(results
+    let (outcome, note) = results
         .into_iter()
         .next()
         .map_or((Outcome::Failed, None), |result| {
             (result.outcome, result.note)
-        }))
+        });
+    if outcome != Outcome::Updated {
+        rebuild(state, Rebuild::Lists).await?;
+    }
+    Ok((outcome, note))
 }
 
 /// The sentence a failed or rejected fetch leaves on the list, when there is no note.
@@ -343,15 +346,6 @@ async fn refuse_65th(state: &ServerState, enabling: Option<&str>) -> Result<(), 
         )));
     }
     Ok(())
-}
-
-/// Trim a field and refuse it if nothing is left.
-fn non_empty(value: &str, message: &'static str) -> Result<String, ApiError> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Err(ApiError::bad_request(message));
-    }
-    Ok(trimmed.to_owned())
 }
 
 /// A list url has to be something the fetcher can actually retrieve.

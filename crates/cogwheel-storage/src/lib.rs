@@ -41,7 +41,7 @@ mod query_log;
 mod repo;
 
 pub use query_log::{
-    DomainCount, PruneOutcome, QueryFilter, QueryLogEntry, QueryLogRow, QueryPage,
+    DomainCount, PruneOutcome, QueryFilter, QueryLogEntry, QueryLogRow, QueryPage, TopDomains,
 };
 pub use repo::{
     ClientStats, Device, DeviceList, DeviceUpsert, FetchStatus, HourBucket, NewSource, Rule,

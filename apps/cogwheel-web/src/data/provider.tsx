@@ -94,17 +94,34 @@ export function CogwheelProvider({ children }: { children: React.ReactNode }) {
   const [lastUpdatedAt, setLastUpdatedAt] = React.useState<number | null>(null);
   const [busy, setBusy] = React.useState<string | null>(null);
 
-  const inFlight = React.useRef<AbortController | null>(null);
+  // Two controllers, not one. A five-second poll landing mid-reload must not cancel the refetch
+  // a mutation is awaiting: these writes carry no optimistic patch, so a cancelled refetch means
+  // the row the operator just saved does not appear until the next mutation or the Reload button.
+  // The poll owns `background` and yields to anything foreground; first paint, Reload and every
+  // post-mutation refetch own `foreground`.
+  const foreground = React.useRef<AbortController | null>(null);
+  const background = React.useRef<AbortController | null>(null);
   const announcedOffline = React.useRef(false);
 
-  const run = React.useCallback(async (loaders: Loader[]) => {
-    inFlight.current?.abort();
+  const run = React.useCallback(async (loaders: Loader[], intent: "foreground" | "background") => {
+    // A poll never outranks work the operator started, and never cancels it.
+    if (intent === "background" && foreground.current) return;
     const controller = new AbortController();
-    inFlight.current = controller;
+    if (intent === "foreground") {
+      foreground.current?.abort();
+      background.current?.abort();
+      foreground.current = controller;
+    } else {
+      background.current?.abort();
+      background.current = controller;
+    }
 
     const results = await Promise.allSettled(
       loaders.map(async (loader) => ({ field: loader.field, value: await loader.load(controller.signal) })),
     );
+    // Whoever replaced this run owns the ref now, so only the current occupant clears it.
+    if (foreground.current === controller) foreground.current = null;
+    if (background.current === controller) background.current = null;
     if (controller.signal.aborted) return;
 
     const patch: Record<string, unknown> = {};
@@ -139,8 +156,8 @@ export function CogwheelProvider({ children }: { children: React.ReactNode }) {
     setPhase("ready");
   }, []);
 
-  const reload = React.useCallback(() => run(FULL_LOADERS), [run]);
-  const refresh = React.useCallback(() => run(LIVE_LOADERS), [run]);
+  const reload = React.useCallback(() => run(FULL_LOADERS, "foreground"), [run]);
+  const refresh = React.useCallback(() => run(LIVE_LOADERS, "background"), [run]);
 
   const patch = React.useCallback((partial: Partial<ControlPlaneSnapshot>) => {
     setData((current) => ({ ...current, ...partial }));
@@ -154,7 +171,10 @@ export function CogwheelProvider({ children }: { children: React.ReactNode }) {
       setStale(true);
     }
     void reload();
-    return () => inFlight.current?.abort();
+    return () => {
+      foreground.current?.abort();
+      background.current?.abort();
+    };
   }, [reload]);
 
   // Poll only while the tab is visible, and catch up immediately on refocus.
@@ -206,8 +226,9 @@ export function CogwheelProvider({ children }: { children: React.ReactNode }) {
           typeof successTitle === "function" ? successTitle(result) : successTitle,
           typeof successDetail === "function" ? successDetail(result) : successDetail,
         );
-        if (after === "full") await reload();
-        else if (after === "light") await refresh();
+        // Foreground either way: this is the refetch that makes the write visible, and the
+        // poll may not cancel it.
+        if (after !== "none") await run(after === "full" ? FULL_LOADERS : LIVE_LOADERS, "foreground");
         return result;
       } catch (cause) {
         // Roll the optimistic write back so the control visibly snaps to the
@@ -219,7 +240,7 @@ export function CogwheelProvider({ children }: { children: React.ReactNode }) {
         setBusy(null);
       }
     },
-    [refresh, reload],
+    [run],
   );
 
   const value = React.useMemo<CogwheelContextValue>(

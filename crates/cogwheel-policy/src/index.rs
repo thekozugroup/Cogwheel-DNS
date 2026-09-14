@@ -70,11 +70,6 @@ impl ListIndex {
         masks
     }
 
-    /// List names by slot; `names()[slot]` is the list bit `slot` belongs to.
-    pub fn names(&self) -> &[Arc<str>] {
-        &self.names
-    }
-
     /// The name of the list that owns `slot`, if that slot was registered.
     pub fn name(&self, slot: u8) -> Option<&Arc<str>> {
         self.names.get(usize::from(slot))
@@ -86,6 +81,9 @@ impl ListIndex {
     }
 
     /// Whether no list contributed an entry.
+    ///
+    /// Only tests ask, but [`Self::len`] is the Overview's `rules_loaded`, and clippy's
+    /// `len_without_is_empty` wants the pair: deleting this reintroduces the lint.
     pub fn is_empty(&self) -> bool {
         self.exact.is_empty() && self.suffix.is_empty()
     }

@@ -162,24 +162,30 @@ async fn devices_upsert_in_place_and_addresses_are_unique() {
     let (_dir, storage) = fresh("devices").await;
 
     let created = storage
-        .upsert_device(DeviceUpsert {
-            id: None,
-            name: "Kids Tablet".to_owned(),
-            ip_address: "192.168.1.50".to_owned(),
-            filtering: true,
-            all_lists: true,
-        })
+        .upsert_device(
+            DeviceUpsert {
+                id: None,
+                name: "Kids Tablet".to_owned(),
+                ip_address: "192.168.1.50".to_owned(),
+                filtering: true,
+                all_lists: true,
+            },
+            Vec::new(),
+        )
         .await
         .expect("create");
 
     let renamed = storage
-        .upsert_device(DeviceUpsert {
-            id: Some(created.id.clone()),
-            name: "Tablet".to_owned(),
-            ip_address: "192.168.1.60".to_owned(),
-            filtering: false,
-            all_lists: false,
-        })
+        .upsert_device(
+            DeviceUpsert {
+                id: Some(created.id.clone()),
+                name: "Tablet".to_owned(),
+                ip_address: "192.168.1.60".to_owned(),
+                filtering: false,
+                all_lists: false,
+            },
+            Vec::new(),
+        )
         .await
         .expect("update");
     assert_eq!(renamed.id, created.id, "an update keeps the row");
@@ -191,13 +197,16 @@ async fn devices_upsert_in_place_and_addresses_are_unique() {
     assert_eq!(storage.list_devices().await.expect("list").len(), 1);
 
     let duplicate = storage
-        .upsert_device(DeviceUpsert {
-            id: None,
-            name: "Someone else".to_owned(),
-            ip_address: "192.168.1.60".to_owned(),
-            filtering: true,
-            all_lists: true,
-        })
+        .upsert_device(
+            DeviceUpsert {
+                id: None,
+                name: "Someone else".to_owned(),
+                ip_address: "192.168.1.60".to_owned(),
+                filtering: true,
+                all_lists: true,
+            },
+            Vec::new(),
+        )
         .await
         .expect_err("two devices cannot share an address");
     assert!(duplicate.is_unique_violation(), "{duplicate}");
@@ -220,40 +229,48 @@ async fn device_lists_are_replaced_deduped_and_cascade() {
         })
         .await
         .expect("insert");
-    let device = storage
-        .upsert_device(DeviceUpsert {
-            id: None,
-            name: "Console".to_owned(),
-            ip_address: "192.168.1.70".to_owned(),
-            filtering: true,
-            all_lists: false,
-        })
-        .await
-        .expect("device");
-
-    storage
-        .set_device_lists(
-            &device.id,
-            vec![seeded.id.clone(), seeded.id.clone(), second.id.clone()],
+    // The same device, re-sent with a different selection each time — which is what the one
+    // write it now takes looks like from the API above it.
+    let console = |lists: Vec<String>| {
+        (
+            DeviceUpsert {
+                id: None,
+                name: "Console".to_owned(),
+                ip_address: "192.168.1.70".to_owned(),
+                filtering: true,
+                all_lists: false,
+            },
+            lists,
         )
-        .await
-        .expect("set lists");
+    };
+
+    let (upsert, lists) = console(vec![
+        seeded.id.clone(),
+        seeded.id.clone(),
+        second.id.clone(),
+    ]);
+    let device = storage.upsert_device(upsert, lists).await.expect("device");
     let selected = storage
         .list_device_lists(Some(&device.id))
         .await
         .expect("read lists");
     assert_eq!(selected.len(), 2, "a repeated id is stored once");
 
+    let (mut upsert, lists) = console(vec![second.id.clone()]);
+    upsert.id = Some(device.id.clone());
     storage
-        .set_device_lists(&device.id, vec![second.id.clone()])
+        .upsert_device(upsert, lists)
         .await
         .expect("replace lists");
     let selected = storage.list_device_lists(None).await.expect("read lists");
     assert_eq!(selected.len(), 1, "the selection is replaced, not merged");
     assert_eq!(selected[0].source_id, second.id);
 
+    let (mut upsert, lists) = console(vec!["no-such-list".to_owned()]);
+    upsert.id = Some(device.id.clone());
+    upsert.name = "Renamed".to_owned();
     let unknown = storage
-        .set_device_lists(&device.id, vec!["no-such-list".to_owned()])
+        .upsert_device(upsert, lists)
         .await
         .expect_err("an unknown list id is a foreign key violation");
     assert!(unknown.is_foreign_key_violation(), "{unknown}");
@@ -262,11 +279,20 @@ async fn device_lists_are_replaced_deduped_and_cascade() {
         1,
         "and the transaction left the previous selection alone"
     );
+    assert_eq!(
+        storage
+            .get_device(&device.id)
+            .await
+            .expect("read")
+            .expect("the device is still there")
+            .name,
+        "Console",
+        "a refused selection rolls the row back with it"
+    );
 
-    storage
-        .set_device_lists(&device.id, vec![seeded.id.clone(), second.id.clone()])
-        .await
-        .expect("set lists");
+    let (mut upsert, lists) = console(vec![seeded.id.clone(), second.id.clone()]);
+    upsert.id = Some(device.id.clone());
+    storage.upsert_device(upsert, lists).await.expect("relist");
     assert!(
         storage
             .delete_source(&second.id)
@@ -293,19 +319,55 @@ async fn device_lists_are_replaced_deduped_and_cascade() {
     );
 }
 
+/// A create whose selection is refused must leave nothing behind: a device row with
+/// `all_lists = 0` and no `device_lists` rows subscribes to no list at all, which is a device
+/// that resolves everything after a request the caller was told had failed.
+#[tokio::test]
+async fn a_refused_selection_leaves_no_device_behind() {
+    let (_dir, storage) = fresh("device-atomic").await;
+    let refused = storage
+        .upsert_device(
+            DeviceUpsert {
+                id: None,
+                name: "Console".to_owned(),
+                ip_address: "192.168.1.70".to_owned(),
+                filtering: true,
+                all_lists: false,
+            },
+            vec!["no-such-list".to_owned()],
+        )
+        .await
+        .expect_err("an unknown list id is a foreign key violation");
+    assert!(refused.is_foreign_key_violation(), "{refused}");
+    assert!(
+        storage.list_devices().await.expect("read").is_empty(),
+        "the device row went back with the selection"
+    );
+    assert!(
+        storage
+            .list_device_lists(None)
+            .await
+            .expect("read")
+            .is_empty()
+    );
+}
+
 // ---------------------------------------------------------------- rules
 
 #[tokio::test]
 async fn rules_upsert_per_scope_and_cascade_with_their_device() {
     let (_dir, storage) = fresh("rules").await;
     let device = storage
-        .upsert_device(DeviceUpsert {
-            id: None,
-            name: "Tablet".to_owned(),
-            ip_address: "192.168.1.80".to_owned(),
-            filtering: true,
-            all_lists: true,
-        })
+        .upsert_device(
+            DeviceUpsert {
+                id: None,
+                name: "Tablet".to_owned(),
+                ip_address: "192.168.1.80".to_owned(),
+                filtering: true,
+                all_lists: true,
+            },
+            Vec::new(),
+        )
         .await
         .expect("device");
 
@@ -358,8 +420,20 @@ async fn rules_upsert_per_scope_and_cascade_with_their_device() {
     assert_eq!(remaining.len(), 1, "device rules go with the device");
     assert!(remaining[0].device_id.is_none());
 
-    assert!(storage.delete_rule(remaining[0].id).await.expect("delete"));
-    assert!(!storage.delete_rule(remaining[0].id).await.expect("delete"));
+    let taken = storage
+        .delete_rule(remaining[0].id)
+        .await
+        .expect("delete")
+        .expect("the row that was removed comes back");
+    assert_eq!(taken.id, remaining[0].id);
+    assert!(taken.device_id.is_none(), "and says which scope it was in");
+    assert!(
+        storage
+            .delete_rule(remaining[0].id)
+            .await
+            .expect("delete")
+            .is_none()
+    );
 }
 
 // ---------------------------------------------------------------- settings
@@ -394,13 +468,16 @@ async fn pause_until_round_trips() {
 async fn records_the_api_returns_serialize() {
     let (_dir, storage) = fresh("serde").await;
     let device = storage
-        .upsert_device(DeviceUpsert {
-            id: None,
-            name: "Tablet".to_owned(),
-            ip_address: "10.0.0.1".to_owned(),
-            filtering: true,
-            all_lists: true,
-        })
+        .upsert_device(
+            DeviceUpsert {
+                id: None,
+                name: "Tablet".to_owned(),
+                ip_address: "10.0.0.1".to_owned(),
+                filtering: true,
+                all_lists: true,
+            },
+            Vec::new(),
+        )
         .await
         .expect("device");
     storage

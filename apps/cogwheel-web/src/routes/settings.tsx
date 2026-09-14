@@ -46,7 +46,7 @@ export function SettingsScreen() {
               {settings.upstreams.length === 0 ? (
                 <span className="text-muted-foreground">—</span>
               ) : (
-                <ul className="space-y-1">
+                <ul className="w-fit space-y-1 sm:ml-auto">
                   {settings.upstreams.map((upstream) => (
                     <li className="flex flex-wrap items-center gap-2" key={upstream.spec}>
                       <span className="font-mono text-xs">{upstream.spec}</span>
@@ -155,7 +155,11 @@ export function SettingsScreen() {
               <Mono>v{settings.schema_version}</Mono>
             </Row>
             <Row label="Theme">
-              <ThemeToggle />
+              {/* `sm:text-right` on the value only moves inline content, and the track is
+                  flexible rather than content-sized, so the control hugs and shifts itself. */}
+              <div className="w-fit sm:ml-auto">
+                <ThemeToggle />
+              </div>
             </Row>
           </dl>
         </SectionCard>
@@ -202,13 +206,25 @@ function Row({
   children: React.ReactNode;
 }) {
   return (
-    <div className="grid gap-1 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:gap-6">
+    // Only the value may break mid-token. A database path or a list of upstream
+    // urls is one unbroken word wider than the card, so it needs `wrap-anywhere`;
+    // an env var name is the one string on this page a reader has to retype
+    // exactly, so it gets `wrap-break-word`, which breaks only as a last resort
+    // and, unlike `anywhere`, still reports its full width as min-content. The
+    // label track is floored at that min-content: a value track sized to whatever
+    // the path needed used to starve the label column to nothing, which rendered
+    // `COGWHEEL_STORAGE__DATABASE_URL` one character per line.
+    <div className="grid gap-1 py-3 sm:grid-cols-[minmax(min-content,1fr)_minmax(0,2fr)] sm:gap-6">
       <dt className="min-w-0">
         <span className="block font-medium text-foreground text-sm">{label}</span>
-        {env ? <span className="block font-mono text-muted-foreground text-xs">{env}</span> : null}
+        {env ? (
+          <span className="block wrap-break-word font-mono text-muted-foreground text-xs">
+            {env}
+          </span>
+        ) : null}
         {note ? <span className="block text-muted-foreground text-xs">{note}</span> : null}
       </dt>
-      <dd className="min-w-0 text-foreground text-sm sm:text-right">{children}</dd>
+      <dd className="min-w-0 wrap-anywhere text-foreground text-sm sm:text-right">{children}</dd>
     </div>
   );
 }

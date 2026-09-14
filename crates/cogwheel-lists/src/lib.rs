@@ -606,7 +606,7 @@ mod tests {
         let rescued = parse_list(SourceKind::Adblock, "@@||connectivitycheck.gstatic.com^\n");
         let index = build_index([("one", &blocking), ("two", &rescued)]);
         assert_eq!(protected_hits(&index), vec!["pool.ntp.org", "ntp.org"]);
-        assert_eq!(index.names().len(), 2);
+        assert_eq!(index.name(0).map(|n| &**n), Some("one"));
         assert_eq!(index.name(1).map(|n| &**n), Some("two"));
     }
 

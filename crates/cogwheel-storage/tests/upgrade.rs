@@ -201,9 +201,11 @@ async fn a_v0_database_upgrades_to_v1() {
         "query_stats_hourly",
     ] {
         assert!(has_table(&path, current), "{current} should be there");
+    }
+    for moved_aside in ["settings_v0", "sources_v0", "devices_v0"] {
         assert!(
-            !has_table(&path, &format!("{current}_v1")),
-            "{current}_v1 should have been renamed away"
+            !has_table(&path, moved_aside),
+            "{moved_aside} should have been dropped once its rows were copied across"
         );
     }
 }
@@ -243,7 +245,7 @@ async fn an_upgraded_schema_matches_a_fresh_one() {
     assert_eq!(
         schema_fingerprint(&upgraded),
         schema_fingerprint(&fresh_path),
-        "the upgrade must produce the same schema as schema_v1.sql"
+        "the upgrade must leave the same schema schema_v1.sql produces, and nothing beside it"
     );
 }
 
@@ -275,8 +277,8 @@ async fn a_failed_upgrade_rolls_back_and_names_the_backup() {
     assert_eq!(user_version(&path), 0, "the database is untouched");
     assert!(has_table(&path, "rulesets"), "and still v0");
     assert!(
-        !has_table(&path, "sources_v1"),
-        "the rollback took the half-built tables"
+        !has_table(&path, "sources_v0"),
+        "the rollback put the tables the upgrade moved aside back"
     );
     assert!(backup.exists());
 

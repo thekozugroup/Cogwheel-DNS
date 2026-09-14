@@ -53,21 +53,6 @@ impl Reason {
             _ => return None,
         })
     }
-
-    /// The API spelling, identical to the serde form.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::NoMatch => "no_match",
-            Self::DeviceRule => "device_rule",
-            Self::HouseholdRule => "household_rule",
-            Self::Protected => "protected",
-            Self::ListAllow => "list_allow",
-            Self::List => "list",
-            Self::Cname => "cname",
-            Self::Paused => "paused",
-            Self::Unfiltered => "unfiltered",
-        }
-    }
 }
 
 /// The outcome of evaluating one name.

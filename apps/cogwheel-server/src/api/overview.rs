@@ -2,13 +2,15 @@
 //!
 //! Polled every five seconds by every open tab, so nothing here may scan the query log: the
 //! 24-hour figures come from the hourly rollups, and the two top-ten tables — the only reads that
-//! do touch the log — are memoized for a minute and shared by every caller.
+//! do touch the log — come from one bounded pass over it, memoized for a minute and shared by
+//! every caller.
 
 use crate::api::runtime::paused_until;
 use crate::http::{ApiResult, ok};
 use crate::state::{ServerState, now_secs};
 use axum::extract::State;
-use cogwheel_storage::{DomainCount, HourBucket};
+use cogwheel_dns_core::DnsRuntimeSnapshot;
+use cogwheel_storage::{DomainCount, HourBucket, TopDomains};
 use serde::Serialize;
 use std::net::Ipv4Addr;
 
@@ -22,28 +24,6 @@ const DAY_SECS: i64 = 86_400;
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct Protection {
     pub paused_until: Option<i64>,
-}
-
-/// The lifetime counters the runtime keeps (§5.1).
-///
-/// A subset of the runtime's snapshot: the sample counts behind the two averages are debugging
-/// detail, and putting them on a page that polls every five seconds would invite someone to
-/// build a dashboard on them.
-#[derive(Debug, Clone, Copy, Serialize)]
-pub struct RuntimeCounters {
-    pub queries_total: u64,
-    pub blocked_total: u64,
-    pub cache_hits_total: u64,
-    pub cache_expired_total: u64,
-    pub stale_served_total: u64,
-    pub upstream_failures_total: u64,
-    pub cname_blocks_total: u64,
-    /// Misses refused because the runtime was saturated; answered SERVFAIL.
-    pub dropped_total: u64,
-    /// Answered queries whose log entry was dropped because the writer was behind.
-    pub log_dropped_total: u64,
-    pub cache_hit_latency_avg_ns: u64,
-    pub cache_miss_latency_avg_ns: u64,
 }
 
 /// The last 24 hours, entirely from the rollups.
@@ -81,7 +61,8 @@ pub struct Connect {
 #[derive(Debug, Clone, Serialize)]
 pub struct Overview {
     pub protection: Protection,
-    pub runtime: RuntimeCounters,
+    /// The lifetime counters of §5.1, as the runtime keeps them.
+    pub runtime: DnsRuntimeSnapshot,
     pub last_24h: Last24h,
     pub lists: Lists,
     pub top_blocked: Vec<DomainCount>,
@@ -92,32 +73,19 @@ pub struct Overview {
 /// Route 3: the whole Overview in one call.
 pub async fn overview(State(state): State<ServerState>) -> ApiResult<Overview> {
     let now = now_secs();
-    let snapshot = state.runtime.snapshot();
     let policy = state.runtime.current_policy();
 
     let per_hour = state.storage.hourly_24h(now).await?;
     let clients = state.storage.per_client_24h(now).await?;
     let unnamed = state.storage.unnamed_clients_24h(now).await?;
     let sources = state.storage.list_sources().await?;
-    let (top_blocked, top_queried) = top_domains(&state, now).await?;
+    let top = top_domains(&state, now).await?;
 
     ok(Overview {
         protection: Protection {
             paused_until: paused_until(&state),
         },
-        runtime: RuntimeCounters {
-            queries_total: snapshot.queries_total,
-            blocked_total: snapshot.blocked_total,
-            cache_hits_total: snapshot.cache_hits_total,
-            cache_expired_total: snapshot.cache_expired_total,
-            stale_served_total: snapshot.stale_served_total,
-            upstream_failures_total: snapshot.upstream_failures_total,
-            cname_blocks_total: snapshot.cname_blocks_total,
-            dropped_total: snapshot.dropped_total,
-            log_dropped_total: snapshot.log_dropped_total,
-            cache_hit_latency_avg_ns: snapshot.cache_hit_latency_avg_ns,
-            cache_miss_latency_avg_ns: snapshot.cache_miss_latency_avg_ns,
-        },
+        runtime: state.runtime.snapshot(),
         last_24h: Last24h {
             queries: per_hour.iter().map(|bucket| bucket.queries).sum(),
             blocked: per_hour.iter().map(|bucket| bucket.blocked).sum(),
@@ -133,8 +101,8 @@ pub async fn overview(State(state): State<ServerState>) -> ApiResult<Overview> {
             last_ok_at: sources.iter().filter_map(|source| source.last_ok_at).max(),
             downloaded: sources.iter().any(|source| source.last_ok_at.is_some()),
         },
-        top_blocked,
-        top_queried,
+        top_blocked: top.blocked,
+        top_queried: top.queried,
         connect: Connect {
             targets: connect_targets(&state).await,
             port: state.config.advertised_dns_port,
@@ -142,18 +110,15 @@ pub async fn overview(State(state): State<ServerState>) -> ApiResult<Overview> {
     })
 }
 
-/// The two top-ten tables, scanned at most once a minute however many tabs are open.
-async fn top_domains(
-    state: &ServerState,
-    now: i64,
-) -> Result<(Vec<DomainCount>, Vec<DomainCount>), crate::http::ApiError> {
+/// The two top-ten tables, read at most once a minute however many tabs are open.
+async fn top_domains(state: &ServerState, now: i64) -> Result<TopDomains, crate::http::ApiError> {
     if let Some(memoized) = state.top_domains.get() {
         return Ok(memoized);
     }
-    let since = now - DAY_SECS;
-    let blocked = state.storage.top_domains(true, since, TOP_DOMAINS).await?;
-    let queried = state.storage.top_domains(false, since, TOP_DOMAINS).await?;
-    let fresh = (blocked, queried);
+    let fresh = state
+        .storage
+        .top_domains(now - DAY_SECS, TOP_DOMAINS)
+        .await?;
     state.top_domains.set(fresh.clone());
     Ok(fresh)
 }

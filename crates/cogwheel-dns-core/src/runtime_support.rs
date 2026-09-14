@@ -101,3 +101,15 @@ pub(crate) fn write_recover<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<
     lock.write()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::reserve_descriptor_table;
+
+    #[test]
+    fn reserving_descriptors_reports_how_many_were_opened() {
+        assert_eq!(reserve_descriptor_table(0), 0);
+        // Well inside any sane RLIMIT_NOFILE, so all of them fit.
+        assert_eq!(reserve_descriptor_table(128), 128);
+    }
+}

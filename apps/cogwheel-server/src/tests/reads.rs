@@ -393,10 +393,9 @@ async fn a_rebuild_that_reuses_the_index_notices_the_slots_moving() {
         "last.example.com\n",
     );
     rebuild(&state, Rebuild::Lists).await.expect("compile");
-    assert_eq!(
-        state.runtime.current_policy().index.names(),
-        ["last".into()]
-    );
+    let policy = state.runtime.current_policy();
+    assert_eq!(policy.index.name(0).map(|name| &**name), Some("last"));
+    assert!(policy.index.name(1).is_none());
 
     // Inserted straight into storage, as a list whose first fetch failed would be: no rebuild
     // ran, and its id sorts ahead of the one already indexed.
@@ -410,9 +409,13 @@ async fn a_rebuild_that_reuses_the_index_notices_the_slots_moving() {
     );
 
     rebuild(&state, Rebuild::Devices).await.expect("re-scope");
+    let policy = state.runtime.current_policy();
     assert_eq!(
-        state.runtime.current_policy().index.names(),
-        ["first".into(), "last".into()],
+        (
+            policy.index.name(0).map(|name| &**name),
+            policy.index.name(1).map(|name| &**name)
+        ),
+        (Some("first"), Some("last")),
         "reusing the old index would have given slot 0 to the wrong list"
     );
 }

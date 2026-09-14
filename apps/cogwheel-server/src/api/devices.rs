@@ -5,7 +5,7 @@
 //! the same kind of change: the address falls back to the household scope, whose cached answers
 //! were already correct for it.
 
-use crate::api::Deleted;
+use crate::api::{Deleted, non_empty};
 use crate::http::{ApiError, ApiJson, ApiResult, ok};
 use crate::policy_build::{Rebuild, rebuild};
 use crate::state::{ServerState, now_secs};
@@ -65,21 +65,11 @@ pub struct DeviceInput {
     pub lists: Option<Vec<String>>,
 }
 
-/// A validated device input: name, canonical address, and the rest.
-struct Validated {
-    name: String,
-    ip_address: String,
-    filtering: bool,
-    all_lists: bool,
-    lists: Vec<String>,
-}
-
 impl DeviceInput {
-    fn validate(self) -> Result<Validated, ApiError> {
-        let name = self.name.trim().to_owned();
-        if name.is_empty() {
-            return Err(ApiError::bad_request("Give the device a name."));
-        }
+    /// The row to write, with `id` for the caller to fill in, and the list selection to replace
+    /// this device's with.
+    fn validate(self) -> Result<(DeviceUpsert, Vec<String>), ApiError> {
+        let name = non_empty(&self.name, "Give the device a name.")?;
         let address = self.ip_address.trim();
         let ip: IpAddr = address
             .parse()
@@ -87,15 +77,18 @@ impl DeviceInput {
         let mut lists = self.lists.unwrap_or_default();
         lists.sort_unstable();
         lists.dedup();
-        Ok(Validated {
-            name,
-            // Stored canonically so that the query log's `client` text — which is an address
-            // formatted by the runtime — joins against it.
-            ip_address: ip.to_string(),
-            filtering: self.filtering.unwrap_or(true),
-            all_lists: self.all_lists.unwrap_or(true),
+        Ok((
+            DeviceUpsert {
+                id: None,
+                name,
+                // Stored canonically so that the query log's `client` text — which is an address
+                // formatted by the runtime — joins against it.
+                ip_address: ip.to_string(),
+                filtering: self.filtering.unwrap_or(true),
+                all_lists: self.all_lists.unwrap_or(true),
+            },
             lists,
-        })
+        ))
     }
 }
 
@@ -151,9 +144,8 @@ pub async fn create(
     State(state): State<ServerState>,
     ApiJson(input): ApiJson<DeviceInput>,
 ) -> ApiResult<DeviceView> {
-    let input = input.validate()?;
-    let device = store(&state, None, input).await?;
-    ok(device)
+    let (device, lists) = input.validate()?;
+    ok(store(&state, device, lists).await?)
 }
 
 /// Route 11: rename, re-address, or change what a device filters.
@@ -162,14 +154,14 @@ pub async fn update(
     Path(id): Path<String>,
     ApiJson(input): ApiJson<DeviceInput>,
 ) -> ApiResult<DeviceView> {
-    let input = input.validate()?;
+    let (mut device, lists) = input.validate()?;
     // Checked first because the upsert's conflict target is the id: a PUT to an id that does not
     // exist would otherwise create a device rather than answering 404.
     if state.storage.get_device(&id).await?.is_none() {
         return Err(ApiError::not_found("That device does not exist."));
     }
-    let device = store(&state, Some(id), input).await?;
-    ok(device)
+    device.id = Some(id);
+    ok(store(&state, device, lists).await?)
 }
 
 /// Route 12: forget a device. Its list selection and its own rules go with it.
@@ -188,27 +180,18 @@ pub async fn remove(
 /// Write a device and its list selection, then re-scope.
 async fn store(
     state: &ServerState,
-    id: Option<String>,
-    input: Validated,
+    upsert: DeviceUpsert,
+    lists: Vec<String>,
 ) -> Result<DeviceView, ApiError> {
+    // The row and the selection go in together, in storage's one transaction: a refused
+    // selection must leave no device behind, and a device subscribed to nothing filters nothing.
+    // The selection is sent whole every time, including the empty one an `all_lists` device has,
+    // so a device switching back to "every list" does not keep a stale selection.
     let device = state
         .storage
-        .upsert_device(DeviceUpsert {
-            id,
-            name: input.name,
-            ip_address: input.ip_address,
-            filtering: input.filtering,
-            all_lists: input.all_lists,
-        })
+        .upsert_device(upsert, lists.clone())
         .await
-        .map_err(duplicate_address)?;
-    // Sent whole every time, including the empty selection an `all_lists` device has, so a
-    // device that switches back to "every list" does not keep a stale selection.
-    state
-        .storage
-        .set_device_lists(&device.id, input.lists.clone())
-        .await
-        .map_err(unknown_list)?;
+        .map_err(rejected)?;
     rebuild(state, Rebuild::Devices).await?;
 
     let rules = state.storage.list_rules(Some(&device.id)).await?;
@@ -219,7 +202,7 @@ async fn store(
         .into_iter()
         .find(|client| client.client == device.ip_address);
     tracing::info!(device = %device.name, address = %device.ip_address, "device saved");
-    Ok(view(&device, input.lists, &rules, stats.as_ref()))
+    Ok(view(&device, lists, &rules, stats.as_ref()))
 }
 
 /// Assemble one device's view from the rows that belong to it.
@@ -251,16 +234,13 @@ fn view(
     }
 }
 
-/// Two devices cannot share an address: the address is how a query is attributed.
-fn duplicate_address(error: StorageError) -> ApiError {
+/// The two ways a device write is the caller's mistake rather than a fault: an address another
+/// device already answers to — the address is how a query is attributed — and a selection naming
+/// a list that does not exist.
+fn rejected(error: StorageError) -> ApiError {
     if error.is_unique_violation() {
         return ApiError::conflict("Another device already uses that address.");
     }
-    error.into()
-}
-
-/// A selection naming a list that does not exist is the caller's mistake, not a server error.
-fn unknown_list(error: StorageError) -> ApiError {
     if error.is_foreign_key_violation() {
         return ApiError::bad_request("That selection names a list that does not exist.");
     }

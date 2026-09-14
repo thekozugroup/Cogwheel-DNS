@@ -207,14 +207,20 @@ export function DataTable<Row>({
       {/* Stacked form, for containers too narrow to hold the table. */}
       <ul className={cn("flex flex-col gap-2", CARDS_BELOW[stackBelow])}>
         {rows.map((row) => {
+          // A column that renders nothing for this row — Lists' Status, which is
+          // blank whenever the list is simply working — would print a label with
+          // an empty space beside it. In the table form the header carries the
+          // column; in a card there is nothing left to explain the gap.
+          const cells = valueColumns
+            .map((column) => ({ column, value: column.render(row) }))
+            .filter(({ value }) => value !== null && value !== undefined && value !== false && value !== "");
+
           const body = (
             <dl className="grid gap-1.5">
-              {valueColumns.map((column) => (
+              {cells.map(({ column, value }) => (
                 <div className="flex items-start justify-between gap-3" key={column.key}>
                   <dt className="shrink-0 text-muted-foreground text-xs">{column.header}</dt>
-                  <dd className="stacked-value min-w-0 text-right text-foreground text-sm">
-                    {column.render(row)}
-                  </dd>
+                  <dd className="stacked-value min-w-0 text-right text-foreground text-sm">{value}</dd>
                 </div>
               ))}
             </dl>

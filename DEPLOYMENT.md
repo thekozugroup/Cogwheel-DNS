@@ -373,7 +373,7 @@ From a *different* device on the network, after pointing it at Cogwheel:
 
 ```sh
 nslookup example.com
-nslookup doubleclick.net      # 0.0.0.0, once the default list has downloaded
+nslookup googlesyndication.com      # 0.0.0.0, once the default list has downloaded
 ```
 
 Then open `http://<host>:8080` and confirm the Overview page shows the query.
@@ -532,7 +532,7 @@ silently ignored rather than reported.
 | `COGWHEEL_RETENTION__QUERY_LOG_MAX_ROWS` | `250000` | Hard cap on query-log rows, enforced by the same prune. |
 | `COGWHEEL_RETENTION__PRUNE_INTERVAL_SECS` | `3600` | How often the prune runs. Floored at 60 s. |
 | `COGWHEEL_WEB_DIST_DIR` | *(search path)* | Directory containing `index.html`. |
-| `RUST_LOG` | `info` | tracing filter. An `info` directive is always added, so this can only widen it. |
+| `RUST_LOG` | `info` | tracing/`EnvFilter` syntax. Used as-is when set — it replaces the `info` default rather than layering on top of it, so it can narrow the level too (e.g. `RUST_LOG=error`), not only widen it. |
 
 Profile defaults:
 
@@ -619,26 +619,28 @@ larger security decision than ad blocking and not something this does.
 
 ### 9.3 Caching, and what to do when a site breaks
 
-**Cogwheel caches answers.** Two caches, both bounded at 10,000 entries:
+**Cogwheel caches answers.** One cache, bounded at 10,000 entries, keyed by
+policy scope, query type and name. Every entry carries two lifetimes:
 
-| Cache | Holds | Lifetime |
+| Phase | Lifetime | Served |
 |---|---|---|
-| Response cache | the answer for a name, per policy scope | the record's own TTL, clamped to 5 s – 1 h |
-| Fallback cache | last known-good answer per name | up to 24 h, served **only** when upstream fails |
+| Fresh | the record's own TTL, clamped to 5 s – 1 h | on every matching query |
+| Stale | up to 24 h past the fresh lifetime | **only** after the upstream has failed to refresh it |
 
-The response cache honours the TTL the authoritative server published, taking
+The fresh phase honours the TTL the authoritative server published, taking
 the shortest TTL in the answer. That matters more than it sounds: a cache that
 ignores TTLs keeps handing out an address after the site has moved, and
 CDN failover, geo-routing and blue/green deploys all rely on short TTLs being
 respected. Answers with no records at all (`NXDOMAIN`, `NODATA`) are held for
 only 60 s, so a host that has just been provisioned does not stay unreachable.
 
-The fallback cache deliberately serves *stale* answers, but only after the
-upstream has already failed — an hour-old address beats no DNS at all.
+Past the fresh lifetime the same entry can still be served, but deliberately
+only as a *stale* fallback once the upstream has already failed to answer — a
+day-old address beats no DNS at all.
 
-A policy change (list edit, device or rule edit) invalidates the response
-cache immediately, so an unblock takes effect on the next query rather than
-whenever the entry happens to age out.
+A policy change (list edit, device or rule edit) invalidates the whole cache
+immediately, so an unblock takes effect on the next query rather than whenever
+an entry happens to age out.
 
 #### When a site breaks
 

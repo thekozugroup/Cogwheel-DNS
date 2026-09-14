@@ -2,7 +2,7 @@
 
 This guide is for someone using Cogwheel as a DNS filtering appliance.
 
-## Open the Dashboard
+## Open the Web UI
 
 Visit the Cogwheel web UI in your browser:
 

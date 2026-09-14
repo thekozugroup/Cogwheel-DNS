@@ -3,8 +3,9 @@
 //! One [`DnsRuntime`] per process. It owns the upstream resolver, the current [`Policy`] and a
 //! single cache keyed by `(scope, qtype, name)`. A hit is answered inside the receive loop — a
 //! memcpy plus a two-byte id patch — so a slow or dead upstream can never starve the names the
-//! household already knows. A miss is handed to a task under a semaphore, and the loop is back at
-//! `recv_from` before the upstream has been asked anything.
+//! household already knows, and so is a block, which is decided from the question alone. Only a
+//! miss that has to ask the upstream is handed to a task under a semaphore, and the loop is back
+//! at `recv_from` before the upstream has been asked anything.
 //!
 //! The decision itself lives in `cogwheel-policy`; this crate only decides *when* to ask it
 //! (once per miss, never per hit) and what to do with the upstream's answer.
@@ -29,6 +30,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{Semaphore, mpsc};
 
+#[cfg(test)]
+mod alloc_guard;
 mod response;
 mod runtime_support;
 mod serve;
@@ -69,8 +72,11 @@ const STALE_CEILING: Duration = Duration::from_secs(86_400);
 /// Half a minute makes an outage cost one timeout per name per 30 s, with hits answered inline.
 const STALE_REFRESH: Duration = Duration::from_secs(30);
 
-/// Misses in flight at once. Past this a miss is answered SERVFAIL and counted as dropped rather
-/// than queued behind an upstream that is not answering.
+/// Upstream lookups in flight at once. Past this a miss is answered SERVFAIL and counted as
+/// dropped rather than queued behind an upstream that is not answering.
+///
+/// A blocked name takes no permit: nothing about it waits on the network, so a device hammering
+/// a tracker cannot spend the budget the household's real lookups need.
 const MISS_PERMITS: usize = 512;
 
 /// Log entries buffered between the hot path and whoever drains them.
@@ -91,6 +97,11 @@ const MAX_PLAIN_UDP_PAYLOAD: usize = 512;
 
 /// CNAME targets checked per upstream answer.
 const MAX_CNAME_TARGETS: usize = 8;
+
+/// The longest name the wire can carry (RFC 1035 §2.3.4), which is also the longest text form
+/// `admit` can be asked to spell: every label byte is one character and the dots replace the
+/// length octets.
+const MAX_NAME_BYTES: usize = 255;
 
 /// The RD flag, bit 0 of the third header byte.
 const RD_BIT: u8 = 0x01;
@@ -124,6 +135,11 @@ pub struct LogEntry {
 }
 
 /// What the runtime has done since it started.
+///
+/// Serialised straight into `GET /api/v1/overview`, so the two sample counts behind the averages
+/// are `skip`ped rather than dropped: they are how a test or a benchmark tells "0 ns because it
+/// was fast" from "0 ns because nothing was measured", and they are not something a five-second
+/// poll should invite anyone to build a dashboard on.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DnsRuntimeSnapshot {
     pub queries_total: u64,
@@ -138,8 +154,10 @@ pub struct DnsRuntimeSnapshot {
     /// Answered queries whose log entry was dropped because the writer was behind.
     pub log_dropped_total: u64,
     pub cache_hit_latency_avg_ns: u64,
+    #[serde(skip)]
     pub cache_hit_samples: u64,
     pub cache_miss_latency_avg_ns: u64,
+    #[serde(skip)]
     pub cache_miss_samples: u64,
 }
 
@@ -473,13 +491,20 @@ impl DnsRuntime {
         };
         bump(&self.stats.queries_total);
 
-        // `to_ascii`, not `to_utf8`: lists carry `xn--` labels as they appear on the wire, and
-        // the UTF-8 form decodes them to Unicode, which nothing would ever match against. It
-        // also sizes the String exactly, where the UTF-8 form grows it through `format!`.
-        let domain = {
-            let mut name = query.name().to_ascii();
-            name.make_ascii_lowercase();
-            Arc::<str>::from(name.trim_end_matches('.'))
+        // One allocation: the `Arc` the key and the log entry share. The name is spelled into a
+        // stack buffer first, because `Name::to_ascii` would build a `String` that exists only
+        // to be copied into that `Arc` and dropped.
+        let mut buffer = [0u8; MAX_NAME_BYTES];
+        let domain = match ascii_lowercase(query.name(), &mut buffer) {
+            Some(name) => Arc::<str>::from(name),
+            // `to_ascii`, not `to_utf8`: lists carry `xn--` labels as they appear on the wire,
+            // and the UTF-8 form decodes them to Unicode, which nothing would ever match
+            // against.
+            None => {
+                let mut name = query.name().to_ascii();
+                name.make_ascii_lowercase();
+                Arc::<str>::from(name.trim_end_matches('.'))
+            }
         };
         let qtype = u16::from(query.query_type());
         let edns_max = usize::from(request.max_payload());
@@ -541,30 +566,39 @@ impl DnsRuntime {
         }
     }
 
-    /// Decide the name, ask the upstream if allowed, cache what came back.
+    /// What the policy says about a name that was not in the cache — §6 steps 1 to 10.
+    ///
+    /// A few hash probes and no I/O, which is what lets the receive loop run it: a block decided
+    /// here is answered without ever reaching [`Self::resolve_miss`] and its upstream.
+    fn decide(&self, admitted: &Admitted) -> Verdict {
+        if admitted.paused {
+            return Verdict::allow(Reason::Paused);
+        }
+        let scope = admitted.policy.scope(admitted.key.scope);
+        evaluate(&admitted.policy, scope, &admitted.key.domain)
+    }
+
+    /// Answer a miss under the verdict [`Self::decide`] reached: a block from the question
+    /// itself, anything else from the upstream, and cache what came back.
     ///
     /// Returns the entry to send. It is in the cache unless it is a SERVFAIL, which is never
     /// cached, or the stale entry handed in, which already is.
     async fn resolve_miss(
         &self,
         admitted: &Admitted,
+        verdict: Verdict,
         stale: Option<Arc<CachedWire>>,
     ) -> Result<Arc<CachedWire>> {
         let Admitted {
             request,
             key,
             policy,
-            paused,
             ..
         } = admitted;
-        let scope = policy.scope(key.scope);
-        let mut verdict = evaluate(policy, scope, &key.domain);
-        if *paused {
-            verdict = Verdict::allow(Reason::Paused);
-        }
         if verdict.is_blocked() {
-            return self.insert_blocked(admitted, verdict).await;
+            return self.insert_blocked(admitted, verdict);
         }
+        let scope = policy.scope(key.scope);
 
         let response = match self
             .resolver
@@ -579,7 +613,7 @@ impl DnsRuntime {
                     && let Some(blocked) = cname_block(policy, scope.mask, lookup.answers())
                 {
                     bump(&self.stats.cname_blocks_total);
-                    return self.insert_blocked(admitted, blocked).await;
+                    return self.insert_blocked(admitted, blocked);
                 }
                 let mut response = build_base_response(request, ResponseCode::NoError);
                 for record in lookup.answers() {
@@ -622,11 +656,7 @@ impl DnsRuntime {
         Ok(wire)
     }
 
-    async fn insert_blocked(
-        &self,
-        admitted: &Admitted,
-        verdict: Verdict,
-    ) -> Result<Arc<CachedWire>> {
+    fn insert_blocked(&self, admitted: &Admitted, verdict: Verdict) -> Result<Arc<CachedWire>> {
         let response = build_blocked_response(&admitted.request, admitted.policy.block_mode);
         let wire = Arc::new(CachedWire::from_message(
             &response,
@@ -712,4 +742,38 @@ fn cname_target(record: &Record) -> Option<&Name> {
         RData::CNAME(target) => Some(&target.0),
         _ => None,
     }
+}
+
+/// Spell `name` into `buffer` in the form the cache key and every list entry use: lowercase
+/// A-labels joined by dots, with no trailing root dot.
+///
+/// `None` for a name carrying a byte that [`Name::to_ascii`] would escape — a dot or a control
+/// character inside a label — which the caller then spells the allocating way. Escaping is
+/// hickory's rule to define, and re-implementing it here to save an allocation on names no stub
+/// ever asks for would be the wrong side of that trade.
+fn ascii_lowercase<'a>(name: &Name, buffer: &'a mut [u8; MAX_NAME_BYTES]) -> Option<&'a str> {
+    let mut written = 0;
+    for label in name.iter() {
+        if written > 0 {
+            *buffer.get_mut(written)? = b'.';
+            written += 1;
+        }
+        for (at, byte) in label.iter().enumerate() {
+            if !kept_as_itself(*byte, at == 0) {
+                return None;
+            }
+            *buffer.get_mut(written)? = byte.to_ascii_lowercase();
+            written += 1;
+        }
+    }
+    std::str::from_utf8(buffer.get(..written)?).ok()
+}
+
+/// Whether `byte` survives hickory's ASCII escaping as itself, per `Label::write_ascii`: the two
+/// spellings must agree, or a name would be looked up in a form no list entry has.
+fn kept_as_itself(byte: u8, first: bool) -> bool {
+    byte.is_ascii_alphanumeric()
+        || byte == b'_'
+        || (byte == b'-' && !first)
+        || (byte == b'*' && first)
 }
