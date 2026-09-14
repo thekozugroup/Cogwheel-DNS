@@ -1,5 +1,16 @@
 # 02 — Core Rust Crates: Internals Reference
 
+> **Historical. Describes the tree before the Phase 3 rewrite, and is not
+> maintained.** Every name in it — routes, columns, file paths, module layout —
+> is pre-Phase-3 and will not be found in the current tree:
+> `/api/v1/dashboard`, `/api/v1/resolver-access`, `/api/v1/sources`,
+> `/api/v1/sources/refresh`, `/api/v1/runtime`, the `block-profiles` endpoints,
+> the `blocklist_profile_override` and `protection_override` columns, the
+> `cogwheel-api` crate and the single-file `apps/cogwheel-server/src/main.rs`
+> are all gone. Do not navigate today's code with it.
+> `docs/spec-dnsnet-plus-four.md` sections 1, 3 and 6 are the contract now;
+> section 9 schedules this document's rewrite for Phase 4.
+
 The five library crates and the server binary as they stand after the cut to
 the DNS-filtering core. Read from the crate sources; line numbers are omitted
 because they move on every edit. The pre-cut reference (ten crates, including

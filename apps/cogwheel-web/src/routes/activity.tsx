@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { ActivityIcon, Trash2Icon } from "lucide-react";
 import { api, errorMessage, type QueryRow, type StreamQueryEvent } from "@/lib/api";
 import { checkSentence, qtypeLabel, reasonLabel } from "@/lib/derive";
-import { formatClock, formatCount } from "@/lib/format";
+import { formatClock, pluralize } from "@/lib/format";
 import { notify } from "@/lib/toast";
 import { ACTIVITY_BUFFER_LIMIT, ACTIVITY_PAGE_SIZE } from "@/lib/constants";
 import { useCogwheel } from "@/data/context";
@@ -101,6 +101,9 @@ export function ActivityScreen() {
   const onFrame = React.useCallback(
     (frame: StreamQueryEvent) => {
       if (filters.client && frame.client !== filters.client) return;
+      // Device = Unnamed asks for the clients with no `devices` row; a live
+      // frame carries the name when there is one, which is the same question.
+      if (filters.unnamed && frame.deviceName) return;
       if (filters.blocked !== undefined && frame.blocked !== filters.blocked) return;
       if (filters.q && !frame.domain.toLowerCase().includes(filters.q.toLowerCase())) return;
 
@@ -136,7 +139,7 @@ export function ActivityScreen() {
       action: () => api.clearQueries(),
       after: "light",
       successTitle: "Query log cleared",
-      successDetail: (outcome) => `${formatCount(outcome.deleted)} rows deleted.`,
+      successDetail: (outcome) => `${pluralize(outcome.deleted, "row")} deleted.`,
       failureTitle: "Could not clear the log",
     });
     if (result) {
@@ -199,18 +202,21 @@ export function ActivityScreen() {
     {
       key: "verdict",
       header: "Verdict",
-      render: (row) => (
-        <span className="flex flex-wrap items-center gap-2">
-          <StatusPill label={row.blocked ? "Blocked" : "Allowed"} tone={row.blocked ? "bad" : "good"} />
-          <span className="text-muted-foreground text-xs">{reasonLabel(row.reason, row.list)}</span>
-        </span>
-      ),
+      render: (row) => {
+        const reason = reasonLabel(row.reason, row.list);
+        return (
+          <span className="flex flex-wrap items-center gap-2">
+            <StatusPill label={row.blocked ? "Blocked" : "Allowed"} tone={row.blocked ? "bad" : "good"} />
+            {reason ? <span className="text-muted-foreground text-xs">{reason}</span> : null}
+          </span>
+        );
+      },
     },
     {
       key: "actions",
       header: "",
       align: "end",
-      hideOnStack: true,
+      stackHeader: true,
       render: (row) => {
         const named = data.devices.devices.find((entry) => entry.ip_address === row.client);
         return (
@@ -244,7 +250,7 @@ export function ActivityScreen() {
   return (
     <PageShell>
       <PageHeader
-        description="Every query the resolver answered, newest first."
+        description="Every query the resolver answered, most recently answered first."
         title="Activity"
       />
 
@@ -256,18 +262,6 @@ export function ActivityScreen() {
             tone="warn"
           />
         )}
-
-        {why ? (
-          <NoticeBanner
-            actions={
-              <Button onClick={() => setWhy(null)} size="sm" variant="outline">
-                Dismiss
-              </Button>
-            }
-            title={why}
-            tone="neutral"
-          />
-        ) : null}
 
         <SectionCard
           actions={
@@ -285,7 +279,7 @@ export function ActivityScreen() {
               ) : null}
             </span>
           }
-          description={`${formatCount(rows.length)} rows shown.`}
+          description={`${pluralize(rows.length, "row")} shown.`}
           footer={
             <div className="flex flex-wrap items-center gap-2">
               <Button disabled={nextBefore === null} onClick={() => void loadOlder()} variant="outline">
@@ -299,7 +293,9 @@ export function ActivityScreen() {
           }
           title="Queries"
         >
-          <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {/* `min-w-0` on the columns: without it the Verdict segment group sizes
+              to its own content and pushes "Allowed" past the card's edge. */}
+          <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3 [&>*]:min-w-0">
             <TextField
               label="Domain contains"
               onChange={setSearch}
@@ -330,7 +326,7 @@ export function ActivityScreen() {
                 value={verdict}
               >
                 {(["all", "blocked", "allowed"] as const).map((option) => (
-                  <SegmentGroupItem className="flex-1 px-3 py-1.5" key={option} value={option}>
+                  <SegmentGroupItem className="min-w-0 flex-1 px-2 py-1.5" key={option} value={option}>
                     <SegmentGroupItemText className="text-sm capitalize">{option}</SegmentGroupItemText>
                   </SegmentGroupItem>
                 ))}
@@ -340,6 +336,21 @@ export function ActivityScreen() {
 
           {stream.error && live ? (
             <NoticeBanner className="mb-4" title={stream.error} tone="warn" />
+          ) : null}
+
+          {/* Above the table, not up with the page header: the answer is about one
+              of the rows below and has to be read next to them. */}
+          {why ? (
+            <NoticeBanner
+              actions={
+                <Button onClick={() => setWhy(null)} size="sm" variant="outline">
+                  Dismiss
+                </Button>
+              }
+              className="mb-4"
+              title={why}
+              tone="neutral"
+            />
           ) : null}
 
           <div aria-live="polite" role="log">
@@ -356,7 +367,7 @@ export function ActivityScreen() {
               onRetry={() => void reload()}
               rowKey={(row) => row.key}
               rows={rows}
-              stackBelow="2xl"
+              stackBelow="xl"
             />
           </div>
         </SectionCard>

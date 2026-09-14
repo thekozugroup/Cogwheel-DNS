@@ -8,7 +8,7 @@ Current guardrails:
 
 - `docs/adr/0001-crate-boundaries.md` defines crate ownership and allowed
   responsibilities.
-- `crates/cogwheel-api/src/lib.rs` includes a regression test
+- `apps/cogwheel-server/src/tests/mod.rs` includes a regression test
   (`crate_path_dependencies_match_the_adr_boundaries`) that reads each library
   crate's manifest and fails if its path dependencies drift from the graph
   below.
@@ -21,10 +21,9 @@ The guard currently checks these crate relationships:
 - `cogwheel-dns-core` -> `cogwheel-policy`
 - `cogwheel-lists` -> `cogwheel-policy`
 - `cogwheel-storage` -> none
-- `cogwheel-api` -> none
 
-`apps/cogwheel-server` is the composition root and depends on all five; it is
-not checked because it is expected to.
+`apps/cogwheel-server` is the composition root and depends on all four; the
+guard checks that it depends on those four and nothing else.
 
 This keeps the fast path deterministic, the storage layer encapsulated, and the
 server responsible for composition rather than leaking domain concerns across

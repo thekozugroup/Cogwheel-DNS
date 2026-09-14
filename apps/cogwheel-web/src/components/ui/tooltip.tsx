@@ -1,14 +1,9 @@
 "use client";
 
 import { Portal } from "@ark-ui/react/portal";
-import {
-  Tooltip as ArkTooltip,
-  useTooltipContext,
-} from "@ark-ui/react/tooltip";
+import { Tooltip as ArkTooltip } from "@ark-ui/react/tooltip";
 import type React from "react";
 import { cn } from "@/lib/utils";
-
-export const useTooltip = useTooltipContext;
 
 export const Tooltip = (
   props: React.ComponentProps<typeof ArkTooltip.Root>
@@ -79,7 +74,7 @@ export const TooltipContent = (
   );
 };
 
-export const TooltipArrow = (
+const TooltipArrow = (
   props: React.ComponentProps<typeof ArkTooltip.Arrow>
 ) => {
   const { style, ...rest } = props;

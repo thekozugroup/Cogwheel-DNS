@@ -121,7 +121,7 @@ docker compose up -d
 
 `docker-compose.yml` defaults to **host networking**. Read
 [§5](#5-networking-host-vs-bridge-and-why-it-decides-a-feature) before changing
-it — the choice determines whether per-device block profiles work.
+it — the choice determines whether per-device rules and list selection work.
 
 ---
 
@@ -192,7 +192,7 @@ source IP address of its DNS query. Internally the resolver keeps a
 resolves under the household scope.
 
 So the networking mode is not a deployment detail. It decides whether
-per-device profiles and per-device statistics work at all.
+per-device rules, list selection and per-device statistics work at all.
 
 ### Host networking (the default)
 
@@ -201,7 +201,7 @@ network_mode: host
 ```
 
 - DNS sockets are bound directly on the host's interfaces. Every query arrives
-  with the real LAN client address, so per-device profiles work.
+  with the real LAN client address, so per-device rules and list selection work.
 - No NAT hop on the DNS hot path.
 - `ports:` is ignored; Cogwheel binds host `:53` and `:8080` directly, so a
   port conflict is a hard failure rather than a silent fallback.
@@ -221,8 +221,8 @@ network_mode: host
   `userland-proxy` setting and iptables state, the source address the container
   observes is frequently rewritten to the bridge gateway (`172.x.0.1`).
   **When that happens every device looks like one client and per-device
-  profiles silently collapse to the global policy** — no error, just wrong
-  behaviour.
+  rules and list selection silently collapse to the household policy** — no
+  error, just wrong behaviour.
 - In this mode bind DNS to `5353` inside the container
   (`COGWHEEL_SERVER__DNS_UDP_BIND_ADDR=0.0.0.0:5353`) and publish it as
   `53:5353`. No capability is then required inside the container, and you can
@@ -252,10 +252,10 @@ every client — including ones you cannot configure, like a TV or a games
 console — is covered automatically.
 
 1. Find the addresses Cogwheel is advertising. The installer prints them, the
-   dashboard shows them, and the API returns them:
+   Overview page shows them, and the API returns them:
 
    ```sh
-   curl -s http://<cogwheel-host>:8080/api/v1/resolver-access
+   curl -s http://<cogwheel-host>:8080/api/v1/overview | grep -o '"connect":{[^}]*}'
    ```
 
 2. Give the Pi a **static address or a DHCP reservation** first. If its address
@@ -295,7 +295,7 @@ Or check each item by hand:
 ```sh
 curl -fsS http://<host>:8080/health/live      # {"data":{"status":"ok"}}
 curl -fsS http://<host>:8080/health/ready     # {"data":{"status":"ready"}}
-curl -fsS http://<host>:8080/api/v1/dashboard | head -c 200
+curl -fsS http://<host>:8080/api/v1/overview | head -c 200
 curl -fsSI http://<host>:8080/ | head -1      # 200 OK, the web UI
 ```
 
@@ -318,7 +318,8 @@ are ready:
 A node that is live but not ready is running and answering HTTP, but is not yet
 filtering. Do not send it traffic.
 
-The operationally interesting counters live in `GET /api/v1/runtime`.
+The operationally interesting counters live under `runtime` in
+`GET /api/v1/overview`.
 
 ### Resolver
 
@@ -327,8 +328,14 @@ The operationally interesting counters live in `GET /api/v1/runtime`.
 dig @<host> example.com A +short
 #   -> a real address, e.g. 93.184.216.34
 
-# A blocked domain must resolve to the null address, not NXDOMAIN.
-dig @<host> ads.example.com A +short
+# A stock install ships no active rules of its own -- the seeded default list
+# has to download first, which has not necessarily happened yet. A household
+# rule takes effect immediately with no list involved, so install one to prove
+# filtering works without waiting on that download.
+curl -s -X POST -H 'Content-Type: application/json' \
+     -d '{"domain":"blocked.test","action":"block"}' \
+     http://<host>:8080/api/v1/rules
+dig @<host> blocked.test A +short
 #   -> 0.0.0.0
 
 # TCP as well as UDP. Large answers fall back to TCP; if only UDP works,
@@ -336,9 +343,10 @@ dig @<host> ads.example.com A +short
 dig @<host> example.com A +tcp +short
 ```
 
-`ads.example.com` is on the bootstrap blocklist that ships with a stock
-install, so this works before you configure anything. Blocked domains return
-`0.0.0.0` (and `::` for AAAA) because the default block mode is null-IP.
+Blocked domains return `0.0.0.0` (and `::` for AAAA) because the default block
+mode is null-IP. Remove the marker rule afterwards from the Lists page, or:
+`curl -X DELETE http://<host>:8080/api/v1/rules/<id>` (the `id` came back in
+the POST response above).
 
 ### Persistence
 
@@ -346,14 +354,17 @@ State must survive a restart. If it does not, the data volume is not mounted
 where you think it is.
 
 ```sh
-curl -s http://<host>:8080/api/v1/settings | head -c 200   # note the contents
-docker restart cogwheel                                    # or: systemctl restart cogwheel
+curl -s -X POST -H 'Content-Type: application/json' \
+     -d '{"name":"persistence-check","ip_address":"192.0.2.9"}' \
+     http://<host>:8080/api/v1/devices                          # note the id
+docker restart cogwheel                                          # or: systemctl restart cogwheel
 sleep 20
-curl -s http://<host>:8080/api/v1/settings | head -c 200   # must be unchanged
+curl -s http://<host>:8080/api/v1/devices | grep persistence-check   # must still be there
+curl -X DELETE http://<host>:8080/api/v1/devices/<id>            # clean up
 ```
 
 `scripts/verify-install.sh` automates this properly: it writes a uniquely named
-block profile, restarts Cogwheel, confirms the record survived, and deletes it
+marker device, restarts Cogwheel, confirms the record survived, and deletes it
 again.
 
 ### End to end
@@ -362,10 +373,10 @@ From a *different* device on the network, after pointing it at Cogwheel:
 
 ```sh
 nslookup example.com
-nslookup ads.example.com      # 0.0.0.0
+nslookup doubleclick.net      # 0.0.0.0, once the default list has downloaded
 ```
 
-Then open `http://<host>:8080` and confirm the dashboard shows the query.
+Then open `http://<host>:8080` and confirm the Overview page shows the query.
 
 ---
 
@@ -461,8 +472,9 @@ docker inspect --format '{{.State.Health.Status}}' cogwheel
 
 ### 8.3 Every device shows up as one client
 
-Per-device profiles are not applying and the dashboard attributes everything to
-a single address, usually `172.x.0.1`. That is the Docker bridge gateway — see
+Per-device rules are not applying and the Activity/Devices pages attribute
+everything to a single address, usually `172.x.0.1`. That is the Docker bridge
+gateway — see
 [§5](#5-networking-host-vs-bridge-and-why-it-decides-a-feature). Switch to host
 networking or macvlan.
 
@@ -506,28 +518,32 @@ silently ignored rather than reported.
 
 | Variable | Default (`home` profile) | Notes |
 |---|---|---|
-| `COGWHEEL_PROFILE` | `home` | `dev`, `home` or `smb`. Sets the defaults below. |
+| `COGWHEEL_PROFILE` | `home` | `dev` or `home`; `smb` is accepted as an alias of `home`. Sets the defaults below. |
 | `COGWHEEL_SERVER__HTTP_BIND_ADDR` | `0.0.0.0:8080` | Web UI and API. |
 | `COGWHEEL_SERVER__DNS_UDP_BIND_ADDR` | `0.0.0.0:5353` | The image overrides this to `:53`. |
 | `COGWHEEL_SERVER__DNS_TCP_BIND_ADDR` | `0.0.0.0:5353` | Keep in step with UDP. |
 | `COGWHEEL_SERVER__ADVERTISED_DNS_PORT` | bound DNS port | The port *clients* use. Stays `53` behind a port mapping. |
-| `COGWHEEL_SERVER__ADVERTISED_DNS_TARGETS` | *(empty)* | Comma-separated addresses shown to users. The installers fill this in from the host's interfaces. |
+| `COGWHEEL_SERVER__ADVERTISED_DNS_TARGETS` | *(empty, falls back to `hostname -I`)* | Comma-separated addresses shown to users. The installers fill this in from the host's interfaces. |
 | `COGWHEEL_STORAGE__DATABASE_URL` | `sqlite://data/cogwheel.db` | `sqlite://` is stripped. Use an absolute path. |
 | `COGWHEEL_UPSTREAM__SERVERS` | `1.1.1.1:53,1.0.0.1:53` | Comma-separated. `ip:port` is cleartext (UDP+TCP); `tls://ip#certname` is DNS-over-TLS and `https://ip#certname` is DNS-over-HTTPS. See [§9.1](#91-encrypting-queries-to-the-upstream-resolver). |
-| `COGWHEEL_UPDATER__REFRESH_INTERVAL_SECS` | `300` | Clamped to a 30 s floor. |
+| `COGWHEEL_UPDATER__REFRESH_INTERVAL_SECS` | `86400` (`3600` in `dev`) | Floored at 300 s; a list that is currently failing retries every 300 s regardless of this setting. |
 | `COGWHEEL_BLOCKING__MODE` | `null_ip` | `null_ip`, `nxdomain`, `nodata` or `refused`. See [§9.2](#92-how-blocked-names-are-answered). |
-| `COGWHEEL_RETENTION__HISTORY_DAYS` | `30` | Days of recorded history to keep. `0` keeps everything forever and logs a warning. |
+| `COGWHEEL_RETENTION__HISTORY_DAYS` | `7` | Days of query-log rows to keep. `0` stops writing the query log entirely; the hourly rollups behind the Overview and Devices pages are kept either way. |
+| `COGWHEEL_RETENTION__QUERY_LOG_MAX_ROWS` | `250000` | Hard cap on query-log rows, enforced by the same prune. |
 | `COGWHEEL_RETENTION__PRUNE_INTERVAL_SECS` | `3600` | How often the prune runs. Floored at 60 s. |
 | `COGWHEEL_WEB_DIST_DIR` | *(search path)* | Directory containing `index.html`. |
 | `RUST_LOG` | `info` | tracing filter. An `info` directive is always added, so this can only widen it. |
 
 Profile defaults:
 
-| Setting | `dev` | `home` | `smb` |
-|---|---|---|---|
-| HTTP bind | `127.0.0.1:30080` | `0.0.0.0:8080` | `0.0.0.0:8080` |
-| DNS bind | `127.0.0.1:30053` | `0.0.0.0:5353` | `0.0.0.0:53` |
-| Refresh interval | 120 s | 300 s | 600 s |
+| Setting | `dev` | `home` |
+|---|---|---|
+| HTTP bind | `127.0.0.1:30080` | `0.0.0.0:8080` |
+| DNS bind | `127.0.0.1:30053` | `0.0.0.0:5353` |
+| Refresh interval | 3600 s | 86400 s |
+
+`smb` is not a third set of defaults — it is accepted as an alias of `home`
+and behaves identically to it.
 
 There is no configuration file. Everything is environment variables.
 
@@ -620,7 +636,7 @@ only 60 s, so a host that has just been provisioned does not stay unreachable.
 The fallback cache deliberately serves *stale* answers, but only after the
 upstream has already failed — an hour-old address beats no DNS at all.
 
-A policy change (new blocklist, device profile edit) invalidates the response
+A policy change (list edit, device or rule edit) invalidates the response
 cache immediately, so an unblock takes effect on the next query rather than
 whenever the entry happens to age out.
 
@@ -635,15 +651,17 @@ depends on — a login provider, a payment iframe, a CDN.
 - Fastest check: `POST /api/v1/runtime/pause` pauses filtering entirely. If the
   site starts working, it is a blocking problem; if not, look elsewhere before
   spending time on blocklists.
-- Then narrow it: the Activity view shows what was blocked while the page
-  loaded. Add the offending name to a device's allowed domains, or remove the
-  list that supplied it (`/api/v1/settings/blocklists`).
+- Then narrow it: the Activity page shows what was blocked while the page
+  loaded. Add an allow rule for the offending name (household, or just for
+  that device), or disable the list that supplied it on the Lists page
+  (`PUT /api/v1/lists/{id}` with `enabled:false`, or `DELETE` to remove it).
 
 **2. It is not blocking at all.** Worth ruling out early, because it looks
 identical from the browser: a stale cached address, an upstream that is failing,
-or a device that has cached the old answer itself. `/api/v1/runtime` reports
-cache hits, expiries, upstream failures and fallback responses. Browsers and
-phones keep their own DNS caches, so test with `dig` before concluding anything.
+or a device that has cached the old answer itself. `GET /api/v1/overview`'s
+`runtime` object reports cache hits, expiries, upstream failures and fallback
+responses. Browsers and phones keep their own DNS caches, so test with `dig`
+before concluding anything.
 
 #### The safety net
 
@@ -704,9 +722,21 @@ the verification checklist afterwards ([§7](#7-post-install-verification-checkl
 
 ## 11. Backup and restore
 
+The data directory holds exactly one thing worth backing up: the SQLite
+database file. There is no separate config store to also capture — config is
+env-only ([§9](#9-configuration-reference)) and lives in `.env` or
+`/etc/cogwheel/cogwheel.env`, which you already have under your own version
+control or backup. Copying the DB file in the volume is the whole job.
+
+Separately, and automatically: the first time a pre-v1 database is opened by a
+version of Cogwheel that speaks schema v1, the upgrade takes its own snapshot
+— `<database file>.pre-v1`, alongside it in the same volume — before touching
+anything. That guards one upgrade, not the ongoing backups below; it is not a
+substitute for them.
+
 ### Recommended: back up the data directory
 
-This captures everything — the full SQLite database, not a subset.
+This captures everything — the one SQLite database file, not a subset.
 
 **Docker (named volume):**
 

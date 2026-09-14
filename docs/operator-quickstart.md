@@ -74,21 +74,21 @@ dig @127.0.0.1 -p 30053 example.com +short
 |---|---|
 | `GET /health/live` | liveness. What the container `HEALTHCHECK` probes. |
 | `GET /health/ready` | readiness. Returns **503 until storage, policy and the DNS listeners are all up**, and names which subsystem is lagging. Gate rolling upgrades on this, not on liveness. |
-| `GET /api/v1/runtime` | the numbers that actually matter: queries, blocked, cache hits, upstream failures, fallbacks, mean latencies. |
-| `GET /api/v1/dashboard` | the same counters plus protection state, the active policy hash and rule count, and the top queried/blocked names of the last 24 hours. |
+| `GET /api/v1/overview` | everything the Overview page shows in one object: `runtime` (queries, blocked, cache hits, upstream failures, mean latencies), `protection`, the last 24 hours by hour, list health, the top queried/blocked names, and `connect` — the addresses to point a router at. |
 
 ## Day-2 operations
 
 ```sh
-# Where should clients point?
-curl -s http://127.0.0.1:8080/api/v1/resolver-access
+# Where should clients point, and what has the resolver been doing?
+# Both live under one route: .connect.targets and .runtime.
+curl -s http://127.0.0.1:8080/api/v1/overview
 
-# Counters and the policy in force, before and after a change.
-curl -s http://127.0.0.1:8080/api/v1/runtime
-curl -s http://127.0.0.1:8080/api/v1/dashboard
+# Why did that name resolve the way it did?
+curl -s 'http://127.0.0.1:8080/api/v1/check?domain=ads.example.com&client=192.168.1.20'
 
-# Refresh every enabled blocklist now (rate limited).
-curl -s -X POST http://127.0.0.1:8080/api/v1/sources/refresh
+# Refresh every enabled list now (rate limited to one manual refresh per 30 s).
+curl -s -X POST -H 'content-type: application/json' -d '{}' \
+  http://127.0.0.1:8080/api/v1/lists/refresh
 
 # Logs
 docker logs -f cogwheel          # container install
@@ -98,9 +98,14 @@ journalctl -u cogwheel -f        # native install
 - Back up the data directory before any upgrade —
   [DEPLOYMENT.md §11](../DEPLOYMENT.md#11-backup-and-restore). The database
   is one SQLite file in the volume; there is no export endpoint.
-- A refresh that fails verification, or that would block a protected name,
-  answers `"outcome": "rejected"` with the reasons in `notes`, and the policy
-  already in force keeps serving. Nothing needs rolling back.
+- A refresh whose body fails verification (more than one line in five
+  unparseable) answers `"outcome": "rejected"`, and the previously cached body
+  keeps serving. Nothing needs rolling back.
+- A list that *would* have blocked one of the 21 protected names is still
+  installed: the names it hit are recorded against it in `note`, and protection
+  is enforced when a query is evaluated rather than when a list is fetched. So a
+  list can never take `time.apple.com` off the network, and you do not lose the
+  rest of the list because it contained one line you would not have chosen.
 - Pause blocking for a few minutes from the sidebar (or
   `POST /api/v1/runtime/pause {"minutes": 15}`) when you need to prove a
   site breaks because of a list and not because of the network.

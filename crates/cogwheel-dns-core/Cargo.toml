@@ -11,7 +11,6 @@ workspace = true
 anyhow.workspace = true
 hickory-proto.workspace = true
 hickory-resolver.workspace = true
-moka.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

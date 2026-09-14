@@ -3,17 +3,21 @@ import { PauseIcon, PlayIcon } from "lucide-react";
 import { useCogwheel } from "@/data/context";
 import { protectionState } from "@/lib/derive";
 import { formatDuration } from "@/lib/format";
-import { SNOOZE_OPTIONS } from "@/lib/constants";
+import { PAUSE_OPTIONS } from "@/lib/constants";
 import { usePauseCountdown, useProtectionActions } from "@/hooks/use-protection";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/app/confirm-dialog";
 
 /**
- * Snooze lives in the sidebar footer because it is the one control whose state
- * an operator needs to see from every screen — a silently-paused appliance is
- * the failure mode this whole product has to avoid.
+ * Pausing lives in the sidebar footer because it is the one control whose state
+ * a person needs to see from every screen — a silently-paused appliance is the
+ * failure mode this whole product has to avoid.
+ *
+ * One verb throughout: the tile says Paused, the route is `/runtime/pause`, the
+ * toast says "Protection paused", and so does this. "Snooze" was a second name
+ * for the same thing and read, beside them, as a second feature.
  */
-export function SnoozeControl() {
+export function PauseControl() {
   const { data, busy, error, lastUpdatedAt } = useCogwheel();
   const { pause, resume } = useProtectionActions();
   const remaining = usePauseCountdown();
@@ -46,9 +50,9 @@ export function SnoozeControl() {
   return (
     <>
       <div className="flex flex-col gap-1.5">
-        <p className="text-muted-foreground text-xs">Snooze protection</p>
+        <p className="text-muted-foreground text-xs">Pause protection</p>
         <div className="flex gap-1">
-          {SNOOZE_OPTIONS.map((minutes) => (
+          {PAUSE_OPTIONS.map((minutes) => (
             <Button
               className="flex-1"
               disabled={pausing}

@@ -1,9 +1,9 @@
 import React from "react";
 import { Link } from "react-router-dom";
-import { CheckIcon, CopyIcon, PlayIcon, RotateCwIcon, ShieldOffIcon } from "lucide-react";
+import { ActivityIcon, CheckIcon, CopyIcon, PlayIcon, RotateCwIcon, ShieldOffIcon } from "lucide-react";
 import { api, type DomainCount } from "@/lib/api";
 import { checkSentence, looksIpv6, protectionState } from "@/lib/derive";
-import { formatCompact, formatCount, formatDuration, formatShare } from "@/lib/format";
+import { formatCompact, formatCount, formatDuration, formatShare, pluralize } from "@/lib/format";
 import { notify } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { useCogwheel } from "@/data/context";
@@ -27,8 +27,6 @@ export function OverviewScreen() {
   const { data, phase, busy, mutate, reload } = useCogwheel();
   const { resume } = useProtectionActions();
   const remaining = usePauseCountdown();
-  const [why, setWhy] = React.useState<string | null>(null);
-
   const overview = data.overview;
   const day = overview.last_24h;
   const state = protectionState(overview.protection.paused_until, false);
@@ -39,7 +37,8 @@ export function OverviewScreen() {
       key: "refresh-lists",
       action: () => api.refreshLists(),
       successTitle: "Lists refreshed",
-      successDetail: (results) => `${results.length} list(s) checked.`,
+      successDetail: (results) =>
+        results.length === 1 ? `Checked ${results[0].name}.` : `Checked ${results.length} lists.`,
       failureTitle: "Could not refresh lists",
     });
 
@@ -51,14 +50,6 @@ export function OverviewScreen() {
       successDetail: `${domain} — the rule beats every list.`,
       failureTitle: "Could not save the rule",
     });
-
-  const explain = async (domain: string) => {
-    try {
-      setWhy(checkSentence(await api.check(domain)));
-    } catch {
-      notify.error("Could not check that domain", "The control plane did not answer.");
-    }
-  };
 
   return (
     <PageShell>
@@ -108,11 +99,17 @@ export function OverviewScreen() {
               }
               label="Protection"
               tone={state.tone === "idle" ? "neutral" : state.tone}
-              toneLabel={state.label}
               value={state.paused ? `Paused ${formatDuration(remaining)}` : "Protected"}
             />
             <StatTile
-              hint={`since last restart: ${formatCount(overview.runtime.queries_total)}`}
+              // Suppressed at zero: "2,946 / since last restart: 0" is true, and
+              // reads as a contradiction to anyone who has not been told that the
+              // 24-hour figure outlives the process.
+              hint={
+                overview.runtime.queries_total > 0
+                  ? `${formatCount(overview.runtime.queries_total)} since this process started`
+                  : undefined
+              }
               label="Queries (24 h)"
               value={formatCompact(day.queries)}
             />
@@ -134,23 +131,11 @@ export function OverviewScreen() {
         )}
 
         <SectionCard
-          description={`${formatCount(day.queries)} queries, ${formatCount(day.blocked)} blocked.`}
+          description={`${pluralize(day.queries, "query", "queries")}, ${formatCount(day.blocked)} blocked.`}
           title="Last 24 hours"
         >
           <HourStrip buckets={day.per_hour} />
         </SectionCard>
-
-        {why ? (
-          <NoticeBanner
-            actions={
-              <Button onClick={() => setWhy(null)} size="sm" variant="outline">
-                Dismiss
-              </Button>
-            }
-            title={why}
-            tone="neutral"
-          />
-        ) : null}
 
         <div className="grid gap-6 xl:grid-cols-2">
           <DomainCard
@@ -158,7 +143,6 @@ export function OverviewScreen() {
             emptyDescription="Blocked destinations appear once devices resolve through Cogwheel."
             onAllow={(domain) => void addRule(domain, "allow")}
             onBlock={(domain) => void addRule(domain, "block")}
-            onWhy={(domain) => void explain(domain)}
             rows={overview.top_blocked}
             title="Top blocked"
           />
@@ -167,7 +151,6 @@ export function OverviewScreen() {
             emptyDescription="Point a device at the address below and its traffic shows up here."
             onAllow={(domain) => void addRule(domain, "allow")}
             onBlock={(domain) => void addRule(domain, "block")}
-            onWhy={(domain) => void explain(domain)}
             rows={overview.top_queried}
             title="Top queried"
           />
@@ -191,11 +174,22 @@ export function OverviewScreen() {
  * stacked bars with no axes, no tooltip and no interaction.
  */
 function HourStrip({ buckets }: { buckets: { hour: number; queries: number; blocked: number }[] }) {
-  if (buckets.length === 0) {
-    return <p className="text-muted-foreground text-sm">No traffic recorded in the last 24 hours.</p>;
+  const busiest = Math.max(0, ...buckets.map((bucket) => bucket.queries));
+
+  // Twenty-four flat columns and a legend read as a component that failed to
+  // load rather than as "nothing has happened yet", so a silent box gets the
+  // same empty state the two cards below it get.
+  if (buckets.length === 0 || busiest === 0) {
+    return (
+      <EmptyState
+        description="Point a device at the address below; its traffic appears here within the hour."
+        icon={ActivityIcon}
+        title="No traffic yet"
+      />
+    );
   }
 
-  const peak = Math.max(1, ...buckets.map((bucket) => bucket.queries));
+  const peak = Math.max(1, busiest);
 
   return (
     <div>
@@ -208,13 +202,16 @@ function HourStrip({ buckets }: { buckets: { hour: number; queries: number; bloc
             <div
               className="flex h-full flex-1 flex-col justify-end"
               key={bucket.hour}
-              title={`${formatCount(bucket.queries)} queries, ${formatCount(bucket.blocked)} blocked`}
+              title={`${pluralize(bucket.queries, "query", "queries")}, ${formatCount(bucket.blocked)} blocked`}
             >
               {/* Blocked is stacked at the foot of the hour's own bar, so the
                   dark portion reads as a share of that hour, not of the day. */}
               <div
                 className="flex w-full flex-col justify-end overflow-hidden rounded-sm bg-neutral-200 dark:bg-neutral-700"
-                style={{ height: `${Math.max(total, bucket.queries > 0 ? 2 : 1)}%` }}
+                // An hour with no traffic draws nothing at all; the row of
+                // labels below is the axis. A one-percent sliver reads as a
+                // little traffic, which is the one thing it is not.
+                style={{ height: `${bucket.queries === 0 ? 0 : Math.max(total, 2)}%` }}
               >
                 <div
                   className="w-full bg-neutral-900 dark:bg-neutral-100"
@@ -255,7 +252,6 @@ function DomainCard({
   emptyDescription,
   onAllow,
   onBlock,
-  onWhy,
 }: {
   title: string;
   rows: DomainCount[];
@@ -263,8 +259,20 @@ function DomainCard({
   emptyDescription: string;
   onAllow: (domain: string) => void;
   onBlock: (domain: string) => void;
-  onWhy: (domain: string) => void;
 }) {
+  // Held per card, not per page. A domain in both Top blocked and Top queried
+  // is one domain but two rows, and one shared answer printed itself under both
+  // of them.
+  const [why, setWhy] = React.useState<{ domain: string; sentence: string } | null>(null);
+
+  const explain = async (domain: string) => {
+    try {
+      setWhy({ domain, sentence: checkSentence(await api.check(domain)) });
+    } catch {
+      notify.error("Could not check that domain", "The control plane did not answer.");
+    }
+  };
+
   return (
     <SectionCard title={title}>
       {rows.length === 0 ? (
@@ -272,24 +280,38 @@ function DomainCard({
       ) : (
         <ul className="divide-y divide-border">
           {rows.map((row) => (
-            <li className="flex items-center gap-3 py-1.5" key={row.domain}>
-              <span className="min-w-0 flex-1 truncate font-mono text-xs" title={row.domain}>
-                {row.domain}
-              </span>
-              <span className="tabular shrink-0 text-sm">{formatCount(row.count)}</span>
-              <RowMenu
-                actions={[
-                  { value: "allow", label: "Allow for everyone" },
-                  { value: "block", label: "Block for everyone" },
-                  { value: "why", label: "Why?" },
-                ]}
-                label={`Actions for ${row.domain}`}
-                onSelect={(value) => {
-                  if (value === "allow") onAllow(row.domain);
-                  else if (value === "block") onBlock(row.domain);
-                  else onWhy(row.domain);
-                }}
-              />
+            <li className="py-1.5" key={row.domain}>
+              <div className="flex items-center gap-3">
+                <span className="min-w-0 flex-1 truncate font-mono text-xs" title={row.domain}>
+                  {row.domain}
+                </span>
+                <span className="tabular shrink-0 text-sm">{formatCount(row.count)}</span>
+                <RowMenu
+                  actions={[
+                    { value: "allow", label: "Allow for everyone" },
+                    { value: "block", label: "Block for everyone" },
+                    { value: "why", label: "Why?" },
+                  ]}
+                  label={`Actions for ${row.domain}`}
+                  onSelect={(value) => {
+                    if (value === "allow") onAllow(row.domain);
+                    else if (value === "block") onBlock(row.domain);
+                    else void explain(row.domain);
+                  }}
+                />
+              </div>
+              {why?.domain === row.domain ? (
+                <NoticeBanner
+                  actions={
+                    <Button onClick={() => setWhy(null)} size="sm" variant="outline">
+                      Dismiss
+                    </Button>
+                  }
+                  className="mt-2"
+                  title={why.sentence}
+                  tone="neutral"
+                />
+              ) : null}
             </li>
           ))}
         </ul>
@@ -322,19 +344,19 @@ function Targets({ targets, port }: { targets: string[]; port: number }) {
   };
 
   return (
-    <div className="space-y-5">
-      <ul className="grid gap-3 sm:grid-cols-2">
+    <div className="space-y-6">
+      <ul className="grid gap-6 sm:grid-cols-2">
         {targets.map((target) => (
           <li
             className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2"
             key={target}
           >
-            <span className="min-w-0">
+            <div className="min-w-0">
               <span className="block text-muted-foreground text-xs">
                 {looksIpv6(target) ? "IPv6" : "IPv4"} · port {port}
               </span>
               <span className="block truncate font-mono text-foreground text-sm">{target}</span>
-            </span>
+            </div>
             <Button
               aria-label={`Copy ${target}`}
               className={cn("shrink-0")}
@@ -348,7 +370,7 @@ function Targets({ targets, port }: { targets: string[]; port: number }) {
         ))}
       </ul>
 
-      <ul className="grid gap-3 sm:grid-cols-3">
+      <ul className="grid gap-6 sm:grid-cols-3">
         {PLATFORMS.map((platform) => (
           <li className="rounded-lg border border-border p-3" key={platform.name}>
             <p className="font-medium text-foreground text-sm">{platform.name}</p>

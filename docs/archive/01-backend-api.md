@@ -1,5 +1,16 @@
 # 01 — Backend HTTP API Contract Map (Cogwheel Server)
 
+> **Historical. Describes the tree before the Phase 3 rewrite, and is not
+> maintained.** Every name in it — routes, columns, file paths, module layout —
+> is pre-Phase-3 and will not be found in the current tree:
+> `/api/v1/dashboard`, `/api/v1/resolver-access`, `/api/v1/sources`,
+> `/api/v1/sources/refresh`, `/api/v1/runtime`, the `block-profiles` endpoints,
+> the `blocklist_profile_override` and `protection_override` columns, the
+> `cogwheel-api` crate and the single-file `apps/cogwheel-server/src/main.rs`
+> are all gone. Do not navigate today's code with it.
+> `docs/spec-dnsnet-plus-four.md` sections 1, 3 and 6 are the contract now;
+> section 9 schedules this document's rewrite for Phase 4.
+
 The HTTP surface of `apps/cogwheel-server` after the cut to the DNS-filtering
 core: two health routes from `crates/cogwheel-api` and sixteen `/api/v1` routes
 from `apps/cogwheel-server/src/main.rs`. Everything below is read from those
@@ -348,9 +359,9 @@ directly in `main.rs`:
 | `COGWHEEL_BLOCKING__MODE` | `null_ip` | `null_ip` \| `nxdomain` \| `nodata` \| `refused` |
 | `COGWHEEL_RETENTION__HISTORY_DAYS` | `30` | `0` disables pruning |
 | `COGWHEEL_RETENTION__PRUNE_INTERVAL_SECS` | `3600` | floored at 60 |
-| `COGWHEEL_SERVER__ADVERTISED_DNS_PORT` | the DNS UDP bind port | read in `main.rs` |
-| `COGWHEEL_SERVER__ADVERTISED_DNS_TARGETS` | unset | comma-separated; read in `main.rs` |
-| `COGWHEEL_WEB_DIST_DIR` | unset | read in `main.rs`; first candidate for the bundle |
+| `COGWHEEL_SERVER__ADVERTISED_DNS_PORT` | the DNS UDP bind port | the port the connect instructions print |
+| `COGWHEEL_SERVER__ADVERTISED_DNS_TARGETS` | unset | comma-separated |
+| `COGWHEEL_WEB_DIST_DIR` | unset | first candidate searched for the web bundle |
 | `RUST_LOG` | `info` | `EnvFilter`; `info` is always added on top |
 
 An unparsable value aborts startup with `invalid environment value: …`.

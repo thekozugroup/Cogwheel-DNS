@@ -7,7 +7,7 @@ import type React from "react";
 import { tv, type VariantProps } from "tailwind-variants";
 import { cn } from "@/lib/utils";
 
-export const nativeSelectVariants = tv({
+const nativeSelectVariants = tv({
   base: [
     "appearance-none",
     "w-full min-w-0",
@@ -16,12 +16,11 @@ export const nativeSelectVariants = tv({
     "bg-transparent dark:bg-input/30",
     "rounded-lg border border-input shadow-xs/5",
     "transition-colors",
-    "outline-none",
     "[&:has(option[value='']:checked)]:text-muted-foreground/64",
     "disabled:pointer-events-none disabled:cursor-not-allowed",
-    "focus-visible:border-primary focus-visible:ring-[3px] focus-visible:ring-ring/32",
-    "aria-invalid:border-destructive aria-invalid:ring-[3px] aria-invalid:ring-destructive/24",
-    "dark:aria-invalid:border-destructive-foreground dark:aria-invalid:ring-destructive-foreground/20",
+    "focus-visible:border-primary",
+    "aria-invalid:border-destructive",
+    "dark:aria-invalid:border-destructive-foreground",
     "motion-reduce:transition-none!",
   ],
   variants: {
@@ -78,7 +77,3 @@ export const NativeSelect = (props: NativeSelectProps) => {
 export const NativeSelectOption = (
   props: React.ComponentProps<typeof ark.option>
 ) => <ark.option data-slot="native-select-option" {...props} />;
-
-export const NativeSelectOptGroup = (
-  props: React.ComponentProps<typeof ark.optgroup>
-) => <ark.optgroup data-slot="native-select-optgroup" {...props} />;

@@ -233,12 +233,22 @@ jobs:
           test "$(docker exec cogwheel-ci id -u)" = "10001"
           echo "runs as uid 10001"
 
-          for route in / /activity /devices /protection /settings; do
+          for route in / /activity /devices /lists /settings; do
             code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://127.0.0.1:18080${route}")
             test "$code" = "200" || { echo "::error::GET ${route} -> ${code}"; exit 1; }
           done
+          # Status AND body: the SPA fallback can regress into serving index.html
+          # under a 404, which spec section 3 forbids and which no status check sees.
           code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1:18080/api/v1/definitely-not-real)
           test "$code" = "404" || { echo "::error::unknown API path -> ${code}, expected 404"; exit 1; }
+          type=$(curl -s -o /dev/null -w '%{content_type}' --max-time 10 http://127.0.0.1:18080/api/v1/definitely-not-real)
+          case "$type" in
+            application/json*) ;;
+            *) echo "::error::unknown API path content-type ${type}, expected application/json"; exit 1 ;;
+          esac
+          body=$(curl -s --max-time 10 http://127.0.0.1:18080/api/v1/definitely-not-real)
+          python3 -c 'import json,sys; d=json.loads(sys.argv[1]); sys.exit(0 if isinstance(d.get("error"), str) else 1)' "$body" \
+            || { echo "::error::unknown API path body was not {\"error\": ...}: ${body}"; exit 1; }
           echo "web routes and API 404 behaviour correct"
 
           # A response of any rcode proves the listener and parser work; the
@@ -256,6 +266,46 @@ jobs:
           except Exception as e:
               print(f"::error::no DNS response from the container: {e}"); sys.exit(1)
           print(f"DNS answered: rcode={d[3] & 0xF} answers={struct.unpack('>H', d[6:8])[0]}")
+          PY
+
+          # A household block rule needs no upstream and no subscribed list, so this
+          # proves filtering end to end with zero egress -- the one DNS assertion in
+          # this job that does not depend on the runner having internet access.
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+            -X POST -H 'Content-Type: application/json' \
+            -d '{"domain":"blocked.test","action":"block"}' \
+            http://127.0.0.1:18080/api/v1/rules)
+          test "$code" = "200" || { echo "::error::POST /api/v1/rules -> ${code}"; exit 1; }
+
+          python3 - <<'PY'
+          import socket, struct, random, sys
+          tid = random.randint(0, 65535)
+          pkt = struct.pack('>HHHHHH', tid, 0x0100, 1, 0, 0, 0) \
+              + b''.join(bytes([len(l)]) + l.encode() for l in "blocked.test".split('.')) \
+              + b'\x00' + struct.pack('>HH', 1, 1)
+          s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(15)
+          s.sendto(pkt, ('127.0.0.1', 15353))
+          try:
+              d, _ = s.recvfrom(4096)
+          except Exception as e:
+              print(f"::error::no DNS response for the blocked marker domain: {e}"); sys.exit(1)
+          rcode = d[3] & 0xF
+          ancount = struct.unpack('>H', d[6:8])[0]
+          i = 12
+          while d[i] != 0:
+              i += 1 + d[i]
+          i += 5  # the null label, then qtype and qclass
+          a_record = None
+          for _ in range(ancount):
+              i += 2  # name, always a compression pointer here
+              rtype, _, _, rdlen = struct.unpack('>HHIH', d[i:i + 10]); i += 10
+              if rtype == 1 and rdlen == 4:
+                  a_record = '.'.join(str(b) for b in d[i:i + 4])
+              i += rdlen
+          print(f"blocked.test answered: rcode={rcode} a={a_record}")
+          if rcode != 0 or a_record != "0.0.0.0":
+              print("::error::expected rcode 0 (NOERROR) and A 0.0.0.0 for a blocked household rule")
+              sys.exit(1)
           PY
 
           # The installer waits on Docker's healthcheck, so it has to pass.

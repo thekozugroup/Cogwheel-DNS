@@ -27,7 +27,11 @@ export function StatTile({
   /** Nodes are allowed so a tile can link onward without a second row. */
   delta?: React.ReactNode;
   tone?: StatTone;
-  /** The word behind the dot. Required for any tone other than neutral. */
+  /**
+   * The word behind the dot. Omit it when the tile's own value already says the
+   * same thing — "PROTECTION / ● Protected / Protected" is one state written
+   * three times.
+   */
   toneLabel?: string;
   hint?: React.ReactNode;
   footer?: React.ReactNode;
@@ -37,12 +41,12 @@ export function StatTile({
     <div className={cn("flex flex-col rounded-xl border border-border bg-card p-4", className)}>
       <div className="flex items-center justify-between gap-2">
         <p className="font-medium text-muted-foreground text-xs uppercase tracking-wide">{label}</p>
-        {tone !== "neutral" && toneLabel ? (
+        {tone === "neutral" ? null : (
           <span className="flex items-center gap-1.5 text-foreground text-xs">
             <Status size="sm" variant={DOT[tone]} />
             {toneLabel}
           </span>
-        ) : null}
+        )}
       </div>
 
       <p className="display-tight tabular mt-2 font-semibold text-2xl text-foreground">{value}</p>

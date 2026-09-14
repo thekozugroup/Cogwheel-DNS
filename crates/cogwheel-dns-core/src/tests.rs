@@ -6,6 +6,7 @@
 
 use super::*;
 use crate::response::MAX_CACHE_TTL;
+use crate::serve::{patch_header, wire_for};
 use cogwheel_policy::{Action, ListIndex, Pattern, RuleSet, SCOPE_HOUSEHOLD, Scope};
 use hickory_proto::op::{Edns, MessageType, Query};
 use hickory_proto::rr::rdata::{A, AAAA, CNAME};
@@ -14,6 +15,8 @@ use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU8, AtomicU16, AtomicUsize};
+use tokio::net::UdpSocket;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
@@ -254,8 +257,8 @@ impl Harness {
     }
 
     /// Age a cached entry past its freshness without waiting for it.
-    async fn expire(&self, key: &CacheKey) {
-        let entry = self.runtime.cache.get(key).await.expect("entry is cached");
+    fn expire(&self, key: &CacheKey) {
+        let entry = self.runtime.cache.get(key).expect("entry is cached");
         let stale = CachedWire {
             bytes: entry.bytes.clone(),
             truncated: entry.truncated.clone(),
@@ -264,10 +267,7 @@ impl Harness {
             blocked: entry.blocked,
             verdict: entry.verdict,
         };
-        self.runtime
-            .cache
-            .insert(key.clone(), Arc::new(stale))
-            .await;
+        self.runtime.cache.insert(key.clone(), Arc::new(stale));
     }
 }
 
@@ -423,7 +423,7 @@ async fn a_stale_entry_is_served_only_after_the_upstream_errors() {
     assert_eq!(v4(&first), vec![Ipv4Addr::new(192, 0, 2, 1)]);
 
     // Expired, upstream healthy: refreshed from upstream, nothing served stale.
-    harness.expire(&key).await;
+    harness.expire(&key);
     harness.query("stale.test", RecordType::A).await;
     let snapshot = harness.runtime.snapshot();
     assert_eq!(snapshot.cache_expired_total, 1);
@@ -431,7 +431,7 @@ async fn a_stale_entry_is_served_only_after_the_upstream_errors() {
     assert_eq!(harness.stub.queries.load(Ordering::Relaxed), 2);
 
     // Expired, upstream failing: the old answer beats SERVFAIL.
-    harness.expire(&key).await;
+    harness.expire(&key);
     harness.stub.set_mode(SERVFAIL);
     let during_outage = harness.query("stale.test", RecordType::A).await;
     assert_eq!(during_outage.metadata.response_code, ResponseCode::NoError);
@@ -619,6 +619,7 @@ async fn runtime_snapshot_starts_at_zero() {
             stale_served_total: 0,
             cname_blocks_total: 0,
             dropped_total: 0,
+            log_dropped_total: 0,
             cache_hit_latency_avg_ns: 0,
             cache_hit_samples: 0,
             cache_miss_latency_avg_ns: 0,
@@ -646,7 +647,7 @@ fn the_truncated_form_is_sent_only_when_the_answer_cannot_fit() {
     for host in 1..=40u8 {
         response.add_answer(a("big.test", [192, 0, 2, host]));
     }
-    let entry = CachedWire::from_message(&response, MAX_CACHE_TTL, Verdict::Allow(Reason::NoMatch))
+    let entry = CachedWire::from_message(&response, MAX_CACHE_TTL, Verdict::allow(Reason::NoMatch))
         .expect("encode");
     assert!(entry.bytes.len() > MAX_PLAIN_UDP_PAYLOAD);
     let truncated = entry.truncated.as_ref().expect("a TC form was precomputed");
@@ -659,7 +660,7 @@ fn the_truncated_form_is_sent_only_when_the_answer_cannot_fit() {
     );
 
     let small = build_base_response(&request, ResponseCode::NXDomain);
-    let small = CachedWire::from_message(&small, MAX_CACHE_TTL, Verdict::Allow(Reason::NoMatch))
+    let small = CachedWire::from_message(&small, MAX_CACHE_TTL, Verdict::allow(Reason::NoMatch))
         .expect("encode");
     assert!(small.truncated.is_none());
     assert_eq!(&wire_for(&small, &request, 512)[..], &small.bytes[..]);
@@ -689,11 +690,11 @@ fn extract_cname_target_reads_record_data() {
     assert_eq!(cname_target(&a("alias.example.com", [192, 0, 2, 1])), None);
 }
 
-/// The text of one function in lib.rs, from its signature to its closing brace.
+/// The text of one function in `source`, from its signature to its closing brace.
 fn function_body<'a>(source: &'a str, function: &str) -> &'a str {
     let signature = format!("fn {function}(");
     let Some(at) = source.find(&signature) else {
-        unreachable!("{function} is not defined in lib.rs");
+        unreachable!("{function} is not defined in the source it was looked for in");
     };
     let line_start = source[..at].rfind('\n').map_or(0, |newline| newline + 1);
     let prefix = &source[line_start..at];
@@ -709,15 +710,16 @@ fn function_body<'a>(source: &'a str, function: &str) -> &'a str {
 /// is a regression the benchmarks would take a release to notice; this notices at `cargo test`.
 #[test]
 fn the_hit_path_builds_no_strings() {
-    let source = include_str!("lib.rs");
+    // Two files because the hit path spans them: the listener and the byte-shuffling live in
+    // serve.rs, the decision and the bookkeeping in lib.rs.
     let hit_path = [
-        "handle_udp",
-        "admit",
-        "probe",
-        "count_hit",
-        "log",
-        "wire_for",
-        "patch_header",
+        (include_str!("serve.rs"), "handle_udp"),
+        (include_str!("lib.rs"), "admit"),
+        (include_str!("lib.rs"), "probe"),
+        (include_str!("lib.rs"), "count_hit"),
+        (include_str!("lib.rs"), "log"),
+        (include_str!("serve.rs"), "wire_for"),
+        (include_str!("serve.rs"), "patch_header"),
     ];
     let forbidden = [
         "to_string()",
@@ -726,7 +728,7 @@ fn the_hit_path_builds_no_strings() {
         "String::new",
         ".to_owned()",
     ];
-    for function in hit_path {
+    for (source, function) in hit_path {
         let body = function_body(source, function);
         for pattern in forbidden {
             assert!(

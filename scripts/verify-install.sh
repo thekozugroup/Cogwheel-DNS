@@ -25,8 +25,11 @@ TIMEOUT=5
 SKIP_RESTART=no
 CONTAINER_NAME="${COGWHEEL_CONTAINER_NAME:-cogwheel}"
 
-# Blocked on a stock install before any list is configured.
-BLOCKED_DOMAIN=ads.example.com
+# A stock install ships no active rules of its own -- the seeded default list
+# has to be fetched first, which a runner with no egress never does. Section 2
+# installs a household block rule for this name instead of trusting a list, so
+# .test (reserved by RFC 2606, like .example) never resolves for real.
+BLOCKED_DOMAIN=blocked.test
 # Never on a blocklist, and reserved by RFC 2606 so it cannot be bought.
 ALLOWED_DOMAIN=example.com
 
@@ -111,6 +114,15 @@ http_post() {
     fi
 }
 
+# DELETE $1; body lands in $BODY_FILE; echoes the HTTP status code.
+http_delete() {
+    if have curl; then
+        curl -s -o "$BODY_FILE" -w '%{http_code}' --max-time "$TIMEOUT" -X DELETE "$BASE$1" 2>/dev/null || printf '000'
+    else
+        printf '000'
+    fi
+}
+
 dns_query() { # dns_query <domain> [extra dig flag]
     if have dig; then
         dig +short +timeout=3 +tries=2 ${2:+"$2"} -p "$DNS_PORT" "@$DNS_HOST" "$1" A 2>/dev/null
@@ -140,9 +152,10 @@ else
         fail "liveness   GET /health/live" "got HTTP $code; the server is not up on $BASE"
     fi
 
-    # Distinct endpoint from liveness. Note it is currently an unconditional
-    # stub on the server: a 200 here means the HTTP listener is answering, not
-    # that the database and resolver were probed.
+    # Distinct endpoint from liveness, and a stronger claim: the server holds
+    # this at 503 until storage is open at schema v1, a policy is installed and
+    # both DNS listeners are bound. A 200 here means the appliance can answer
+    # queries, which is what a rolling upgrade should gate on.
     code=$(http_get /health/ready)
     if [ "$code" = 200 ] && grep -q '"status"[[:space:]]*:[[:space:]]*"ready"' "$BODY_FILE"; then
         pass "readiness  GET /health/ready -> 200 {\"data\":{\"status\":\"ready\"}}"
@@ -150,11 +163,11 @@ else
         fail "readiness  GET /health/ready" "got HTTP $code"
     fi
 
-    code=$(http_get /api/v1/dashboard)
+    code=$(http_get /api/v1/overview)
     if [ "$code" = 200 ] && grep -q '"data"' "$BODY_FILE"; then
-        pass "api        GET /api/v1/dashboard -> 200 enveloped JSON"
+        pass "api        GET /api/v1/overview -> 200 enveloped JSON"
     else
-        fail "api        GET /api/v1/dashboard" "got HTTP $code"
+        fail "api        GET /api/v1/overview" "got HTTP $code"
     fi
 
     code=$(http_get /)
@@ -166,14 +179,14 @@ else
         fail "web UI     GET /" "got HTTP $code"
     fi
 
-    code=$(http_get /api/v1/resolver-access)
+    code=$(http_get /api/v1/overview)
     if [ "$code" = 200 ]; then
-        pass "advertised GET /api/v1/resolver-access -> 200"
+        pass "advertised GET /api/v1/overview -> connect.targets present"
         printf '           router should point at: '
-        sed -n 's/.*"dns_targets"[[:space:]]*:[[:space:]]*\[\([^]]*\)\].*/\1/p' "$BODY_FILE" | head -1
+        sed -n 's/.*"targets"[[:space:]]*:[[:space:]]*\[\([^]]*\)\].*/\1/p' "$BODY_FILE" | head -1
         printf '\n'
     else
-        fail "advertised GET /api/v1/resolver-access" "got HTTP $code"
+        fail "advertised GET /api/v1/overview" "got HTTP $code"
     fi
 fi
 
@@ -193,14 +206,37 @@ else
     fi
 
     # A blocked domain must resolve, but to the null address. An NXDOMAIN or a
-    # timeout here means filtering is not actually running.
-    answer=$(dns_query "$BLOCKED_DOMAIN" || true)
-    if printf '%s' "$answer" | grep -qx '0\.0\.0\.0'; then
-        pass "blocked    $BLOCKED_DOMAIN -> 0.0.0.0 (null-routed by policy)"
-    elif [ -z "$answer" ]; then
-        fail "blocked    $BLOCKED_DOMAIN" "no answer at all - the resolver may not be reachable"
+    # timeout here means filtering is not actually running. A marker rule
+    # (rather than a subscribed list) supplies the block, so this passes even
+    # when no list has downloaded yet.
+    if ! have curl; then
+        skip "blocked    $BLOCKED_DOMAIN" "needs curl to install a marker block rule"
     else
-        fail "blocked    $BLOCKED_DOMAIN" "expected 0.0.0.0, got: $(printf '%s' "$answer" | tr '\n' ' ')"
+        code=$(http_post /api/v1/rules "{\"domain\":\"$BLOCKED_DOMAIN\",\"action\":\"block\"}")
+        RULE_ID=$(sed -n 's/.*"id"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$BODY_FILE" | head -1)
+        if [ "$code" != 200 ] || [ -z "$RULE_ID" ]; then
+            fail "blocked    $BLOCKED_DOMAIN" "could not install the marker block rule (HTTP $code)"
+        else
+            answer=$(dns_query "$BLOCKED_DOMAIN" || true)
+            if printf '%s' "$answer" | grep -qx '0\.0\.0\.0'; then
+                pass "blocked    $BLOCKED_DOMAIN -> 0.0.0.0 (null-routed by the marker rule)"
+            elif [ -z "$answer" ]; then
+                fail "blocked    $BLOCKED_DOMAIN" "no answer at all - the resolver may not be reachable"
+            else
+                fail "blocked    $BLOCKED_DOMAIN" "expected 0.0.0.0, got: $(printf '%s' "$answer" | tr '\n' ' ')"
+            fi
+        fi
+
+        # Always remove the marker, on every path above: this script must not
+        # leave a household rule behind just because a later check failed.
+        if [ -n "$RULE_ID" ]; then
+            if http_delete "/api/v1/rules/$RULE_ID" >/dev/null 2>&1; then
+                printf '           removed marker rule for %s\n' "$BLOCKED_DOMAIN"
+            else
+                printf '           %scould not remove the marker rule for %s - delete it in Lists%s\n' \
+                       "$C_YELLOW" "$BLOCKED_DOMAIN" "$C_RESET"
+            fi
+        fi
     fi
 
     if have dig; then
@@ -250,20 +286,24 @@ elif [ "$(http_get /health/live)" != 200 ]; then
     skip "persistence" "control plane is not answering; fix section 1 first"
 else
     MARKER="verify-$(date +%s)"
-    payload="{\"emoji\":\"🔎\",\"name\":\"$MARKER\",\"description\":\"temporary record written by verify-install.sh\",\"blocklists\":[],\"allowlists\":[]}"
+    # TEST-NET-1 (RFC 5737): never a real device's address, so this cannot
+    # collide with anything already on the household's network.
+    MARKER_IP="192.0.2.$(( ($$ % 250) + 2 ))"
+    payload="{\"name\":\"$MARKER\",\"ip_address\":\"$MARKER_IP\"}"
 
-    code=$(http_post /api/v1/settings/block-profiles "$payload")
-    if [ "$code" != 200 ]; then
-        fail "persistence" "could not write the marker record (HTTP $code)"
+    code=$(http_post /api/v1/devices "$payload")
+    DEVICE_ID=$(sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$BODY_FILE" | head -1)
+    if [ "$code" != 200 ] || [ -z "$DEVICE_ID" ]; then
+        fail "persistence" "could not write the marker device (HTTP $code)"
     else
-        printf '           wrote marker "%s"; restarting Cogwheel...\n' "$MARKER"
+        printf '           wrote marker device "%s" (%s); restarting Cogwheel...\n' "$MARKER" "$MARKER_IP"
         RESTART_METHOD=
         if ! restart_cogwheel; then
             skip "persistence" "no '$CONTAINER_NAME' container and no cogwheel.service found; restart it yourself and re-run"
         elif ! wait_for_http; then
             fail "persistence" "Cogwheel did not come back after '$RESTART_METHOD' - this is a serious failure, check the logs"
         else
-            code=$(http_get /api/v1/settings)
+            code=$(http_get /api/v1/devices)
             if [ "$code" = 200 ] && grep -q "$MARKER" "$BODY_FILE"; then
                 pass "persistence  marker survived '$RESTART_METHOD' (the data volume is real)"
             else
@@ -274,10 +314,10 @@ else
 
         # Always clean up, on every path above: a verification script must not
         # leave records behind, least of all when it failed partway through.
-        if http_post /api/v1/settings/block-profiles/delete "{\"id\":\"$MARKER\"}" >/dev/null 2>&1; then
-            printf '           removed marker "%s"\n' "$MARKER"
+        if http_delete "/api/v1/devices/$DEVICE_ID" >/dev/null 2>&1; then
+            printf '           removed marker device "%s"\n' "$MARKER"
         else
-            printf '           %scould not remove marker "%s" - delete it in Settings%s\n' \
+            printf '           %scould not remove marker device "%s" - delete it in Devices%s\n' \
                    "$C_YELLOW" "$MARKER" "$C_RESET"
         fi
     fi

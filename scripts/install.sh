@@ -635,8 +635,8 @@ resolve_port_conflict() {
 # --------------------------------------------------------------------------
 # Advertised DNS targets
 #
-# What the dashboard tells a user to type into their router. Derived from the
-# host's own global addresses -- never hardcoded.
+# What the Overview page tells a user to type into their router. Derived from
+# the host's own global addresses -- never hardcoded.
 # --------------------------------------------------------------------------
 detect_advertised_targets() {
     if [ -n "${COGWHEEL_SERVER__ADVERTISED_DNS_TARGETS:-}" ]; then

@@ -83,4 +83,4 @@ export const ACTIVITY_BUFFER_LIMIT = 500;
 /** Rows fetched per page of query-log history. */
 export const ACTIVITY_PAGE_SIZE = 200;
 
-export const SNOOZE_OPTIONS = [5, 15, 60] as const;
+export const PAUSE_OPTIONS = [5, 15, 60] as const;

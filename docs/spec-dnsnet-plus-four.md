@@ -81,7 +81,9 @@ dns-core, storage.
 
 ### 1.4 cogwheel-storage (~700 LOC, deps: rusqlite(bundled), serde, serde_json, thiserror, tokio, tracing)
 - One `Arc<Mutex<Connection>>`; PRAGMAs journal_mode=WAL, synchronous=NORMAL,
-  wal_autocheckpoint=1000, foreign_keys=ON, busy_timeout=5000.
+  wal_autocheckpoint=1000, foreign_keys=ON, busy_timeout=5000, cache_size=-1024
+  (the page cache is 1 MiB of the process's stated memory budget rather than
+  whatever the linked SQLite defaults to).
 - Every public method is `async fn` running its closure under
   `tokio::task::spawn_blocking` (the DNS task and axum handlers never run
   rusqlite on a runtime worker).
@@ -157,8 +159,16 @@ CREATE UNIQUE INDEX rules_unique ON rules (domain, COALESCE(device_id, ''));
 CREATE TABLE query_log (
   id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, client TEXT NOT NULL, domain TEXT NOT NULL,
   qtype INTEGER NOT NULL, blocked INTEGER NOT NULL, reason INTEGER NOT NULL, list TEXT);
-CREATE INDEX query_log_ts ON query_log (ts);
-CREATE INDEX query_log_client_id ON query_log (client, id);
+-- No index on query_log. `id` is the rowid and the log is append-only in
+-- timestamp order, so the table's own order already is the (ts, id) order every
+-- read wants: the page walks backwards from the end, the prune forwards from the
+-- start, and both stop as soon as they have what they came for. Measured before
+-- deciding: with query_log_ts and query_log_client_id present, EXPLAIN QUERY PLAN
+-- on the client-filtered page still reports SCAN q -- `(?2 IS NULL OR q.client =
+-- ?2)` is not sargable -- and the page took 0.6 ms either way on a 250,000-row
+-- log, for 42 B/row of index (10 MB at the cap). Revisit with a Pi 5 measurement
+-- in Phase 4, which is where every figure below is to be re-taken on the real
+-- hardware.
 
 CREATE TABLE query_stats_hourly (
   hour INTEGER NOT NULL, client TEXT NOT NULL,            -- client '' = all devices
@@ -268,7 +278,7 @@ list; duplicate device IP; duplicate list name), 429 (refresh within 30 s), 503
 | 11 | PUT | `/api/v1/devices/{id}` | same body | device | rename / re-address / change lists; rebuilds scopes |
 | 12 | DELETE | `/api/v1/devices/{id}` | — | `{deleted:true}` | cascades device_lists + device rules |
 | 13 | GET | `/api/v1/rules` | `?device_id=<id>` optional | `[{id,domain,action,device_id\|null,device_name\|null,created_at}]` | |
-| 14 | POST | `/api/v1/rules` | `{domain,action:"allow"\|"block",device_id?}` | rule | domain normalized; must match `^[a-z0-9-]+(\.[a-z0-9-]+)+$`; upsert on (domain, device_id); rebuild |
+| 14 | POST | `/api/v1/rules` | `{domain,action:"allow"\|"block",device_id?}` | rule | domain normalized; must match `^[a-z0-9_-]+(\.[a-z0-9_-]+)+$` — the underscore because `_dns.resolver.arpa` and `_dmarc.x` reach the query log and a name Activity shows must be one you can rule on; the same predicate gates route 21, so `/check` cannot answer about a string `/rules` refuses; upsert on (domain, device_id); rebuild |
 | 15 | DELETE | `/api/v1/rules/{id}` | — | `{deleted:true}` | |
 | 16 | GET | `/api/v1/lists` | — | `{lists:[{id,name,url,kind,enabled,rule_count,last_ok_at,last_fetched_at,last_error,note,due}], presets:[{name,url,kind}]}` | |
 | 17 | POST | `/api/v1/lists` | `{name,url,kind:"hosts"\|"domains"\|"adblock",enabled?=true}` | `{list, outcome:"updated"\|"unchanged"\|"rejected"\|"failed", note}` | URL must be http(s) or data:; 409 if it would be the 65th enabled; fetch + rebuild immediately |
@@ -289,7 +299,8 @@ device marker.
 
 Shell: reuse the approved Shark UI shell exactly — `AppLayout` with `AppSidebar`
 (Navigation group of five entries; the "Appliance" group, `SidebarSeparator` and
-`SECONDARY_NAV` removed; footer keeps the status line, `SnoozeControl`,
+`SECONDARY_NAV` removed; footer keeps the status line, `PauseControl` — one verb
+for the thing the tile, the toast and route 4 all call pausing — and
 `ThemeToggle`), `PageShell/PageHeader/PageSections`, `SectionCard` (24 px
 gutters, no accent strips), `StatTile`, `DataTable` (with the container-query
 `hideBelow`/`stackBelow`), `ConfirmDialog`, `TextField/SelectField/FieldRow`,
@@ -542,8 +553,11 @@ segment-group and anything with an importer), `routes/protection.tsx` (→
 `docs/architecture/05-classifier.md`, `docs/reliability-budgets.md`, `ROADMAP.md`
 (→ a 20-line scope statement); rewrite `docs/hot-path-guardrails.md`,
 `docs/adr/0001-crate-boundaries.md`, `docs/crate-boundary-guardrails.md`,
-`README.md`, `DEPLOYMENT.md`, the quickstarts, `docs/release-policy.md`, the
-architecture docs.
+`README.md`, `DEPLOYMENT.md`, `docs/release-policy.md` and the three
+pre-Phase-3 architecture documents, which moved to `docs/archive/` in Phase 3 so
+that `docs/architecture/` stops promising a current map. The two quickstarts and
+`scripts/verify-install.sh` were rewritten in Phase 3: they are what a household
+member and an operator read first, and a stale one of those is worse than none.
 
 ---
 

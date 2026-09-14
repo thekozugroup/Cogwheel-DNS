@@ -13,6 +13,15 @@ export function formatCount(value: number | null | undefined): string {
   return plain.format(value);
 }
 
+/**
+ * `1 list`, `2 lists`, `0 lists`. A household appliance is routinely at one of
+ * everything, so "1 enabled lists" is the *most* common reading of these
+ * strings, not an edge case.
+ */
+export function pluralize(count: number, singular: string, plural = `${singular}s`): string {
+  return `${formatCount(count)} ${count === 1 ? singular : plural}`;
+}
+
 /** For stat tiles, where a six-digit count would otherwise blow the layout. */
 export function formatCompact(value: number | null | undefined): string {
   if (value === null || value === undefined || !Number.isFinite(value)) return DASH;

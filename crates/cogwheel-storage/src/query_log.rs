@@ -13,28 +13,23 @@
 //! that paints and one that stalls the runtime for a second every five seconds.
 
 use crate::{Storage, StorageError};
-use rusqlite::{Row, params};
+use rusqlite::params;
 use serde::Serialize;
 use std::collections::HashMap;
 
-/// Seconds per rollup bucket.
+/// Seconds per rollup bucket, and per day for the retention arithmetic.
 const HOUR: i64 = 3600;
-
-/// Seconds per day, for the retention arithmetic.
 const DAY: i64 = 86_400;
 
 /// One resolved query, on its way into the log.
 #[derive(Debug, Clone)]
 pub struct QueryLogEntry {
-    /// Unix seconds.
     pub ts: i64,
     /// Client address, as text — the same spelling `devices.ip_address` uses.
     pub client: String,
     /// Queried name, already normalised to lower case by the resolver.
     pub domain: String,
-    /// DNS query type, as its numeric code.
     pub qtype: u16,
-    /// Whether the answer was a block.
     pub blocked: bool,
     /// `cogwheel_policy::Reason` as its numeric code; this crate does not interpret it.
     pub reason: u8,
@@ -42,39 +37,52 @@ pub struct QueryLogEntry {
     pub list: Option<String>,
 }
 
-/// One logged query, on its way out, with its device resolved.
-#[derive(Debug, Clone, Serialize)]
-pub struct QueryLogRow {
-    /// Row id; also the keyset cursor.
-    pub id: i64,
-    /// Unix seconds.
-    pub ts: i64,
-    /// Client address.
-    pub client: String,
-    /// The device that address belongs to *now*, if any.
-    pub device_id: Option<String>,
-    /// That device's current name — renaming a device relabels its history.
-    pub device_name: Option<String>,
-    /// Queried name.
-    pub domain: String,
-    /// DNS query type code.
-    pub qtype: u16,
-    /// Whether the answer was a block.
-    pub blocked: bool,
-    /// Reason code.
-    pub reason: u8,
-    /// Name of the list that matched.
-    pub list: Option<String>,
+impl QueryLogEntry {
+    /// An entry carrying only what the hourly rollups read: the hour, the client and whether it
+    /// was blocked.
+    ///
+    /// `insert_batch_with_rollups(_, false)` — the `HISTORY_DAYS=0` path — never looks at the
+    /// other fields, and building them would be two `String`s allocated and dropped for every
+    /// answered query. The caller fills in `ts`, `client` and `blocked` over this.
+    #[must_use]
+    pub fn counted_only() -> Self {
+        Self {
+            ts: 0,
+            client: String::new(),
+            domain: String::new(),
+            qtype: 0,
+            blocked: false,
+            reason: 0,
+            list: None,
+        }
+    }
 }
 
-/// What `GET /api/v1/queries` asks for.
+record! {
+    /// One logged query, on its way out, with its device resolved.
+    QueryLogRow {
+        /// Row id; also the keyset cursor.
+        id: i64,
+        ts: i64,
+        client: String,
+        /// The device that address belongs to *now*, if any — renaming one relabels its history.
+        device_id: Option<String>,
+        device_name: Option<String>,
+        domain: String,
+        qtype: u16,
+        blocked: bool,
+        reason: u8,
+        list: Option<String>,
+    }
+}
+
+/// What `GET /api/v1/queries` asks for. Every field but `limit` narrows.
 #[derive(Debug, Clone, Default)]
 pub struct QueryFilter {
     /// Page size. Zero returns nothing, which is what a `limit=0` query string should do.
     pub limit: u32,
     /// Keyset cursor: return rows with an id strictly below this one.
     pub before: Option<i64>,
-    /// Only this client address.
     pub client: Option<String>,
     /// Only clients with no `devices` row.
     pub unnamed: bool,
@@ -84,32 +92,28 @@ pub struct QueryFilter {
     pub contains: Option<String>,
 }
 
-/// One page of the log.
+/// One page of the log, most recently logged first.
 #[derive(Debug, Clone, Serialize)]
 pub struct QueryPage {
-    /// Newest first.
     pub rows: Vec<QueryLogRow>,
     /// Cursor for the next page, or `None` when this page is the end of the log.
     pub next_before: Option<i64>,
 }
 
-/// A domain and how many times it appeared — the Overview's two top-ten tables.
-#[derive(Debug, Clone, Serialize)]
-pub struct DomainCount {
-    /// The queried name.
-    pub domain: String,
-    /// How many rows matched.
-    pub count: i64,
+record! {
+    /// A domain and how many times it appeared — the Overview's two top-ten tables.
+    DomainCount {
+        domain: String,
+        count: i64,
+    }
 }
 
-/// What one retention pass removed.
+/// What one retention pass removed: log rows past the age window, log rows past the hard row cap,
+/// and rollup buckets past the rollup window.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct PruneOutcome {
-    /// Log rows older than the retention window.
     pub by_age: usize,
-    /// Log rows beyond the hard row cap.
     pub by_cap: usize,
-    /// Rollup buckets older than the rollup window.
     pub rollups: usize,
 }
 
@@ -131,10 +135,6 @@ impl Storage {
     /// One transaction for both because a crash between them would leave the dashboard's counts
     /// and the log disagreeing, and the counts are the thing nothing else can reconstruct.
     ///
-    /// # Errors
-    ///
-    /// Propagates any SQLite failure; the caller drops the batch and logs, because DNS must never
-    /// wait on this.
     pub async fn insert_batch_with_rollups(
         &self,
         entries: Vec<QueryLogEntry>,
@@ -203,15 +203,17 @@ impl Storage {
         .await
     }
 
-    /// One page of the log, newest first.
+    /// One page of the log, most recently logged first.
+    ///
+    /// Ordered by `id` and not by `ts`, which are not quite the same order: a cache hit is logged
+    /// inline while a miss is logged after the upstream answers, so insertion trails the timestamp
+    /// by however long the slowest query in the batch took. `id` is what the keyset needs and what
+    /// the page promises; two rows a few seconds apart can therefore show their timestamps
+    /// inverted, and the Activity page says "most recently answered first" rather than "newest".
     ///
     /// Keyset and not `OFFSET`: the log is being appended to while someone pages through it, so an
     /// offset would show them rows twice. The device columns come from a `LEFT JOIN` on the
     /// address, which is why renaming a device relabels every row it ever produced.
-    ///
-    /// # Errors
-    ///
-    /// Propagates any SQLite failure.
     pub async fn query_page(&self, filter: QueryFilter) -> Result<QueryPage, StorageError> {
         self.with_connection(move |connection| {
             // Domains are stored lower-cased by the resolver, so lowering the needle is the whole
@@ -222,6 +224,8 @@ impl Storage {
                 .map(str::to_lowercase)
                 .filter(|needle| !needle.is_empty());
             let mut query = connection.prepare_cached(
+                // Columns in `QueryLogRow::from_row` order; they carry table qualifiers, which is
+                // why this projection is spelled out rather than taken from `COLUMNS`.
                 "SELECT q.id, q.ts, q.client, d.id, d.name, q.domain, q.qtype, q.blocked,
                         q.reason, q.list
                  FROM query_log q LEFT JOIN devices d ON d.ip_address = q.client
@@ -242,7 +246,7 @@ impl Storage {
                     contains,
                     filter.limit
                 ],
-                row_to_query_log_row,
+                QueryLogRow::from_row,
             )?;
             let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
 
@@ -262,10 +266,6 @@ impl Storage {
     /// `blocked` selects which of the Overview's two tables this is: `true` counts blocked rows
     /// only ("Top blocked"), `false` counts every row ("Top queried"). Ties break on the domain so
     /// a quiet household's table does not reshuffle between polls.
-    ///
-    /// # Errors
-    ///
-    /// Propagates any SQLite failure.
     pub async fn top_domains(
         &self,
         blocked: bool,
@@ -280,12 +280,7 @@ impl Storage {
                  ORDER BY hits DESC, domain ASC
                  LIMIT ?3",
             )?;
-            let rows = query.query_map(params![since, blocked, limit], |row| {
-                Ok(DomainCount {
-                    domain: row.get(0)?,
-                    count: row.get(1)?,
-                })
-            })?;
+            let rows = query.query_map(params![since, blocked, limit], DomainCount::from_row)?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
         .await
@@ -295,10 +290,6 @@ impl Storage {
     ///
     /// This is the "clear my history" button, and it clears history: the counts that remain say
     /// how much was resolved and how much was blocked, and nothing about what was asked for.
-    ///
-    /// # Errors
-    ///
-    /// Propagates any SQLite failure.
     pub async fn clear_query_log(&self) -> Result<usize, StorageError> {
         self.with_connection(|connection| Ok(connection.execute("DELETE FROM query_log", [])?))
             .await
@@ -310,13 +301,15 @@ impl Storage {
     /// nothing is being written, so an age delete would find every remaining row older than a
     /// zero-day window and wipe a log the operator only meant to stop adding to.
     ///
+    /// Both deletes are expressed as an `id` range rather than as a predicate over the rows,
+    /// because `query_log` carries no index: `id` is the rowid, the log is appended in timestamp
+    /// order, and so the first row that is new enough marks the boundary. Finding it scans only
+    /// the rows about to be deleted. A clock that steps backwards can strand one row on the old
+    /// side of that boundary; the next pass takes it.
+    ///
     /// The cap keeps exactly `max_rows`: the subquery names the id of the row one past the cap
     /// counting back from the newest, and everything at or below it goes. Fewer rows than the cap
     /// leaves the subquery `NULL`, and `id <= NULL` matches nothing.
-    ///
-    /// # Errors
-    ///
-    /// Propagates any SQLite failure.
     pub async fn prune_query_log(
         &self,
         now: i64,
@@ -332,7 +325,12 @@ impl Storage {
                 0
             } else {
                 let cutoff = now - i64::from(history_days) * DAY;
-                transaction.execute("DELETE FROM query_log WHERE ts < ?1", [cutoff])?
+                transaction.execute(
+                    "DELETE FROM query_log WHERE id < COALESCE(
+                         (SELECT id FROM query_log WHERE ts >= ?1 ORDER BY id LIMIT 1),
+                         (SELECT id + 1 FROM query_log ORDER BY id DESC LIMIT 1))",
+                    [cutoff],
+                )?
             };
 
             let by_cap = transaction.execute(
@@ -356,20 +354,4 @@ impl Storage {
         })
         .await
     }
-}
-
-/// Read a row of the [`Storage::query_page`] projection.
-fn row_to_query_log_row(row: &Row<'_>) -> rusqlite::Result<QueryLogRow> {
-    Ok(QueryLogRow {
-        id: row.get(0)?,
-        ts: row.get(1)?,
-        client: row.get(2)?,
-        device_id: row.get(3)?,
-        device_name: row.get(4)?,
-        domain: row.get(5)?,
-        qtype: row.get(6)?,
-        blocked: row.get(7)?,
-        reason: row.get(8)?,
-        list: row.get(9)?,
-    })
 }

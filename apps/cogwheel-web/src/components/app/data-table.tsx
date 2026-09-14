@@ -1,11 +1,10 @@
 import React from "react";
-import { ArrowDownIcon, ArrowUpIcon, ChevronsUpDownIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { EmptyState, ErrorState, LoadingSkeleton } from "@/components/app/states";
 
 /** Container-query widths a table may shed a column or restack at. */
-export type ColumnBreakpoint = "sm" | "md" | "lg" | "xl" | "2xl" | "3xl" | "4xl";
+type ColumnBreakpoint = "sm" | "md" | "lg" | "xl" | "2xl" | "3xl" | "4xl";
 
 /**
  * All three maps are written out in full because Tailwind scans for literal
@@ -45,8 +44,21 @@ export type Column<Row> = {
   key: string;
   header: string;
   align?: "start" | "end";
-  /** Hidden in the stacked card form, where space is tightest. */
-  hideOnStack?: boolean;
+  /**
+   * Rendered in the stacked card's own header strip instead of as a
+   * label/value pair. For a column whose cell is a control rather than a value:
+   * a row menu or a pair of icon buttons has no label worth printing, and
+   * dropping it instead would take the row's actions away from exactly the
+   * people on the narrowest screens.
+   */
+  stackHeader?: boolean;
+  /**
+   * Let this cell wrap instead of truncating. For the columns that carry a
+   * sentence rather than a value — a list's error or its protected-names note —
+   * an ellipsis hides the only thing the column is there to say, and there is
+   * no tooltip on a phone.
+   */
+  wrap?: boolean;
   /**
    * Container width below which this column is dropped from the table form.
    * Measured against the table's own container rather than the viewport: these
@@ -57,8 +69,6 @@ export type Column<Row> = {
   className?: string;
   headClassName?: string;
   render: (row: Row) => React.ReactNode;
-  /** Providing this makes the column sortable. */
-  sortValue?: (row: Row) => number | string;
 };
 
 export type DataTableProps<Row> = {
@@ -81,8 +91,6 @@ export type DataTableProps<Row> = {
   stackBelow?: ColumnBreakpoint;
   className?: string;
 };
-
-type SortState = { key: string; direction: "asc" | "desc" } | null;
 
 /**
  * One table implementation for the whole app so loading, empty, error and
@@ -109,30 +117,6 @@ export function DataTable<Row>({
   stackBelow = "sm",
   className,
 }: DataTableProps<Row>) {
-  const [sort, setSort] = React.useState<SortState>(null);
-
-  const sorted = React.useMemo(() => {
-    if (!sort) return rows;
-    const column = columns.find((candidate) => candidate.key === sort.key);
-    if (!column?.sortValue) return rows;
-
-    const factor = sort.direction === "asc" ? 1 : -1;
-    return [...rows].sort((left, right) => {
-      const a = column.sortValue?.(left) ?? "";
-      const b = column.sortValue?.(right) ?? "";
-      if (typeof a === "number" && typeof b === "number") return (a - b) * factor;
-      return String(a).localeCompare(String(b)) * factor;
-    });
-  }, [columns, rows, sort]);
-
-  const toggleSort = (key: string) => {
-    setSort((current) => {
-      if (current?.key !== key) return { key, direction: "asc" };
-      if (current.direction === "asc") return { key, direction: "desc" };
-      return null;
-    });
-  };
-
   if (loading && rows.length === 0) return <LoadingSkeleton rows={4} variant="table" />;
   if (error && rows.length === 0) {
     return <ErrorState detail={error} onRetry={onRetry} title="Could not load this list" />;
@@ -149,6 +133,8 @@ export function DataTable<Row>({
   }
 
   const interactive = Boolean(onRowClick);
+  const headerColumns = columns.filter((column) => column.stackHeader);
+  const valueColumns = columns.filter((column) => !column.stackHeader);
 
   return (
     <div className={cn("@container min-w-0", className)}>
@@ -164,50 +150,23 @@ export function DataTable<Row>({
           {caption ? <caption className="sr-only">{caption}</caption> : null}
           <TableHeader>
             <TableRow>
-              {columns.map((column) => {
-                const isSorted = sort?.key === column.key;
-                const SortIcon = !isSorted
-                  ? ChevronsUpDownIcon
-                  : sort.direction === "asc"
-                    ? ArrowUpIcon
-                    : ArrowDownIcon;
-
-                return (
-                  <TableHead
-                    aria-sort={
-                      isSorted ? (sort.direction === "asc" ? "ascending" : "descending") : undefined
-                    }
-                    className={cn(
-                      "text-xs",
-                      column.align === "end" && "text-right",
-                      column.hideBelow && SHED_BELOW[column.hideBelow],
-                      column.headClassName,
-                    )}
-                    key={column.key}
-                  >
-                    {column.sortValue ? (
-                      <button
-                        className={cn(
-                          "-mx-1 inline-flex items-center gap-1 rounded px-1 py-0.5",
-                          "hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2",
-                          column.align === "end" && "flex-row-reverse",
-                        )}
-                        onClick={() => toggleSort(column.key)}
-                        type="button"
-                      >
-                        {column.header}
-                        <SortIcon aria-hidden className="size-3" />
-                      </button>
-                    ) : (
-                      column.header
-                    )}
-                  </TableHead>
-                );
-              })}
+              {columns.map((column) => (
+                <TableHead
+                  className={cn(
+                    "text-xs",
+                    column.align === "end" && "text-right",
+                    column.hideBelow && SHED_BELOW[column.hideBelow],
+                    column.headClassName,
+                  )}
+                  key={column.key}
+                >
+                  {column.header}
+                </TableHead>
+              ))}
             </TableRow>
           </TableHeader>
           <TableBody>
-            {sorted.map((row) => (
+            {rows.map((row) => (
               <TableRow
                 className={cn(interactive && "cursor-pointer")}
                 key={rowKey(row)}
@@ -229,7 +188,7 @@ export function DataTable<Row>({
                 {columns.map((column) => (
                   <TableCell
                     className={cn(
-                      "max-w-[22rem] truncate",
+                      column.wrap ? "max-w-[26rem] whitespace-normal" : "max-w-[22rem] truncate",
                       column.align === "end" && "text-right",
                       column.hideBelow && SHED_BELOW[column.hideBelow],
                       column.className,
@@ -247,36 +206,43 @@ export function DataTable<Row>({
 
       {/* Stacked form, for containers too narrow to hold the table. */}
       <ul className={cn("flex flex-col gap-2", CARDS_BELOW[stackBelow])}>
-        {sorted.map((row) => {
+        {rows.map((row) => {
           const body = (
             <dl className="grid gap-1.5">
-              {columns
-                .filter((column) => !column.hideOnStack)
-                .map((column) => (
-                  <div className="flex items-start justify-between gap-3" key={column.key}>
-                    <dt className="shrink-0 text-muted-foreground text-xs">{column.header}</dt>
-                    <dd className="min-w-0 break-words text-right text-foreground text-sm">
-                      {column.render(row)}
-                    </dd>
-                  </div>
-                ))}
+              {valueColumns.map((column) => (
+                <div className="flex items-start justify-between gap-3" key={column.key}>
+                  <dt className="shrink-0 text-muted-foreground text-xs">{column.header}</dt>
+                  <dd className="stacked-value min-w-0 text-right text-foreground text-sm">
+                    {column.render(row)}
+                  </dd>
+                </div>
+              ))}
             </dl>
           );
 
           return (
             <li key={rowKey(row)}>
-              {interactive ? (
-                <button
-                  aria-label={rowActionLabel?.(row)}
-                  className="w-full rounded-xl border border-border p-3 text-left hover:bg-muted/50"
-                  onClick={() => onRowClick?.(row)}
-                  type="button"
-                >
-                  {body}
-                </button>
-              ) : (
-                <div className="rounded-xl border border-border p-3">{body}</div>
-              )}
+              <div className="flex flex-col gap-2 rounded-xl border border-border p-3">
+                {headerColumns.length > 0 ? (
+                  <div className="flex items-center justify-end gap-1">
+                    {headerColumns.map((column) => (
+                      <React.Fragment key={column.key}>{column.render(row)}</React.Fragment>
+                    ))}
+                  </div>
+                ) : null}
+                {interactive ? (
+                  <button
+                    aria-label={rowActionLabel?.(row)}
+                    className="-m-1 rounded-lg p-1 text-left hover:bg-muted/50"
+                    onClick={() => onRowClick?.(row)}
+                    type="button"
+                  >
+                    {body}
+                  </button>
+                ) : (
+                  body
+                )}
+              </div>
             </li>
           );
         })}

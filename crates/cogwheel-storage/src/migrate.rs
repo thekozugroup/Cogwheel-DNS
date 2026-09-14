@@ -16,6 +16,13 @@
 //! files by hand is exactly the sort of thing that produces a corrupt "backup" nobody discovers
 //! until they need it.
 //!
+//! # One deviation from the spec, in both schemas
+//!
+//! Section 2.1's DDL creates two indexes on `query_log` that neither this module nor
+//! `schema_v1.sql` builds; `rules_unique` is the only index either one creates, and
+//! `an_upgraded_schema_matches_a_fresh_one` asserts the two agree on that. The reasoning, with the
+//! measurements behind it, is in the comment above `CREATE TABLE query_log` in `schema_v1.sql`.
+//!
 //! # What is deliberately not carried over
 //!
 //! `blocklist_profile_override` never reached DNS evaluation in v0 — it was read by an API that
@@ -45,7 +52,7 @@ const BASELINE_RULE_DOMAINS: [&str; 2] = ["ads.example.com", "tracker.example.co
 /// The column definitions are `schema_v1.sql` verbatim; only the table names differ. The indexes
 /// carry their *final* names because `ALTER TABLE … RENAME` leaves index names alone, and an
 /// upgraded database whose indexes are called something else would be a schema that only looks
-/// like v1. `upgraded_schema_matches_a_fresh_schema` in tests/storage.rs is the check that these
+/// like v1. `an_upgraded_schema_matches_a_fresh_one` in tests/upgrade.rs is the check that these
 /// two definitions have not drifted apart.
 ///
 /// The foreign keys point at the `_v1` tables, not at the final names. Pointing them at the final
@@ -85,8 +92,6 @@ CREATE UNIQUE INDEX rules_unique ON rules_v1 (domain, COALESCE(device_id, ''));
 CREATE TABLE query_log_v1 (
   id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, client TEXT NOT NULL, domain TEXT NOT NULL,
   qtype INTEGER NOT NULL, blocked INTEGER NOT NULL, reason INTEGER NOT NULL, list TEXT);
-CREATE INDEX query_log_ts ON query_log_v1 (ts);
-CREATE INDEX query_log_client_id ON query_log_v1 (client, id);
 
 CREATE TABLE query_stats_hourly_v1 (
   hour INTEGER NOT NULL, client TEXT NOT NULL,

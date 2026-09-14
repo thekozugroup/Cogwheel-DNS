@@ -5,7 +5,7 @@ import type React from "react";
 import { tv, type VariantProps } from "tailwind-variants";
 import { cn } from "@/lib/utils";
 
-export const statusVariants = tv({
+const statusVariants = tv({
   base: [
     "shrink-0 rounded-full",
     "flex items-center justify-center",
@@ -25,7 +25,7 @@ export const statusVariants = tv({
       success: "bg-success text-neutral-950",
       info: "bg-info text-neutral-950",
       warning: "bg-warning text-neutral-950",
-      destructive: "bg-destructive text-neutral-950 dark:bg-destructive-foreground",
+      destructive: "bg-destructive text-neutral-950",
     },
     size: {
       sm: "size-2 [&_svg:not([class*='size-'])]:size-1.5 [&_svg]:pointer-events-none [&_svg]:shrink-0",

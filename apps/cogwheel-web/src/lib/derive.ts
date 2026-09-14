@@ -33,6 +33,11 @@ export function protectionState(pausedUntil: number | null, offline: boolean): P
  * Plain-language version of the step that decided a query. `list` carries the
  * list name for the three tiers that have one, so the row reads "oisd small"
  * rather than "list".
+ *
+ * "Nothing matched" is the empty string, and the caller renders nothing at all:
+ * it is the verdict for most of an allowed household's traffic, and a column
+ * that printed "no match" beside eight rows in ten would be saying only that
+ * the product works, in vocabulary borrowed from the evaluator.
  */
 export function reasonLabel(reason: Reason, list: string | null): string {
   switch (reason) {
@@ -53,11 +58,17 @@ export function reasonLabel(reason: Reason, list: string | null): string {
     case "unfiltered":
       return "unfiltered";
     default:
-      return "no match";
+      return "";
   }
 }
 
-/** One sentence naming the step, for the "Why?" answer. */
+/**
+ * One sentence naming the step, for the "Why?" answer.
+ *
+ * It leads with the domain because the answer outlives the click: it is read
+ * beside a ten-row table or a two-hundred-row log, and "Blocked for everyone —
+ * oisd small." on its own does not say which of those rows it is about.
+ */
 export function checkSentence(result: CheckResult): string {
   const verdict = result.verdict === "block" ? "Blocked" : "Allowed";
   const scope =
@@ -66,7 +77,8 @@ export function checkSentence(result: CheckResult): string {
       : result.scope === "household"
         ? " for everyone"
         : "";
-  return `${verdict}${scope} — ${reasonLabel(result.reason, result.list)}.`;
+  const reason = reasonLabel(result.reason, result.list);
+  return `${result.domain} — ${verdict}${scope}${reason ? ` — ${reason}` : ""}.`;
 }
 
 const QTYPES: Record<number, string> = {
@@ -104,7 +116,7 @@ export function normalizeDomain(value: string): string {
 
 /** The server's rule-domain shape: at least two labels, no scheme, no path. */
 export function isRuleDomain(value: string): boolean {
-  return /^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(normalizeDomain(value));
+  return /^[a-z0-9_-]+(\.[a-z0-9_-]+)+$/.test(normalizeDomain(value));
 }
 
 const IPV4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;

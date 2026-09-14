@@ -121,20 +121,31 @@ else
     fail "could not resolve example.com through ${DNS_HOST}:${DNS_PORT}"
 fi
 
+# How many rules are actually loaded decides whether "not blocked" means "lists are still
+# compiling" or "filtering is genuinely broken" — without this the same FAIL means two very
+# different things on a fresh install.
+RULES="$(api /api/v1/overview | tr ',' '\n' | sed -n 's/.*"rules_loaded":\([0-9]*\).*/\1/p' | head -1 || true)"
+if [ -n "$RULES" ]; then
+    info "active ruleset: ${RULES} rules"
+fi
+
 BLOCKED="$(query doubleclick.net || true)"
 if printf '%s' "$BLOCKED" | grep -q '^0\.0\.0\.0$'; then
     pass "blocks doubleclick.net (returns 0.0.0.0)"
 elif [ -z "$BLOCKED" ]; then
     fail "no answer for doubleclick.net"
+elif [ "${RULES:-0}" -eq 0 ] 2>/dev/null; then
+    info "doubleclick.net -> $(printf '%s' "$BLOCKED" | tr '\n' ' ')"
+    fail "no blocklist rules are loaded yet — wait for the first refresh, then re-run"
 else
     info "doubleclick.net -> $(printf '%s' "$BLOCKED" | tr '\n' ' ')"
-    fail "doubleclick.net still resolved — filtering is not working (on a fresh install the lists may still be downloading: wait for the first refresh, then re-run)"
+    fail "${RULES} rules are loaded but doubleclick.net still resolved — filtering is not working"
 fi
 
 # ---------------------------------------------------------------- web
 
 head_ "Web control plane"
-for route in / /activity /devices /protection /settings; do
+for route in / /activity /devices /lists /settings; do
     CODE="$(curl -fsS -o /dev/null -w '%{http_code}' --max-time 10 "http://${HTTP}${route}" 2>/dev/null || echo 000)"
     if [ "$CODE" = "200" ]; then
         pass "GET ${route} -> 200"
@@ -148,11 +159,18 @@ if [ "$CODE" = "404" ]; then
 else
     fail "unknown API path -> ${CODE} (expected 404)"
 fi
+# Every failure is {"error": "..."} (spec section 3). The status alone does not
+# say that: the web fallback answers unknown paths with the SPA shell.
+BODY="$(curl -s --max-time 10 "http://${HTTP}/api/v1/definitely-not-real" 2>/dev/null || echo '')"
+case "$BODY" in
+    '{"error":'*) pass "unknown API path body is a json error envelope" ;;
+    *) fail "unknown API path body was not {\"error\": ...}: ${BODY}" ;;
+esac
 
 # ---------------------------------------------------------------- persistence
 
 head_ "Persistence across restart"
-BEFORE="$(api /api/v1/runtime | tr ',' '\n' | sed -n 's/.*"queries_total":\([0-9]*\).*/\1/p' | head -1 || true)"
+BEFORE="$(api /api/v1/overview | tr ',' '\n' | sed -n 's/.*"queries_total":\([0-9]*\).*/\1/p' | head -1 || true)"
 info "queries_total before restart: ${BEFORE:-unknown}"
 if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx cogwheel; then
     docker restart cogwheel >/dev/null 2>&1 || true

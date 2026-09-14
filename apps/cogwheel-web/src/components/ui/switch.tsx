@@ -1,10 +1,8 @@
 "use client";
 
-import { Switch as ArkSwitch, useSwitchContext } from "@ark-ui/react/switch";
+import { Switch as ArkSwitch } from "@ark-ui/react/switch";
 import type React from "react";
 import { cn } from "@/lib/utils";
-
-export const useSwitch = useSwitchContext;
 
 export const Switch = (props: React.ComponentProps<typeof ArkSwitch.Root>) => {
   const { className, tabIndex, ...rest } = props;
@@ -19,7 +17,7 @@ export const Switch = (props: React.ComponentProps<typeof ArkSwitch.Root>) => {
         "inline-flex shrink-0 items-center",
         "rounded-full border border-transparent",
         "transition-all",
-        "outline-none [[data-focus-visible],[data-invalid]]:ring-[3px]",
+        "[[data-focus-visible],[data-invalid]]:ring-[3px]",
         "data-focus-visible:border-primary data-focus-visible:ring-ring/32",
         "data-invalid:border-destructive data-invalid:ring-destructive/24",
         "dark:data-invalid:border-destructive-foreground dark:data-invalid:ring-destructive-foreground/20",

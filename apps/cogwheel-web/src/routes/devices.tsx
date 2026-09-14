@@ -145,19 +145,17 @@ export function DevicesScreen() {
     });
 
   const columns: Column<Device>[] = [
-    { key: "name", header: "Name", render: (row) => row.name, sortValue: (row) => row.name },
+    { key: "name", header: "Name", render: (row) => row.name },
     {
       key: "ip",
       header: "IP",
       render: (row) => <span className="font-mono text-xs">{row.ip_address}</span>,
-      sortValue: (row) => row.ip_address,
     },
     {
       key: "filtering",
       header: "Filtering",
       render: (row) =>
         row.filtering ? <StatusPill label="On" tone="good" /> : <StatusPill label="Off" tone="warn" />,
-      sortValue: (row) => (row.filtering ? 1 : 0),
     },
     {
       key: "lists",
@@ -172,7 +170,6 @@ export function DevicesScreen() {
       align: "end",
       hideBelow: "xl",
       render: (row) => <span className="tabular">{formatCount(row.rules.length)}</span>,
-      sortValue: (row) => row.rules.length,
     },
     {
       key: "traffic",
@@ -183,7 +180,6 @@ export function DevicesScreen() {
           {formatCount(row.queries_24h)} / {formatCount(row.blocked_24h)}
         </span>
       ),
-      sortValue: (row) => row.queries_24h,
     },
     {
       key: "seen",
@@ -193,7 +189,6 @@ export function DevicesScreen() {
       render: (row) => (
         <span className="text-muted-foreground text-xs">{formatRelative(row.last_seen_at)}</span>
       ),
-      sortValue: (row) => row.last_seen_at ?? 0,
     },
   ];
 
@@ -312,64 +307,64 @@ export function DevicesScreen() {
                 )}
               </fieldset>
 
-              <div className="space-y-3">
-                <p className="font-medium text-foreground text-sm">Rules for this device</p>
-                {draft.id ? null : (
-                  <p className="text-muted-foreground text-sm">Add the device first, then its rules.</p>
-                )}
+              {/* Only once the device exists. A rule needs a device id, so in Add mode this
+                  was a live-looking form that could not be used, explained by a line of
+                  text underneath it; not drawing it says the same thing and cannot be
+                  typed into. */}
+              {editing === null ? null : (
+                <div className="space-y-3">
+                  <p className="font-medium text-foreground text-sm">Rules for this device</p>
+                  <div className="flex flex-wrap items-end gap-2">
+                    <TextField
+                      className="min-w-48 flex-1"
+                      label="Domain"
+                      onChange={setRuleDomain}
+                      placeholder="ads.example.com"
+                      value={ruleDomain}
+                    />
+                    <SelectField
+                      className="w-32"
+                      label="Action"
+                      onChange={(value) => setRuleAction(value as RuleAction)}
+                      options={[
+                        { value: "block", label: "Block" },
+                        { value: "allow", label: "Allow" },
+                      ]}
+                      value={ruleAction}
+                    />
+                    <Button
+                      disabled={!ruleDomain.trim()}
+                      isLoading={busy === "device-rule-add"}
+                      onClick={() => void addRule()}
+                      variant="outline"
+                    >
+                      Add
+                    </Button>
+                  </div>
 
-                <div className="flex flex-wrap items-end gap-2">
-                  <TextField
-                    className="min-w-48 flex-1"
-                    disabled={!draft.id}
-                    label="Domain"
-                    onChange={setRuleDomain}
-                    placeholder="ads.example.com"
-                    value={ruleDomain}
-                  />
-                  <SelectField
-                    className="w-32"
-                    disabled={!draft.id}
-                    label="Action"
-                    onChange={(value) => setRuleAction(value as RuleAction)}
-                    options={[
-                      { value: "block", label: "Block" },
-                      { value: "allow", label: "Allow" },
-                    ]}
-                    value={ruleAction}
-                  />
-                  <Button
-                    disabled={!draft.id || !ruleDomain.trim()}
-                    isLoading={busy === "device-rule-add"}
-                    onClick={() => void addRule()}
-                    variant="outline"
-                  >
-                    Add
-                  </Button>
+                  {editing && editing.rules.length > 0 ? (
+                    <ul className="divide-y divide-border">
+                      {editing.rules.map((rule) => (
+                        <li className="flex items-center gap-3 py-1.5" key={rule.id}>
+                          <span className="min-w-0 flex-1 truncate font-mono text-xs">{rule.domain}</span>
+                          <StatusPill
+                            label={rule.action === "allow" ? "Allow" : "Block"}
+                            tone={rule.action === "allow" ? "good" : "bad"}
+                          />
+                          <Button
+                            aria-label={`Remove ${rule.domain}`}
+                            onClick={() => void deleteRule(rule.id, rule.domain)}
+                            size="icon-sm"
+                            variant="ghost"
+                          >
+                            <Trash2Icon aria-hidden />
+                          </Button>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
                 </div>
-
-                {editing && editing.rules.length > 0 ? (
-                  <ul className="divide-y divide-border">
-                    {editing.rules.map((rule) => (
-                      <li className="flex items-center gap-3 py-1.5" key={rule.id}>
-                        <span className="min-w-0 flex-1 truncate font-mono text-xs">{rule.domain}</span>
-                        <StatusPill
-                          label={rule.action === "allow" ? "Allow" : "Block"}
-                          tone={rule.action === "allow" ? "good" : "bad"}
-                        />
-                        <Button
-                          aria-label={`Remove ${rule.domain}`}
-                          onClick={() => void deleteRule(rule.id, rule.domain)}
-                          size="icon-sm"
-                          variant="ghost"
-                        >
-                          <Trash2Icon aria-hidden />
-                        </Button>
-                      </li>
-                    ))}
-                  </ul>
-                ) : null}
-              </div>
+              )}
             </div>
           </SectionCard>
 

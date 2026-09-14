@@ -1,7 +1,7 @@
 import React from "react";
 import { ChevronDownIcon, Trash2Icon } from "lucide-react";
 import { api } from "@/lib/api";
-import { formatBytes, formatCount, formatInterval } from "@/lib/format";
+import { formatBytes, formatCount, formatInterval, pluralize } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { useCogwheel } from "@/data/context";
 import { Button } from "@/components/ui/button";
@@ -114,7 +114,7 @@ export function SettingsScreen() {
                 </span>
               </span>
             </Row>
-            <Row env="COGWHEEL_STORAGE__DATABASE_URL" label="Cached list bodies">
+            <Row label="Cached list bodies" note="A lists/ directory beside the database.">
               <Mono>{settings.lists_dir || "—"}</Mono>
             </Row>
           </dl>
@@ -172,7 +172,7 @@ export function SettingsScreen() {
             action: () => api.clearQueries(),
             after: "light",
             successTitle: "Query log cleared",
-            successDetail: (result) => `${formatCount(result.deleted)} rows deleted.`,
+            successDetail: (result) => `${pluralize(result.deleted, "row")} deleted.`,
             failureTitle: "Could not clear the log",
           });
         }}
@@ -191,11 +191,14 @@ const Mono = ({ children }: { children: React.ReactNode }) => (
 function Row({
   label,
   env,
+  note,
   children,
 }: {
   label: string;
   /** The environment variable that sets this value, shown in mono beneath it. */
   env?: string;
+  /** Shown in place of `env` for a value nothing sets directly. */
+  note?: string;
   children: React.ReactNode;
 }) {
   return (
@@ -203,6 +206,7 @@ function Row({
       <dt className="min-w-0">
         <span className="block font-medium text-foreground text-sm">{label}</span>
         {env ? <span className="block font-mono text-muted-foreground text-xs">{env}</span> : null}
+        {note ? <span className="block text-muted-foreground text-xs">{note}</span> : null}
       </dt>
       <dd className="min-w-0 text-foreground text-sm sm:text-right">{children}</dd>
     </div>

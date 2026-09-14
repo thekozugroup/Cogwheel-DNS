@@ -23,10 +23,22 @@ none of the three can contaminate another's numbers.
         --http-port 38080 --dns-port 35353 --db /tmp/cogwheel-bench.db \\
         --out /tmp/bench-results
 
-This talks to the Phase 3 API (spec §3, 22 routes). Against the tree as of
-this writing -- which still serves the old 16-route API -- every API call
-below fails fast with a clear message; see the README for what this script
-has and has not been validated against.
+This talks to the Phase 3 API (spec §3, 22 routes), and against a server
+that does not serve it every API call below fails fast with a clear message
+naming the path.
+
+The run of record
+-----------------
+One invocation of this script produces one `bench_<label>.json`, and that
+file is the measurement. Every §12 row must be read out of the *same* file:
+the phases share a process, a cache and a page cache, so a figure lifted
+from a different invocation -- a tighter isolated repeat of one scenario, a
+re-run of just the phase that missed -- is not comparable with the rows
+beside it, and quoting one next to rows from a failing run reports a
+benchmark nobody ran. If a row needs a different method to be meaningful,
+change the method here so every row is taken under it, and re-run the whole
+table. Re-running the script as a whole to check reproducibility is fine and
+encouraged; pick one of those runs as the record and report it entire.
 """
 
 from __future__ import annotations
@@ -64,6 +76,11 @@ RULES_LOADED_TIMEOUT_S = 60.0
 
 HOUSEHOLD_BLOCK_DOMAIN = "ads.example.com"  # the fixture verify-install.sh / pi-acceptance.sh already use
 CNAME_CLOAK_TARGET_SUFFIX = "blocked.test"  # what stub_upstream.py's cname.test CNAMEs point at
+# Step 11 re-runs steps 8-10 over the CNAME targets -- the protected suffixes and the
+# list tier, not the rule tiers, because a user's rule names the query and not the
+# aliases behind it. So the cloak fixture has to arrive as a list, and a one-line
+# `data:` list keeps it self-contained instead of needing a second HTTP server.
+CNAME_CLOAK_LIST_URL = f"data:text/plain,||{CNAME_CLOAK_TARGET_SUFFIX}^"
 CACHE_HIT_NAME = "cache-hit.bench.test"
 
 
@@ -220,19 +237,47 @@ def read_proc_status_kb(pid: int, field: str) -> int:
 
 
 def total_db_bytes(db_path: Path) -> int:
-    """Size of the main db file plus its WAL/SHM siblings, if present.
+    """Committed on-disk size of the database.
 
-    In WAL mode (the common SQLite perf setup) writes land in `<db>-wal`
-    first and the main file doesn't grow until a checkpoint, so measuring
-    just `db_path` would under-count -- sometimes to zero -- how much a
-    batch of query_log inserts actually cost on disk.
+    The server runs in WAL mode, where a write lands in `<db>-wal` first and
+    only reaches the main file at a checkpoint. Summing the main file and the
+    WAL looks like the safe way to catch both, but it double-counts: a page
+    sitting in the WAL is counted there and counted again in the main file
+    once it checkpoints, and the WAL does not shrink when it does. Measuring a
+    3,000-row window that way reported 176 B/row against a table whose real
+    steady-state cost is ~88 B/row.
+
+    So checkpoint first (TRUNCATE empties the WAL rather than just draining
+    it) and measure the main file alone. A second connection may checkpoint a
+    database the server has open; this only forces work the server would have
+    done on its own schedule.
     """
+    checkpoint_wal(db_path)
     total = 0
     for suffix in ("", "-wal", "-shm", "-journal"):
         candidate = Path(str(db_path) + suffix)
         if candidate.exists():
             total += candidate.stat().st_size
     return total
+
+
+def checkpoint_wal(db_path: Path) -> None:
+    """Fold the WAL back into the main database, best-effort.
+
+    A failure here costs accuracy, not the run: an un-checkpointed WAL just
+    makes the next size reading noisier, which is worth a warning but not
+    aborting a benchmark that is otherwise fine.
+    """
+    if not db_path.exists():
+        return
+    try:
+        connection = sqlite3.connect(str(db_path), timeout=10.0)
+        try:
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            connection.close()
+    except sqlite3.Error as error:
+        print(f"warning: could not checkpoint {db_path}: {error}", file=sys.stderr)
 
 
 def count_list_lines(path: Path) -> int:
@@ -332,17 +377,66 @@ def wait_rules_loaded(base_url: str, floor: int, timeout_s: float) -> float:
     raise BenchError(f"rules_loaded stuck at {last_seen} (< {floor}) after {timeout_s}s")
 
 
-def seed_list_and_household_rule(base_url: str, list_url: str) -> None:
+def seed_list_and_household_rule(base_url: str, list_url: str) -> str:
+    """Subscribe to the bench list and add the household block rule. Returns the list's id."""
     _elapsed, status, data = api_request(
         base_url, "POST", "/api/v1/lists", {"name": "bench-oisd-small", "url": list_url, "kind": "adblock"}
     )
     if status not in (200, 201):
         raise BenchError(f"POST /api/v1/lists -> {status}: {data}")
+    list_id = data["data"]["list"]["id"]
     _elapsed, status, data = api_request(
         base_url, "POST", "/api/v1/rules", {"domain": HOUSEHOLD_BLOCK_DOMAIN, "action": "block"}
     )
     if status not in (200, 201):
         raise BenchError(f"POST /api/v1/rules -> {status}: {data}")
+    return list_id
+
+
+def time_list_toggle(base_url: str, list_id: str) -> float:
+    """Milliseconds for one Enabled switch to take effect, off and back on again.
+
+    This is the control a household actually touches, and spec section 2.7 says it rebuilds
+    from the cached bodies with no network -- so it is the one list operation whose cost is
+    entirely the server's own work. `list_activation_ms` beside it is end-to-end and includes
+    whatever the network did, which on a host with egress is mostly the download.
+    """
+    worst = 0.0
+    for enabled in (False, True):
+        elapsed, status, data = api_request(base_url, "PUT", f"/api/v1/lists/{list_id}", {"enabled": enabled})
+        if status != 200:
+            raise BenchError(f"PUT /api/v1/lists/{{id}} enabled={enabled} -> {status}: {data}")
+        worst = max(worst, elapsed * 1000.0)
+    return worst
+
+
+def cache_hit_window_ns(base_url: str, workload) -> float:
+    """Mean server-internal cache-hit latency over `workload` alone.
+
+    `cache_hit_latency_avg_ns` is cumulative over the whole process lifetime,
+    so reading it at the end of two different runs compares two different
+    workloads: the main run's value is dominated by the 100,000 hits of the
+    throughput phase, while the HISTORY_DAYS=0 run only ever sees the 1,000 of
+    the hit scenario. That made logging-off look 1.3 us *slower* than
+    logging-on, which is an artifact of the sample mix and not a real cost.
+
+    Bracketing the workload and dividing the deltas gives both phases the same
+    window. The average is exposed already rounded to whole nanoseconds, so
+    recovering the totals costs at most half a nanosecond per side, spread
+    over the window's hits -- far below the microsecond the comparison is
+    about.
+    """
+    before = get_overview(base_url)["runtime"]
+    workload()
+    after = get_overview(base_url)["runtime"]
+    hits = after["cache_hits_total"] - before["cache_hits_total"]
+    if hits <= 0:
+        raise BenchError("the cache-hit window recorded no cache hits -- nothing to average")
+    total = (
+        after["cache_hit_latency_avg_ns"] * after["cache_hits_total"]
+        - before["cache_hit_latency_avg_ns"] * before["cache_hits_total"]
+    )
+    return total / hits
 
 
 def get_overview(base_url: str) -> dict:
@@ -509,11 +603,15 @@ def run_main_phase(args: argparse.Namespace, fleet: ChildFleet, list_url: str, o
 
     result: dict = {}
     result["startup_ms"] = wait_http_ready(f"{base_url}/health/ready", READY_TIMEOUT_S) * 1000.0
-    seed_list_and_household_rule(base_url, list_url)
+    bench_list_id = seed_list_and_household_rule(base_url, list_url)
     result["list_activation_ms"] = wait_rules_loaded(base_url, RULES_LOADED_FLOOR, RULES_LOADED_TIMEOUT_S) * 1000.0
-
     result["rss_idle_after_load_kb"] = read_proc_status_kb(server.pid, "VmRSS")
     result["rss_hwm_after_load_kb"] = read_proc_status_kb(server.pid, "VmHWM")
+
+    # After the RSS reads: a toggle is two more index builds, and the allocator does not
+    # hand the freed arenas straight back, so timing it first inflates "RSS idle" by megabytes
+    # that are free list rather than live data.
+    result["list_toggle_ms"] = time_list_toggle(base_url, bench_list_id)
 
     # -- database growth per logged row --
     # Each name is unique so every query is both a fresh cache miss and a
@@ -530,7 +628,14 @@ def run_main_phase(args: argparse.Namespace, fleet: ChildFleet, list_url: str, o
     # -- correctness checks --
     result["aaaa_after_a"] = check_aaaa_after_a("127.0.0.1", args.dns_port, args.timeout)
     cname_before = get_overview(base_url)["runtime"]["cname_blocks_total"]
-    api_request(base_url, "POST", "/api/v1/rules", {"domain": CNAME_CLOAK_TARGET_SUFFIX, "action": "block"})
+    _elapsed, status, data = api_request(
+        base_url,
+        "POST",
+        "/api/v1/lists",
+        {"name": "bench-cname-cloak", "url": CNAME_CLOAK_LIST_URL, "kind": "adblock"},
+    )
+    if status not in (200, 201):
+        raise BenchError(f"POST /api/v1/lists (cname cloak fixture) -> {status}: {data}")
     result["cname_cloak"] = check_cname_cloak_blocking("127.0.0.1", args.dns_port, args.timeout, args.block_mode)
     result["cname_cloak"]["cname_blocks_total_delta"] = get_overview(base_url)["runtime"]["cname_blocks_total"] - cname_before
 
@@ -545,9 +650,19 @@ def run_main_phase(args: argparse.Namespace, fleet: ChildFleet, list_url: str, o
 
     # -- latency scenarios (dnsbench) --
     cold_miss_nonce = uuid.uuid4().hex[:8]
+    cache_hit_result: dict = {}
+
+    def cache_hit_workload() -> None:
+        cache_hit_result.update(
+            dnsbench.cache_hit_scenario("127.0.0.1", args.dns_port, args.timeout, args.cache_hit_repeat, CACHE_HIT_NAME, dnsproto.QTYPE_A)
+        )
+
+    # Measured over this scenario alone so it can be compared with the
+    # HISTORY_DAYS=0 run, which has no throughput phase to average in.
+    result["cache_hit_server_internal_window_ns"] = cache_hit_window_ns(base_url, cache_hit_workload)
     result["dnsbench"] = {
         "cold_miss": dnsbench.cold_miss_scenario("127.0.0.1", args.dns_port, args.timeout, args.cold_miss_count, dnsproto.QTYPE_A, cold_miss_nonce),
-        "cache_hit": dnsbench.cache_hit_scenario("127.0.0.1", args.dns_port, args.timeout, args.cache_hit_repeat, CACHE_HIT_NAME, dnsproto.QTYPE_A),
+        "cache_hit": cache_hit_result,
         "blocked": dnsbench.blocked_scenario(
             "127.0.0.1", args.dns_port, args.timeout, args.blocked_repeat, HOUSEHOLD_BLOCK_DOMAIN, dnsproto.QTYPE_A, args.block_mode
         ),
@@ -582,6 +697,19 @@ def run_main_phase(args: argparse.Namespace, fleet: ChildFleet, list_url: str, o
     result["cache_hit_server_internal_ns"] = get_overview(base_url)["runtime"]["cache_hit_latency_avg_ns"]
 
     fleet.stop(server)
+
+    # Whole-database cost per row, measured once the server has exited and
+    # checkpointed. The windowed `db_growth_bytes_per_row` above divides a
+    # page-quantized delta by only growth_rows rows, so a handful of 4 KiB
+    # pages landing inside the window moves it by tens of bytes; dividing the
+    # settled file by every row it holds does not, and it is the number that
+    # answers "what will the 250,000-row cap cost on disk?".
+    total_rows = _read_query_log_row_count(db_path)
+    result["query_log_rows_total"] = total_rows
+    result["db_total_bytes"] = total_db_bytes(db_path)
+    if total_rows > 0:
+        result["db_bytes_per_row_settled"] = result["db_total_bytes"] / total_rows
+
     return result
 
 
@@ -606,8 +734,13 @@ def run_history_days_zero_phase(args: argparse.Namespace, fleet: ChildFleet, lis
     wait_rules_loaded(base_url, RULES_LOADED_FLOOR, RULES_LOADED_TIMEOUT_S)
 
     logging_flag = api_request(base_url, "GET", "/api/v1/queries?limit=1")[2]["data"]["logging"]
-    dnsbench.cache_hit_scenario("127.0.0.1", args.dns_port, args.timeout, args.cache_hit_repeat, CACHE_HIT_NAME, dnsproto.QTYPE_A)
-    cache_hit_ns = get_overview(base_url)["runtime"]["cache_hit_latency_avg_ns"]
+
+    def cache_hit_workload() -> None:
+        dnsbench.cache_hit_scenario("127.0.0.1", args.dns_port, args.timeout, args.cache_hit_repeat, CACHE_HIT_NAME, dnsproto.QTYPE_A)
+
+    # The same windowed measurement the main run takes, over the same scenario
+    # and repeat count -- that equality is the whole point of this phase.
+    cache_hit_ns = cache_hit_window_ns(base_url, cache_hit_workload)
 
     fleet.stop(server)
     return {"logging_reported_off": logging_flag is False, "cache_hit_server_internal_ns": cache_hit_ns}
@@ -679,11 +812,13 @@ TABLE_ROWS: list[tuple[str, str, str]] = [
     ("Binary size", "binary_size_bytes", "b"),
     ("Startup -> ready", "main.startup_ms", "ms"),
     ("List activation", "main.list_activation_ms", "ms"),
+    ("List toggle (rebuild from cache)", "main.list_toggle_ms", "ms"),
     ("RSS idle (after load)", "main.rss_idle_after_load_kb", "kb"),
     ("RSS HWM (after load)", "main.rss_hwm_after_load_kb", "kb"),
     ("RSS (after full bench)", "main.rss_after_bench_kb", "kb"),
     ("RSS HWM (after full bench)", "main.rss_hwm_after_bench_kb", "kb"),
     ("Cache hit, server-internal", "main.cache_hit_server_internal_ns", "ns"),
+    ("Cache hit, server-internal (window)", "main.cache_hit_server_internal_window_ns", "ns"),
     ("Cache hit, client p50", "main.dnsbench.cache_hit.ms.p50", "ms"),
     ("Cache hit, client p99", "main.dnsbench.cache_hit.ms.p99", "ms"),
     ("Blocked, client p50", "main.dnsbench.blocked.ms.p50", "ms"),
@@ -698,6 +833,7 @@ TABLE_ROWS: list[tuple[str, str, str]] = [
     ("CNAME cloak blocked", "main.cname_cloak.blocked", "bool"),
     ("Hung upstream: hits stayed <5ms", "main.hung_upstream.stayed_under_5ms", "bool"),
     ("DB growth per logged row", "main.db_growth_bytes_per_row", "b"),
+    ("DB bytes per row (settled)", "main.db_bytes_per_row_settled", "b"),
     ("GET /queries p50", "main.queries_endpoint_ms.p50", "ms"),
     ("GET /overview p50", "main.overview_endpoint_ms.p50", "ms"),
     ("Cache hit, HISTORY_DAYS=0", "history_days_zero.cache_hit_server_internal_ns", "ns"),

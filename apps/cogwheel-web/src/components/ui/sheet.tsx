@@ -1,33 +1,19 @@
 "use client";
 
-import { Dialog as ArkDialog, useDialogContext } from "@ark-ui/react/dialog";
+import { Dialog as ArkDialog } from "@ark-ui/react/dialog";
 import { Portal } from "@ark-ui/react/portal";
 import { XIcon } from "lucide-react";
 import type React from "react";
 import { tv, type VariantProps } from "tailwind-variants";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogBody,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogOverlay,
-  DialogTitle,
-} from "@/components/ui/dialog";
-
-export const useSheet = useDialogContext;
+import { Dialog, DialogHeader, DialogOverlay } from "@/components/ui/dialog";
 
 export const Sheet = (props: React.ComponentProps<typeof Dialog>) => (
   <Dialog data-slot="sheet" {...props} />
 );
 
-export const SheetTrigger = (
-  props: React.ComponentProps<typeof ArkDialog.Trigger>
-) => <ArkDialog.Trigger data-slot="sheet-trigger" {...props} />;
-
-export const SheetOverlay = (
+const SheetOverlay = (
   props: React.ComponentProps<typeof DialogOverlay>
 ) => <DialogOverlay data-slot="sheet-overlay" {...props} />;
 
@@ -66,7 +52,7 @@ interface SheetPositionerProps
   extends React.ComponentProps<typeof ArkDialog.Positioner>,
     VariantProps<typeof sheetPositionerVariants> {}
 
-export const SheetPositioner = (props: SheetPositionerProps) => {
+const SheetPositioner = (props: SheetPositionerProps) => {
   const { variant = "default", placement, className, ...rest } = props;
 
   return (
@@ -189,43 +175,6 @@ export const SheetHeader = (
   props: React.ComponentProps<typeof DialogHeader>
 ) => <DialogHeader data-slot="sheet-header" {...props} />;
 
-export const SheetTitle = (props: React.ComponentProps<typeof DialogTitle>) => (
-  <DialogTitle data-slot="sheet-title" {...props} />
-);
-
-export const SheetDescription = (
-  props: React.ComponentProps<typeof DialogDescription>
-) => <DialogDescription data-slot="sheet-description" {...props} />;
-
-export const SheetBody = (props: React.ComponentProps<typeof DialogBody>) => {
-  const { className, ...rest } = props;
-
-  return (
-    <DialogBody
-      className={cn(
-        "in-[[data-slot=sheet-content]:has([data-slot=sheet-header])]:pt-0",
-        className
-      )}
-      data-slot="sheet-body"
-      {...rest}
-    />
-  );
-};
-
-export const SheetClose = (
+const SheetClose = (
   props: React.ComponentProps<typeof ArkDialog.CloseTrigger>
 ) => <ArkDialog.CloseTrigger data-slot="sheet-close" {...props} />;
-
-export const SheetFooter = (
-  props: React.ComponentProps<typeof DialogFooter>
-) => {
-  const { className, ...rest } = props;
-
-  return (
-    <DialogFooter
-      className={cn("sm:rounded-none", className)}
-      data-slot="sheet-footer"
-      {...rest}
-    />
-  );
-};

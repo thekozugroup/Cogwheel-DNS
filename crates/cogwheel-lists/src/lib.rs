@@ -143,7 +143,8 @@ pub enum FetchOutcome {
 /// `etag` and `last_modified` are the validators stored from the previous successful fetch;
 /// they become `If-None-Match` / `If-Modified-Since`, and a 304 comes back as
 /// [`FetchOutcome::NotModified`] so a daily refresh of an unchanged list costs one round trip
-/// and no parse. A `data:` URL is decoded locally and is never "not modified".
+/// and no parse. A `data:` URL is decoded locally (base64 or percent-encoding) and is never
+/// "not modified".
 ///
 /// The body is streamed and the running total checked per chunk, so an oversized or
 /// `Content-Length`-lying response is abandoned mid-transfer rather than buffered in full.
@@ -215,6 +216,12 @@ pub async fn fetch_source_body(
     })
 }
 
+/// Decode the body of a `data:` URL, base64 or percent-encoded.
+///
+/// `Url::parse` leaves the payload percent-encoded, and every character an ABP or hosts line is
+/// made of — `|`, `^`, `@`, the space between an address and its name — is reserved, so decoding
+/// only the newlines would let two of the three list formats through as literal `%7C%7C…` and
+/// then blame the operator for the format.
 fn parse_data_url(url: &Url) -> String {
     let path = url.path();
     let Some((metadata, encoded)) = path.split_once(',') else {
@@ -228,7 +235,9 @@ fn parse_data_url(url: &Url) -> String {
         )
         .unwrap_or_default();
     }
-    encoded.replace("%0A", "\n").replace("%0D", "\r")
+    percent_encoding::percent_decode_str(encoded)
+        .decode_utf8_lossy()
+        .into_owned()
 }
 
 /// One list's entries after parsing.
@@ -280,7 +289,9 @@ pub fn parse_list(kind: SourceKind, body: &str) -> ParsedList {
     let mut parsed = ParsedList::default();
     for line in body.lines() {
         let line = line.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
+        // `[` is an ABP section header (`[Adblock Plus 2.0]`), not a rule: counting it as an
+        // invalid line put every list one line closer to the 20% rejection threshold.
+        if line.is_empty() || line.starts_with(['#', '!', '[']) {
             continue;
         }
         let ok = match kind {
@@ -458,7 +469,10 @@ mod tests {
                 (Action::Block, Pattern::Exact, "bare.example"),
             ]
         );
-        assert_eq!(parsed.invalid_lines, 1, "the header line is not a rule");
+        assert_eq!(
+            parsed.invalid_lines, 0,
+            "a `[Adblock Plus]` header is skipped like a comment, not counted against the list"
+        );
     }
 
     #[test]
@@ -534,6 +548,34 @@ mod tests {
             &Url::parse("data:text/plain;base64,YWRzLmV4YW1wbGU=").expect("valid data url"),
         );
         assert_eq!(body, "ads.example");
+    }
+
+    /// `||`, `^`, `@` and the space in a hosts line are all reserved characters, so a decoder
+    /// that only handled newlines left every format but `domains` unparseable over `data:`.
+    #[test]
+    fn data_url_bodies_decode_every_reserved_character() {
+        let adblock = parse_data_url(
+            &Url::parse("data:text/plain,%7C%7Cads.example%5E%0A%40%40%7C%7Cshop.example%5E")
+                .expect("valid data url"),
+        );
+        assert_eq!(adblock, "||ads.example^\n@@||shop.example^");
+        let parsed = parse_list(SourceKind::Adblock, &adblock);
+        assert_eq!(parsed.invalid_lines, 0);
+        assert_eq!(
+            entries(&parsed),
+            vec![
+                (Action::Block, Pattern::Suffix, "ads.example"),
+                (Action::Allow, Pattern::Suffix, "shop.example"),
+            ]
+        );
+
+        let hosts = parse_data_url(
+            &Url::parse("data:text/plain,0.0.0.0%20ads.example%0A0.0.0.0%20trk.example")
+                .expect("valid data url"),
+        );
+        let parsed = parse_list(SourceKind::Hosts, &hosts);
+        assert_eq!(parsed.invalid_lines, 0);
+        assert_eq!(verify_list(&parsed), Ok(()));
     }
 
     #[test]

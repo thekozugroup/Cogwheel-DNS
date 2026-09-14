@@ -4,19 +4,21 @@ import { tv, type VariantProps } from "tailwind-variants";
 import { cn } from "@/lib/utils";
 import { Spinner } from "@/components/ui/spinner";
 
-export const buttonVariants = tv({
+const buttonVariants = tv({
   base: [
     "relative",
     "inline-flex shrink-0 items-center justify-center gap-2",
     "whitespace-nowrap font-medium text-sm",
     "rounded-lg",
-    "transition-all",
-    "outline-none focus-visible:ring-[3px] focus-visible:ring-ring/32",
+    // Everything a button animates, named rather than `transition-all`: the focus
+    // outline is the one thing that must be there the instant the key is released,
+    // and `all` was easing it in over 150 ms.
+    "transition-[color,background-color,border-color,box-shadow,transform,opacity]",
     "disabled:pointer-events-none disabled:opacity-64",
     "data-disabled:pointer-events-none data-disabled:opacity-64",
     "aria-disabled:pointer-events-none aria-disabled:opacity-64",
     "data-[state=loading]:pointer-events-none",
-    "aria-invalid:border-destructive aria-invalid:ring-destructive/24",
+    "aria-invalid:border-destructive",
     "[&_svg:not([class*='size-'])]:size-4 [&_svg]:pointer-events-none [&_svg]:shrink-0",
     "motion-reduce:transition-none!",
   ],
@@ -38,28 +40,22 @@ export const buttonVariants = tv({
         "focus-visible:border-primary",
       ],
       /**
-       * Tint + hairline + 700/300 text — the §3.3 "Tint" pattern, the same one
-       * `ErrorState` uses. Never a 400 fill: plain white on a red-400 fill
-       * measured 2.89:1 in both themes, well under the 4.5:1 §7 demands, and a
-       * filled chromatic button is a "coloured primary button" under §3.3's
-       * Forbidden list regardless of its contrast.
-       *
-       * Computed WCAG ratios for this combination (sRGB compositing of the
-       * red-400 tint over the surface beneath it):
-       *   light  red-700 on red-400/10 over --background (white)   5.78:1
-       *          …over a neutral-50 surface (sidebar)              5.55:1
-       *          …hover, red-400/20 over neutral-50                5.00:1  ← worst case
-       *   dark   red-300 on red-400/10 over --background (n-950)   9.32:1
-       *          …over a neutral-900 surface (dialog/card)         8.22:1
-       *          …hover, red-400/20 over neutral-900               6.97:1
-       * Worst case across both themes, both surfaces and hover: 5.00:1.
+       * Deliberately the same neutral outline as `outline`, and not a red one.
+       * Red, green and yellow-400 are reserved for status in this product —
+       * a StatusPill saying "Blocked", a list whose last fetch failed — and a
+       * button is not a status: "Clear log" in red outline was decorating a
+       * control with the palette that elsewhere means something is wrong. The
+       * variant stays because the call sites mean it, and because the guard on
+       * anything irreversible is the ConfirmDialog, which is where the red now
+       * lives — on the sentence describing what the click does.
        */
       destructive: [
-        "bg-destructive/10",
-        "text-destructive-foreground",
-        "border border-destructive/32",
-        "hover:bg-destructive/20",
-        "focus-visible:border-destructive focus-visible:ring-destructive/40",
+        "bg-transparent",
+        "text-foreground",
+        "border border-input shadow-sm/5",
+        "hover:bg-accent hover:text-accent-foreground",
+        "dark:bg-input/32 dark:hover:bg-input/64",
+        "focus-visible:border-primary",
       ],
       secondary: [
         "bg-secondary",

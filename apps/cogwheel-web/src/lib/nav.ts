@@ -9,7 +9,6 @@ export type NavItem = {
   /** The digit ⌘/Ctrl combines with; `undefined` means no numeric shortcut. */
   digit?: string;
   icon: React.ElementType;
-  description: string;
 };
 
 export const PRIMARY_NAV: NavItem[] = [
@@ -19,7 +18,6 @@ export const PRIMARY_NAV: NavItem[] = [
     shortcut: "⌘1",
     digit: "1",
     icon: LayoutDashboardIcon,
-    description: "Protection state, traffic and connection instructions",
   },
   {
     to: "/activity",
@@ -27,7 +25,6 @@ export const PRIMARY_NAV: NavItem[] = [
     shortcut: "⌘2",
     digit: "2",
     icon: ActivityIcon,
-    description: "Every query, live or from the log",
   },
   {
     to: "/devices",
@@ -35,7 +32,6 @@ export const PRIMARY_NAV: NavItem[] = [
     shortcut: "⌘3",
     digit: "3",
     icon: LaptopIcon,
-    description: "Names by IP, per-device lists and rules",
   },
   {
     to: "/lists",
@@ -43,7 +39,6 @@ export const PRIMARY_NAV: NavItem[] = [
     shortcut: "⌘4",
     digit: "4",
     icon: ListIcon,
-    description: "Subscriptions and household rules",
   },
   {
     to: "/settings",
@@ -51,6 +46,5 @@ export const PRIMARY_NAV: NavItem[] = [
     shortcut: "⌘5",
     digit: "5",
     icon: SettingsIcon,
-    description: "How the appliance is configured",
   },
 ];

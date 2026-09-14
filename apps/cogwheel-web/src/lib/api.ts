@@ -12,7 +12,7 @@ const API_BASE =
   (typeof window !== "undefined" ? window.location.origin : "http://127.0.0.1:8080");
 
 /** Thrown for every non-2xx response so callers can branch on status. */
-export class ApiError extends Error {
+class ApiError extends Error {
   readonly status: number;
   readonly path: string;
 
@@ -110,7 +110,7 @@ export type Readiness = {
   subsystems: { storage: boolean; policy: boolean; dns_listeners: boolean };
 };
 
-export type RuntimeCounters = {
+type RuntimeCounters = {
   queries_total: number;
   blocked_total: number;
   cache_hits_total: number;
@@ -126,7 +126,7 @@ export type RuntimeCounters = {
   cache_miss_latency_avg_ns: number;
 };
 
-export type HourBucket = { hour: number; queries: number; blocked: number };
+type HourBucket = { hour: number; queries: number; blocked: number };
 
 export type Overview = {
   protection: { paused_until: number | null };
@@ -200,7 +200,7 @@ export type StreamQueryEvent = {
   list: string | null;
 };
 
-export type DeviceRule = { id: number; domain: string; action: RuleAction };
+type DeviceRule = { id: number; domain: string; action: RuleAction };
 
 export type Device = {
   id: string;
@@ -217,7 +217,7 @@ export type Device = {
   last_seen_at: number | null;
 };
 
-export type UnnamedClient = {
+type UnnamedClient = {
   ip: string;
   queries_24h: number;
   blocked_24h: number;
@@ -261,7 +261,7 @@ export type ListSource = {
   due: boolean;
 };
 
-export type Preset = { name: string; url: string; kind: ListKind };
+type Preset = { name: string; url: string; kind: ListKind };
 
 export type ListCatalogue = { lists: ListSource[]; presets: Preset[] };
 
@@ -269,7 +269,7 @@ export type ListInput = { name: string; url: string; kind: ListKind; enabled?: b
 
 export type ListPatch = { name?: string; url?: string; kind?: ListKind; enabled?: boolean };
 
-export type FetchOutcome = "updated" | "unchanged" | "rejected" | "failed";
+type FetchOutcome = "updated" | "unchanged" | "rejected" | "failed";
 
 export type ListCreated = { list: ListSource; outcome: FetchOutcome; note: string | null };
 
@@ -290,7 +290,7 @@ export type CheckResult = {
   device_name: string | null;
 };
 
-export type Upstream = { spec: string; protocol: string; encrypted: boolean };
+type Upstream = { spec: string; protocol: string; encrypted: boolean };
 
 export type Settings = {
   version: string;

@@ -5,7 +5,6 @@ import {
   Toast as ArkToast,
   Toaster as ArkToaster,
   createToaster,
-  useToastContext,
 } from "@ark-ui/react/toast";
 import {
   CircleAlertIcon,
@@ -18,8 +17,6 @@ import type React from "react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
-
-export const useToast = useToastContext;
 
 export const toast = createToaster({
   placement: "bottom-end",
@@ -75,7 +72,7 @@ interface ToastItemProps extends React.ComponentProps<typeof ArkToast.Root> {
   toast: ArkToast.Options;
 }
 
-export const ToastItem = (props: ToastItemProps) => {
+const ToastItem = (props: ToastItemProps) => {
   const { toast: toastData, className, ...rest } = props;
 
   const ToastIcon = toastData.type

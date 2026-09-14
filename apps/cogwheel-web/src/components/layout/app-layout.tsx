@@ -89,18 +89,21 @@ export function AppLayout() {
 
   return (
     <SidebarProvider>
+      {/* First in DOM order, so the first Tab reaches it. Rendered inside the
+          inset it would sit behind the whole sidebar — six focus stops past the
+          point at which it would have been of any use. */}
+      <a
+        className={cn(
+          "sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-50",
+          "focus:rounded-lg focus:border focus:border-border focus:bg-card focus:px-3 focus:py-2 focus:text-sm",
+        )}
+        href="#main"
+      >
+        Skip to content
+      </a>
+
       <AppSidebar />
       <SidebarInset className="min-w-0">
-        <a
-          className={cn(
-            "sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-50",
-            "focus:rounded-lg focus:border focus:border-border focus:bg-card focus:px-3 focus:py-2 focus:text-sm",
-          )}
-          href="#main"
-        >
-          Skip to content
-        </a>
-
         <header className="sticky top-0 z-20 flex h-12 shrink-0 items-center gap-2 border-border border-b bg-background/95 px-4 backdrop-blur sm:px-6">
           <SidebarTrigger aria-label="Toggle sidebar" />
           <span className="text-muted-foreground text-xs md:hidden">Cogwheel</span>

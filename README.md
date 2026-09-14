@@ -49,16 +49,20 @@ Prefer Docker Compose, or no Docker at all? Both are covered in
 
 ## How it works
 
-A DNS resolver sits between your devices and the internet. When a device asks for a domain on an
-active blocklist, Cogwheel answers immediately with a null address, so the tracker is never
-contacted. Everything else is forwarded upstream and cached.
+Three concepts, matching the sidebar:
 
-Blocklist updates are verified before they are promoted. A new ruleset that would block a
-protected domain — resolver bootstrap, captive-portal checks, NTP, certificate validation — is
-rejected rather than installed, so a bad upstream list cannot take your household's DNS down.
+- **Lists** — subscribed blocklists of ad and tracker domains, fetched on a schedule and compiled
+  into the resolver's in-memory index. A protected set of domains that the network itself needs to
+  keep working — resolver bootstrap, captive-portal checks, NTP, certificate validation — can never
+  be blocked by a list, so a bad upstream list cannot take your household's DNS down.
+- **Rules** — allow or block one domain yourself, for the whole household or for a single device.
+  A rule always outranks both the lists and the protected set, so it is also how you fix a list
+  that got something wrong.
+- **Devices** — name an address on your network, give it its own filtering switch, its own list
+  selection, its own rules, and see its own activity log with counts.
 
-Per-device profiles let a child's tablet get strict filtering while a work laptop keeps developer
-tools reachable.
+A blocked lookup gets a null address back immediately; everything else is forwarded upstream and
+cached, subject to the record's own TTL.
 
 ## Stack
 
@@ -76,4 +80,12 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cd apps/cogwheel-web && npm ci && npm run build
 ```
 
-Design and architecture notes live in [docs/architecture/](./docs/architecture/).
+Design and architecture notes live in [docs/architecture/](./docs/architecture/);
+the pre-Phase-3 descriptions they replaced are kept in
+[docs/archive/](./docs/archive/).
+
+## Benchmarks
+
+The numbers behind the before/after table in the spec come from a stdlib-only Python harness with
+no dependencies of its own — see [scripts/bench/README.md](./scripts/bench/README.md) for how to
+run it against a local build.

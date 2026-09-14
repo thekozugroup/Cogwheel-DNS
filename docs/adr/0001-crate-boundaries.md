@@ -17,7 +17,7 @@ path from quietly growing dependencies on the control plane.
 
 ## Decision
 
-The workspace has five library crates, one binary and one web app:
+The workspace has four library crates, one binary and one web app:
 
 - `crates/cogwheel-policy`
   - Owns the rule model (`ListIndex`, `RuleSet`, `Scope`, `Policy`), the
@@ -37,18 +37,19 @@ The workspace has five library crates, one binary and one web app:
   - Depends on `cogwheel-policy` only. Must not depend on HTTP clients, storage
     or the web app; a test in the crate enforces the first.
 - `crates/cogwheel-storage`
-  - Owns the SQLite schema, migrations, the `sources`, `devices` and
-    `settings` repositories, and history pruning. Schema details stay inside it.
+  - Owns the SQLite schema, the legacy upgrade, the `sources`, `devices`,
+    `rules`, `query_log` and `settings` repositories, and history pruning.
+    Schema details stay inside it.
   - No path dependencies.
-- `crates/cogwheel-api`
-  - Owns environment configuration (`AppConfig`), the `ApiEnvelope` response
-    shape, the readiness tracker, the `/health/*` routes and the upstream
-    endpoint parser.
-  - No path dependencies; no runtime orchestration or storage side effects.
 - `apps/cogwheel-server`
-  - Owns process wiring, route registration, the refresh scheduler, the
-    retention task, the SSE event bus and every `/api/v1` handler.
-  - The only crate allowed to depend on all of the above.
+  - Owns process wiring, environment configuration (`config.rs`), the
+    `ApiEnvelope` response shape and the readiness tracker (`http.rs`), route
+    registration, the refresh scheduler, the retention task, the SSE event bus
+    and every `/api/v1` handler.
+  - The only crate allowed to depend on all of the above. These last four used
+    to live in a library crate of their own; it had no path dependencies and
+    exactly one consumer, so it was a directory boundary rather than a
+    boundary, and it was absorbed here.
 - `apps/cogwheel-web`
   - Owns the operator UI. Talks to the server only through the typed client in
     `src/lib/api.ts`.
@@ -60,13 +61,14 @@ The workspace has five library crates, one binary and one web app:
 - Blocklist refreshes, storage writes and event-stream fan-out degrade without
   taking DNS serving down: a failed refresh keeps the policy already in force,
   and a slow event subscriber loses frames rather than slowing resolution.
-- A candidate policy that would block a protected name is refused before
-  activation; nothing rolls a live policy back after the fact.
+- A subscribed list that names a protected suffix never takes it out: protection
+  is enforced inside `evaluate`, so the name stays reachable whatever the lists
+  say, and the list's `note` column reports it.
 - Cross-crate sharing prefers compiled artifacts (`Policy`, `ListIndex`)
   over leaking internal structs.
 - Reusable domain behaviour lands in a library crate; the server composes.
 - Any change to the path-dependency graph updates this ADR first and the
-  regression test in `crates/cogwheel-api/src/lib.rs`
+  regression test in `apps/cogwheel-server/src/tests/mod.rs`
   (`crate_path_dependencies_match_the_adr_boundaries`) in the same change.
 
 ## Consequences

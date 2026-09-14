@@ -11,13 +11,15 @@ What it does:
 - Resolves and caches DNS for every device on the LAN, honouring record TTLs.
 - Blocks names on subscribed lists (`domains`, `hosts` and Adblock syntax), with
   a fixed set of protected infrastructure names that no list may take down.
-- Refreshes lists on a schedule and refuses a candidate that fails verification
-  or would block a protected name; the policy already in force keeps serving.
-- Lets a device be named and given its own profile, allow-list or bypass.
+- Refreshes lists on a schedule and refuses a candidate that fails verification;
+  the policy already in force keeps serving. A list that would have blocked a
+  protected name is still accepted — the names it hit are recorded against it and
+  stay reachable, because protection is enforced when a query is evaluated.
+- Lets a device be named and given its own rules and list selection, or bypass.
 - Shows live queries and resolver counters in the web UI, and can pause blocking.
 
 What it deliberately does not do: machine-learning classification, threat
 feeds, multi-node sync, VPN or exit-node integration, notifications, a backup
-API, soak-testing tooling, or a metrics exporter. `/api/v1/runtime` and
+API, soak-testing tooling, or a metrics exporter. `/api/v1/overview` and
 `/health/*` are the operational surface. The pre-cut tree that had those
 features is preserved on the `archive/full-featured` branch.

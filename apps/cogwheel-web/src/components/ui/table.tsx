@@ -68,24 +68,6 @@ export const TableBody = (props: TableBodyProps) => {
   );
 };
 
-export const TableFooter = (props: React.ComponentProps<typeof ark.tfoot>) => {
-  const { className, ...rest } = props;
-
-  return (
-    <ark.tfoot
-      className={cn(
-        "border-t",
-        "bg-muted/48",
-        "font-medium",
-        "last:[&>tr]:border-b-0",
-        className
-      )}
-      data-slot="table-footer"
-      {...rest}
-    />
-  );
-};
-
 export const TableRow = (props: React.ComponentProps<typeof ark.tr>) => {
   const { className, ...rest } = props;
 
@@ -134,20 +116,6 @@ export const TableCell = (props: React.ComponentProps<typeof ark.td>) => {
         className
       )}
       data-slot="table-cell"
-      {...rest}
-    />
-  );
-};
-
-export const TableCaption = (
-  props: React.ComponentProps<typeof ark.caption>
-) => {
-  const { className, ...rest } = props;
-
-  return (
-    <ark.caption
-      className={cn("mt-4", "text-muted-foreground text-sm", className)}
-      data-slot="table-caption"
       {...rest}
     />
   );

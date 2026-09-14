@@ -1,5 +1,4 @@
 import { ark } from "@ark-ui/react/factory";
-import { tv, type VariantProps } from "tailwind-variants";
 import { cn } from "@/lib/utils";
 
 export const Card = (props: React.ComponentProps<typeof ark.div>) => {
@@ -19,45 +18,6 @@ export const Card = (props: React.ComponentProps<typeof ark.div>) => {
         className
       )}
       data-slot="card"
-      {...rest}
-    />
-  );
-};
-
-const cardMediaVariants = tv({
-  base: [
-    "flex shrink-0 items-center gap-2",
-    "[&_svg]:pointer-events-none",
-    "px-(--space)",
-  ],
-  variants: {
-    variant: {
-      default: "bg-transparent",
-      icon: "[&_svg:not([class*='size-'])]:size-4",
-      image: [
-        "overflow-hidden rounded-t-sm",
-        "px-0",
-        "[&_img]:size-full [&_img]:object-cover",
-      ],
-    },
-  },
-  defaultVariants: {
-    variant: "default",
-  },
-});
-
-interface CardMediaProps
-  extends React.ComponentProps<typeof ark.div>,
-    VariantProps<typeof cardMediaVariants> {}
-
-export const CardMedia = (props: CardMediaProps) => {
-  const { variant = "default", className, ...rest } = props;
-
-  return (
-    <ark.div
-      className={cn(cardMediaVariants({ variant }), className)}
-      data-slot="card-media"
-      data-variant={variant}
       {...rest}
     />
   );

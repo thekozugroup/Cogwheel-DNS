@@ -2,9 +2,8 @@ import React from "react";
 import { ListIcon, RotateCwIcon, ScaleIcon, Trash2Icon } from "lucide-react";
 import { api, type ListKind, type ListSource, type RuleAction } from "@/lib/api";
 import { LIST_KINDS, checkSentence, isRuleDomain, normalizeDomain } from "@/lib/derive";
-import { formatCount, formatRelative, truncateMiddle } from "@/lib/format";
+import { formatCount, formatRelative, pluralize, truncateMiddle } from "@/lib/format";
 import { notify } from "@/lib/toast";
-import { PRESETS } from "@/lib/presets";
 import { useCogwheel } from "@/data/context";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -24,9 +23,11 @@ export function ListsScreen() {
   const [pendingDelete, setPendingDelete] = React.useState<ListSource | null>(null);
 
   const lists = data.lists.lists;
-  // The server returns the same catalogue; the bundled copy only covers the
-  // window before the first response lands.
-  const presets = data.lists.presets.length > 0 ? data.lists.presets : PRESETS;
+  // The catalogue comes from `GET /api/v1/lists` and nowhere else. A second copy
+  // in the bundle would be the same eleven entries maintained twice, and the
+  // provider's cached snapshot already covers the window before the first
+  // response lands on every load but the very first.
+  const presets = data.lists.presets;
 
   const setEnabled = (list: ListSource, enabled: boolean) =>
     mutate({
@@ -69,21 +70,19 @@ export function ListsScreen() {
       key: "name",
       header: "Name",
       render: (row) => (
-        <span className="min-w-0">
+        <div className="min-w-0">
           <span className="block truncate text-foreground">{row.name}</span>
           <span className="block truncate font-mono text-muted-foreground text-xs" title={row.url}>
             {truncateMiddle(row.url, 44)}
           </span>
-        </span>
+        </div>
       ),
-      sortValue: (row) => row.name,
     },
     {
       key: "kind",
       header: "Format",
       hideBelow: "xl",
       render: (row) => <Badge variant="outline">{row.kind}</Badge>,
-      sortValue: (row) => row.kind,
     },
     {
       key: "enabled",
@@ -96,14 +95,12 @@ export function ListsScreen() {
           onCheckedChange={(details) => void setEnabled(row, details.checked)}
         />
       ),
-      sortValue: (row) => (row.enabled ? 1 : 0),
     },
     {
       key: "rules",
       header: "Rules loaded",
       align: "end",
       render: (row) => <span className="tabular">{formatCount(row.rule_count)}</span>,
-      sortValue: (row) => row.rule_count,
     },
     {
       key: "updated",
@@ -113,23 +110,26 @@ export function ListsScreen() {
       render: (row) => (
         <span className="text-muted-foreground text-xs">{formatRelative(row.last_ok_at)}</span>
       ),
-      sortValue: (row) => row.last_ok_at ?? 0,
     },
     {
       key: "status",
       header: "Status",
+      wrap: true,
+      // Section 4 gives this column two things to carry: a fetch error, or the
+      // advisory note. Working is the ordinary case and says nothing worth a
+      // pill — a column of green would only make the one yellow row harder to
+      // find.
       render: (row) => {
         if (row.last_error) return <StatusPill label={row.last_error} tone="warn" />;
         if (row.note) return <span className="text-muted-foreground text-xs">{row.note}</span>;
-        if (row.due) return <span className="text-muted-foreground text-xs">due</span>;
-        return <StatusPill label="OK" tone="good" />;
+        return null;
       },
     },
     {
       key: "actions",
       header: "",
       align: "end",
-      hideOnStack: true,
+      stackHeader: true,
       render: (row) => (
         <span className="flex items-center justify-end gap-1">
           <Button
@@ -177,7 +177,7 @@ export function ListsScreen() {
         <SectionCard
           description={`${formatCount(lists.filter((list) => list.enabled).length)} of ${formatCount(
             lists.length,
-          )} enabled · ${formatCount(data.overview.lists.rules_loaded)} rules loaded.`}
+          )} enabled · ${pluralize(data.overview.lists.rules_loaded, "rule")} loaded.`}
           title="Lists"
         >
           <DataTable
@@ -248,7 +248,7 @@ function AddList({ presets }: { presets: { name: string; url: string; kind: List
       action: () => api.createList({ name: name.trim(), url: url.trim(), kind, enabled }),
       successTitle: (created) =>
         created.outcome === "updated" ? "List added" : `List added (${created.outcome})`,
-      successDetail: (created) => created.note ?? `${formatCount(created.list.rule_count)} rules loaded.`,
+      successDetail: (created) => created.note ?? `${pluralize(created.list.rule_count, "rule")} loaded.`,
       failureTitle: "Could not add the list",
     });
     if (result) {
@@ -274,7 +274,7 @@ function AddList({ presets }: { presets: { name: string; url: string; kind: List
           label="Preset"
           onChange={choosePreset}
           options={presets.map((entry) => ({ value: entry.name, label: entry.name }))}
-          placeholder="Choose a preset…"
+          placeholder={presets.length > 0 ? "Choose a preset…" : "Loading presets…"}
           value={preset}
         />
 
@@ -414,9 +414,14 @@ function CheckDomain() {
   const [answer, setAnswer] = React.useState<string | null>(null);
   const [checking, setChecking] = React.useState(false);
 
+  const normalized = normalizeDomain(domain);
+  // The same shape `POST /rules` enforces, and the same shape the server now
+  // applies to `GET /check`. Checking the button here keeps the refusal next to
+  // the field being typed in rather than in a banner under it.
+  const checkable = isRuleDomain(normalized);
+
   const run = async () => {
-    const normalized = normalizeDomain(domain);
-    if (!normalized) return;
+    if (!checkable) return;
     setChecking(true);
     try {
       setAnswer(checkSentence(await api.check(normalized, client || undefined)));
@@ -436,6 +441,7 @@ function CheckDomain() {
         <div className="flex flex-wrap items-end gap-2">
           <TextField
             className="min-w-48 flex-1"
+            hint={domain.trim() && !checkable ? "That is not a domain name." : undefined}
             label="Domain"
             onChange={setDomain}
             placeholder="ads.example.com"
@@ -452,7 +458,7 @@ function CheckDomain() {
             placeholder="The household"
             value={client}
           />
-          <Button disabled={!domain.trim()} isLoading={checking} onClick={() => void run()} variant="outline">
+          <Button disabled={!checkable} isLoading={checking} onClick={() => void run()} variant="outline">
             Check
           </Button>
         </div>

@@ -19,37 +19,34 @@
 //!
 //! `sources` and `devices` keep TEXT UUIDs so every row that existed before the v1 schema keeps
 //! its id across the upgrade. This crate stores them as `String` and never parses them — the
-//! server validates at the API edge, and [`seed_if_empty`](Storage::open) mints the one id it
-//! needs in SQL, so nothing here needs a UUID dependency.
+//! server validates at the API edge, and `seed_if_empty` mints the one id it needs in SQL, so
+//! nothing here needs a UUID dependency.
 //!
 //! # Errors the API must distinguish
 //!
 //! [`StorageError::is_unique_violation`] and [`StorageError::is_foreign_key_violation`] exist so
 //! the server can answer 409 and 400 without matching on `rusqlite` codes itself — a duplicate
-//! device IP and an unknown `source_id` are user errors, not faults.
-
-#![warn(missing_docs)]
+//! device IP and an unknown `source_id` are user errors, not faults. Every other failure is a
+//! fault and reaches the caller as itself.
 
 use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use thiserror::Error;
 
-mod devices;
+#[macro_use]
+mod record;
 mod migrate;
 mod query_log;
-mod rules;
-mod settings;
-mod sources;
-mod stats;
+mod repo;
 
-pub use devices::{Device, DeviceList, DeviceUpsert};
 pub use query_log::{
     DomainCount, PruneOutcome, QueryFilter, QueryLogEntry, QueryLogRow, QueryPage,
 };
-pub use rules::Rule;
-pub use sources::{FetchStatus, NewSource, Source, SourcePatch};
-pub use stats::{ClientStats, HourBucket};
+pub use repo::{
+    ClientStats, Device, DeviceList, DeviceUpsert, FetchStatus, HourBucket, NewSource, Rule,
+    Source, SourcePatch,
+};
 
 /// Schema version this build writes, reads and refuses to go above.
 pub const SCHEMA_VERSION: i64 = 1;
@@ -57,17 +54,13 @@ pub const SCHEMA_VERSION: i64 = 1;
 /// The whole v1 schema, executed verbatim on a fresh database.
 const SCHEMA_V1: &str = include_str!("schema_v1.sql");
 
-/// Name of the one list a fresh install subscribes to (§2.4).
-const SEED_SOURCE_NAME: &str = "oisd small";
-/// URL of that list.
-const SEED_SOURCE_URL: &str = "https://small.oisd.nl";
-/// Its parser kind.
-const SEED_SOURCE_KIND: &str = "adblock";
+/// The one list a fresh install subscribes to (§2.4).
+const SEED_SOURCE: (&str, &str, &str) = ("oisd small", "https://small.oisd.nl", "adblock");
 
 /// A SQL expression yielding a fresh v4 UUID in the canonical hyphenated form.
 ///
 /// Minting ids in SQL rather than in Rust is what lets this crate drop its `uuid` dependency while
-/// still writing the TEXT UUIDs the rest of the system expects. `random() % 4` rather than
+/// still writing the TEXT UUIDs the rest of the system expects. `abs(random() % 4)` and not
 /// `abs(random()) % 4` because `abs()` of `i64::MIN` is an overflow error in SQLite, and a startup
 /// that fails once in 2^64 boots is a bug nobody would ever reproduce.
 pub(crate) const NEW_UUID: &str = "lower(hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-4' \
@@ -130,9 +123,9 @@ pub enum StorageError {
 impl StorageError {
     /// True when the failure is a `UNIQUE`/`PRIMARY KEY` conflict — the server answers 409.
     ///
-    /// Both extended codes count: a duplicate list name trips the `UNIQUE` index, while a
-    /// re-used `sources.id` trips the primary key, and to the person typing them in they are the
-    /// same mistake.
+    /// Both extended codes count: a duplicate list name trips the `UNIQUE` index, while a re-used
+    /// `sources.id` trips the primary key, and to the person typing them in they are the same
+    /// mistake.
     #[must_use]
     pub fn is_unique_violation(&self) -> bool {
         matches!(
@@ -151,7 +144,6 @@ impl StorageError {
         self.extended_code() == Some(rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY)
     }
 
-    /// The SQLite extended result code behind this error, if it came from SQLite at all.
     fn extended_code(&self) -> Option<std::ffi::c_int> {
         match self {
             Self::Sqlite(rusqlite::Error::SqliteFailure(error, _)) => Some(error.extended_code),
@@ -170,9 +162,9 @@ impl Storage {
     /// Open (creating if needed), bring the schema to v1, and seed a fresh install.
     ///
     /// `database_url` may carry the `sqlite://` prefix the config uses. The sequence is §2.2:
-    /// PRAGMAs, then `user_version` — 1 is ready to use, 0 with no `sources` table is a fresh
-    /// file that gets `schema_v1.sql`, 0 with a `rulesets` table is a legacy database that gets
-    /// the guarded upgrade in `migrate.rs`, and anything else is refused.
+    /// PRAGMAs, then `user_version` — 1 is ready to use, 0 with no `sources` table is a fresh file
+    /// that gets `schema_v1.sql`, 0 with a `rulesets` table is a legacy database that gets the
+    /// guarded upgrade in `migrate.rs`, and anything else is refused.
     ///
     /// # Errors
     ///
@@ -185,9 +177,12 @@ impl Storage {
         spawn_blocking(move || Self::open_blocking(&database_url)).await
     }
 
-    /// The body of [`open`](Self::open), on the blocking pool.
     fn open_blocking(database_url: &str) -> Result<Self, StorageError> {
-        let path = database_path(database_url);
+        let path = PathBuf::from(
+            database_url
+                .strip_prefix("sqlite://")
+                .unwrap_or(database_url),
+        );
         // An empty parent is `:memory:` or a bare filename in the working directory; neither has a
         // directory to create, and `create_dir_all("")` would fail on both.
         if let Some(parent) = path.parent()
@@ -208,7 +203,12 @@ impl Storage {
             0 if table_exists(&connection, "sources")? => {
                 return Err(StorageError::UnknownSchema { path });
             }
-            0 => create_schema_v1(&connection)?,
+            // One transaction, so a half-built schema can never be left behind.
+            0 => {
+                let transaction = connection.unchecked_transaction()?;
+                transaction.execute_batch(SCHEMA_V1)?;
+                transaction.commit()?;
+            }
             found => {
                 return Err(StorageError::NewerSchema {
                     path,
@@ -219,7 +219,6 @@ impl Storage {
         }
 
         seed_if_empty(&connection)?;
-
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
@@ -255,7 +254,12 @@ impl Storage {
     {
         let connection = Arc::clone(&self.connection);
         spawn_blocking(move || {
-            let mut guard = lock_connection(&connection)?;
+            // A poisoned mutex means another thread panicked while holding it. Failing the one
+            // request that hit it beats cascading that single panic through every database call
+            // for the remaining life of the process.
+            let mut guard: MutexGuard<'_, Connection> = connection
+                .lock()
+                .map_err(|_| StorageError::Internal("connection lock poisoned".to_owned()))?;
             job(&mut guard)
         })
         .await
@@ -273,29 +277,16 @@ where
         .map_err(|error| StorageError::Internal(format!("storage task failed: {error}")))?
 }
 
-/// Lock the connection.
+/// How much memory SQLite may hold as cached pages, in KiB (negative = a size, not a page count).
 ///
-/// A poisoned mutex means another thread panicked while holding it. Returning an error fails the
-/// one request that hit it instead of cascading that single panic through every database call for
-/// the remaining life of the process.
-fn lock_connection(
-    connection: &Mutex<Connection>,
-) -> Result<MutexGuard<'_, Connection>, StorageError> {
-    connection
-        .lock()
-        .map_err(|_| StorageError::Internal("storage connection lock poisoned".to_owned()))
-}
+/// Stated rather than left at the build default, because the default is a per-connection figure
+/// that changes between SQLite releases and this process has a fixed memory budget to answer for
+/// (§12: 45 MB with a full list loaded). One megabyte holds the whole of `sources`, `devices` and
+/// `rules` many times over; the query log is written append-only and read one page at a time, so
+/// nothing here benefits from caching more of it.
+const PAGE_CACHE_KIB: i32 = -1024;
 
-/// Strip the `sqlite://` prefix the config carries and return the filesystem path.
-fn database_path(database_url: &str) -> PathBuf {
-    PathBuf::from(
-        database_url
-            .strip_prefix("sqlite://")
-            .unwrap_or(database_url),
-    )
-}
-
-/// The five connection PRAGMAs of §1.4.
+/// The connection PRAGMAs of §1.4, plus an explicit page-cache budget.
 ///
 /// WAL so a reader (the API) never blocks the writer (the query-log flush); `synchronous=NORMAL`
 /// because in WAL mode that risks at most the last transaction on a power cut, and the last
@@ -307,10 +298,10 @@ fn apply_pragmas(connection: &Connection) -> Result<(), StorageError> {
     connection.pragma_update(None, "wal_autocheckpoint", 1000)?;
     connection.pragma_update(None, "foreign_keys", "ON")?;
     connection.pragma_update(None, "busy_timeout", 5000)?;
+    connection.pragma_update(None, "cache_size", PAGE_CACHE_KIB)?;
     Ok(())
 }
 
-/// Does a table of this name exist?
 fn table_exists(connection: &Connection, name: &str) -> Result<bool, StorageError> {
     let count: i64 = connection.query_row(
         "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
@@ -318,14 +309,6 @@ fn table_exists(connection: &Connection, name: &str) -> Result<bool, StorageErro
         |row| row.get(0),
     )?;
     Ok(count > 0)
-}
-
-/// Execute `schema_v1.sql` in one transaction, so a half-built schema can never be left behind.
-fn create_schema_v1(connection: &Connection) -> Result<(), StorageError> {
-    let transaction = connection.unchecked_transaction()?;
-    transaction.execute_batch(SCHEMA_V1)?;
-    transaction.commit()?;
-    Ok(())
 }
 
 /// Subscribe a list-less install to oisd small (§2.4).
@@ -341,11 +324,11 @@ fn seed_if_empty(connection: &Connection) -> Result<(), StorageError> {
              SELECT {NEW_UUID}, ?1, ?2, ?3, 1, 0, unixepoch(), unixepoch()
              WHERE NOT EXISTS (SELECT 1 FROM sources)"
         ),
-        (SEED_SOURCE_NAME, SEED_SOURCE_URL, SEED_SOURCE_KIND),
+        SEED_SOURCE,
     )?;
     if inserted > 0 {
         tracing::info!(
-            list = SEED_SOURCE_NAME,
+            list = SEED_SOURCE.0,
             "first boot: subscribed to the default list"
         );
     }

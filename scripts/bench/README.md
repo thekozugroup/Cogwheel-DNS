@@ -18,9 +18,8 @@ dropped onto a bare Raspberry Pi OS install in Phase 4 and just run.
 
 ## Quick self-test (no Cogwheel binary needed)
 
-This is what "validate what you can" meant while the Phase 3 server didn't
-exist yet, and it's still the fastest way to prove your Python install can
-run these scripts at all before pointing `run.py` at a real binary:
+The fastest way to prove your Python install can run these scripts at all,
+before pointing `run.py` at a real binary:
 
 ```sh
 cd scripts/bench
@@ -66,8 +65,7 @@ this same list at roughly this same size.
 
 ## Running the full gate-B driver
 
-Once `apps/cogwheel-server` speaks the Phase 3 API (spec §3, 22 routes),
-build the release binary and run:
+Build the release binary and run:
 
 ```sh
 cargo build --release --locked -p cogwheel-server
@@ -96,8 +94,8 @@ phase. It:
    blocked-miss latency, throughput, RSS, CPU per query, binary size) plus
    the extra correctness checks gate B calls for: AAAA-after-A (a cached A
    answer must never leak into an AAAA response for the same name),
-   CNAME-cloak blocking (a rule on the CNAME *target* must block the name
-   that points at it), a hung upstream (`SIGSTOP` the stub; cache hits must
+   CNAME-cloak blocking (a list entry covering the CNAME *target* must block
+   the name that points at it), a hung upstream (`SIGSTOP` the stub; cache hits must
    stay under 5 ms even with misses stuck behind it; `SIGCONT` after),
    `blocked_total` exactness (the counter's delta must equal exactly the
    number of answers actually served blocked), database growth per logged
@@ -127,13 +125,11 @@ Tune the workload with the optional flags (`--cold-miss-count`,
 with their defaults, which match spec §12's own workload sizes (4 workers x
 25,000 queries for throughput, etc).
 
-### What this session validated, and what it didn't
+### What this has been validated against
 
-Per the Phase 3b brief: **`run.py` was not run against the real
-`cogwheel-server`** -- the tree as of this writing still serves the old
-16-route API, and pointing this driver at it would only prove that a 404
-produces a clear error (which is worth knowing, so that specific path *was*
-checked). What was validated instead:
+`run.py` has been run end to end against the real release
+`cogwheel-server` on the Phase 3 API, and the numbers it produced are the
+ones in spec §12's "after" column. Also checked:
 
 - `python3 -m py_compile` on every file here.
 - The full `test_helpers.py` suite (37 tests: wire format round-trips,
@@ -145,17 +141,32 @@ checked). What was validated instead:
   `stub_upstream.py` and `mpbench.py` against each other (throughput, CPU
   accounting via `/proc/<pid>/stat`, graceful failure against a closed
   port and an unreadable PID).
-- `run.py`'s *orchestration* end-to-end, including all three server
-  lifecycles in sequence, against a throwaway API-shape-compatible stand-in
-  server (not committed -- it lived in this session's scratchpad) that
-  answers the same 22 routes and DNS wire format a real `cogwheel-server`
-  will, but implements none of its actual policy or storage logic. This
-  caught and fixed several real bugs before this file was written (a typo
-  passing a private helper across modules, an incomplete failure path in
-  the hung-upstream check, an unused import) -- it does not, and cannot,
-  prove the *real* server's numbers will look like spec §12's targets, only
-  that this driver's HTTP/DNS plumbing, JSON assembly, and process
-  lifecycle are correct.
+
+Three measurement bugs that only a real server could expose were found and
+fixed on that first real run, all of them in this harness rather than in
+Cogwheel:
+
+- **The CNAME-cloak check asserted the wrong thing.** It put the cloak
+  target behind a *household rule*, but spec §6 step 11 re-runs only steps
+  8-10 over CNAME targets -- protected suffixes and the list tier -- because
+  a user's rule names the query, not the aliases behind it. The fixture is
+  now a one-line `data:` list, and `cname_blocks_total` moving by one
+  confirms step 11 actually fired rather than the answer merely looking
+  blocked.
+- **Database growth double-counted the WAL.** Summing `<db>` and `<db>-wal`
+  counts a page once in the WAL and again in the main file after it
+  checkpoints, which reported 176 B/row against a table whose real settled
+  cost is ~88 B/row. Sizes are now taken after a `wal_checkpoint(TRUNCATE)`,
+  and `db_bytes_per_row_settled` divides the whole finished database by every
+  row in it, which does not depend on where a 4 KiB page boundary happens to
+  land inside a 3,000-row window.
+- **The HISTORY_DAYS=0 comparison was not like-for-like.**
+  `cache_hit_latency_avg_ns` is cumulative over the process lifetime, so the
+  main run's value was dominated by the 100,000 hits of its throughput phase
+  while the logging-off run only ever saw 1,000 -- making logging-off look
+  1.3 us *slower*. Both phases now report
+  `cache_hit_server_internal_window_ns`, bracketed around the same scenario
+  at the same repeat count.
 
 ## `dnsbench.py` on its own
 
@@ -222,7 +233,8 @@ Top level:
 | `list_activation_ms` | "List activation" |
 | `rss_idle_after_load_kb` / `rss_hwm_after_load_kb` | "RSS with oisd small loaded" |
 | `rss_after_bench_kb` / `rss_hwm_after_bench_kb` | (new: RSS after the full measurement battery, not just idle) |
-| `cache_hit_server_internal_ns` | "Cache hit, server-internal" |
+| `cache_hit_server_internal_ns` | "Cache hit, server-internal" (lifetime mean, the §12 row) |
+| `cache_hit_server_internal_window_ns` | the same, over the hit scenario alone -- what `history_days_zero` compares against |
 | `dnsbench.cache_hit.ms.{p50,p95,p99}` | "Cache hit, client p50 / p99" |
 | `dnsbench.blocked.ms.{p50,p95,p99}` | "Blocked p50 / p99" |
 | `dnsbench.blocked.all_blocked_correctly` | (assertion backing that row, not a number) |
@@ -234,12 +246,46 @@ Top level:
 | `aaaa_after_a.correct` | (spec §10 "cache key omits qtype" regression) |
 | `cname_cloak.blocked` | (spec §6 step 11, CNAME target re-evaluation) |
 | `hung_upstream.stayed_under_5ms` | (spec §5.2 miss hand-off: hits must never queue behind misses) |
-| `db_growth_bytes_per_row` | (spec §7's "~55 B/row on disk" estimate) |
+| `db_growth_bytes_per_row` | (spec §7's "~55 B/row on disk" estimate), measured over `--growth-rows` |
+| `db_bytes_per_row_settled` | the same cost measured as the whole finished database over every row in it |
+| `query_log_rows_total` / `db_total_bytes` | what that ratio is taken from |
 | `queries_endpoint_ms.p50` | `GET /api/v1/queries?limit=200` latency |
 | `overview_endpoint_ms.p50` | `GET /api/v1/overview` latency |
 
 `binary_size_bytes` at the top level is spec §12's "Binary (x86_64,
 stripped)" row.
+
+## What changed in this harness during Phase 3
+
+Two of these rows are not directly comparable with the numbers spec §12
+records for Phase 2, because the way they are taken changed here. Nothing
+else did -- in particular the cold-miss, cache-hit, blocked and
+first-time-blocked-miss scenarios are the same `dnsbench` calls with the same
+defaults, so those rows compare straight across.
+
+- **`db_growth_bytes_per_row`** now checkpoints the WAL before it measures,
+  and measures the main database file rather than the sum of the file and its
+  WAL. The old sum double-counted every page that had been checkpointed since
+  the run began (the WAL keeps its size after a checkpoint drains it), which
+  reported 176 B/row for a table whose settled cost was ~88. `db_bytes_per_row_settled`
+  was added beside it: the finished file divided by every row in it, which is
+  what actually answers "what will the 250,000-row cap cost on disk?".
+- **`cache_hit_server_internal_ns`** is still the lifetime mean the Overview
+  exposes, but `cache_hit_server_internal_window_ns` was added and is what the
+  `HISTORY_DAYS=0` phase is compared against. The lifetime mean is dominated
+  by whichever workload ran most: the main run's 100,000 throughput hits
+  against the logging-off run's 1,000, which made logging-off look *slower*.
+- The **CNAME-cloak fixture** is now a one-line `data:` list rather than a
+  household rule, because §6 step 11 re-runs only steps 8-10 over a CNAME
+  target -- the protected suffixes and the list tier, never the rule tiers.
+  The old fixture tested a path the spec does not have. It adds a second
+  enabled list before the latency scenarios run; that costs one more mask bit
+  and nothing else.
+
+Phase 3 also put a query log under every one of these numbers for the first
+time: each answered query now hands an entry to a writer task that batches
+into SQLite every five seconds. Compare a Phase 3 latency row against Phase 2
+with that in mind -- Phase 2 measured a resolver that persisted nothing.
 
 ## Failure modes
 

@@ -283,6 +283,11 @@ Forbidden:
 
 - `text-{color}-400` for anything a user must read.
 - Coloured primary buttons. The primary action is `--primary` (black/white).
+- **A status colour on a control.** The 400 colours name a *state* — a blocked verdict, a list
+  whose last fetch failed, a paused appliance — not an action. A destructive button therefore
+  takes the neutral `outline` treatment (the `destructive` Button variant is that treatment), and
+  the red in a delete flow lives on `ConfirmDialog`'s consequence sentence, which is describing
+  what the appliance will be in after the click.
 - Colour as the sole carrier of meaning — see §7.
 
 ### 3.4 Shape, elevation, motion
@@ -319,7 +324,7 @@ Cogwheel                         ← wordmark + cogwheel mark, links to Overview
   Protection          ⌘4         ← blocklists and block profiles
   Settings            ⌘5         ← read-only summary
 ─────────────────────────────
-  [snooze control]  Protection active / paused for mm:ss
+  [pause control]   Protection active / paused for mm:ss
   [theme toggle]
 ```
 
@@ -327,15 +332,17 @@ Routes (`react-router-dom`):
 
 | Route | Screen | Primary endpoints |
 | --- | --- | --- |
-| `/` | Overview | `GET /api/v1/dashboard`, `GET /api/v1/resolver-access`, `POST /api/v1/sources/refresh` |
-| `/activity` | Live query stream | `GET /api/v1/events/stream` (SSE) |
-| `/devices` | Devices | `GET/POST /api/v1/devices` |
-| `/protection` | Blocklists and profiles | `GET /api/v1/settings`, `/api/v1/settings/blocklists*`, `/api/v1/settings/block-profiles*` |
+| `/` | Overview | `GET /api/v1/overview`, `POST /api/v1/lists/refresh` |
+| `/activity` | Activity | `GET /api/v1/queries`, `GET /api/v1/events/stream` (SSE), `DELETE /api/v1/queries` |
+| `/devices` | Devices | `GET/POST /api/v1/devices`, `PUT/DELETE /api/v1/devices/{id}`, `/api/v1/rules` |
+| `/lists` | Lists | `/api/v1/lists`, `/api/v1/lists/{id}`, `POST /api/v1/lists/refresh`, `/api/v1/rules`, `GET /api/v1/check` |
 | `/settings` | Read-only summary | `GET /api/v1/settings` |
 
-The sidebar snooze control uses `POST /api/v1/runtime/pause` and `/resume`. The
-full contract for each endpoint is in `01-backend-api.md`; the screen-by-screen
-inventory is in `03-web-current.md`.
+The sidebar pause control uses `POST /api/v1/runtime/pause` and `/resume`. The
+authoritative contract for every endpoint is section 3 of
+`docs/spec-dnsnet-plus-four.md`; the pre-Phase-3 API and web inventories that
+used to sit beside this file are in `docs/archive/`, and section 9 schedules
+their rewrite.
 
 ---
 
@@ -406,7 +413,7 @@ Build these once in `src/components/app/` and use them everywhere.
 | Feature | Behaviour |
 | --- | --- |
 | Live activity | SSE stream with pause/resume and filters by device, verdict and domain text. |
-| Snooze protection | Pause blocking for 5/15/60 minutes with a visible countdown in the sidebar and a one-click resume. Uses `POST /api/v1/runtime/pause` and `/resume`. |
+| Pause protection | Pause blocking for 5/15/60 minutes with a visible countdown in the sidebar and a one-click resume. Uses `POST /api/v1/runtime/pause` and `/resume`. |
 | Theme | Light / dark / system. Persisted to `localStorage`, applied via `data-theme` on `<html>` before first paint to avoid a flash. Do **not** use `next-themes`. |
 | Toasts | Every mutation confirms or reports failure, with the failure reason from the API. |
 | Optimistic updates | Toggles apply immediately and roll back visibly on error. |
@@ -423,6 +430,6 @@ Build these once in `src/components/app/` and use them everywhere.
 - No Google Fonts or any other external network request in the built output.
 - No `tailwind.config.ts`, no PostCSS config, no `@radix-ui/*`, no `next-themes` remaining.
 - No chromatic value anywhere except `red-400`, `yellow-400`, `green-400`.
-- Every screen implements loading, empty, error and populated states.
-- Every screen in `03-web-current.md` renders its loading, empty, error and populated states.
+- Every one of the five screens of section 4 renders its loading, empty, error
+  and populated states.
 - Sidebar navigation present and keyboard-operable.

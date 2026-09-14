@@ -191,7 +191,7 @@ mod tests {
         let response = response_with_ttls(&[300]);
         let lifetime = cacheable_for(&response);
         assert!(lifetime >= MIN_CACHE_TTL && lifetime <= MAX_CACHE_TTL);
-        let entry = CachedWire::from_message(&response, lifetime, Verdict::Allow(Reason::NoMatch))
+        let entry = CachedWire::from_message(&response, lifetime, Verdict::allow(Reason::NoMatch))
             .expect("encode");
         assert!(entry.fresh_until > Instant::now());
         assert!(entry.fresh_until <= Instant::now() + MAX_CACHE_TTL);

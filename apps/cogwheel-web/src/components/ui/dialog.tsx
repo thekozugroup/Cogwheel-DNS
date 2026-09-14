@@ -1,6 +1,6 @@
 "use client";
 
-import { Dialog as ArkDialog, useDialogContext } from "@ark-ui/react/dialog";
+import { Dialog as ArkDialog } from "@ark-ui/react/dialog";
 import { ark } from "@ark-ui/react/factory";
 import { Portal } from "@ark-ui/react/portal";
 import { XIcon } from "lucide-react";
@@ -9,8 +9,6 @@ import { tv, type VariantProps } from "tailwind-variants";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
-
-export const useDialog = useDialogContext;
 
 interface DialogContextProps {
   /**
@@ -43,11 +41,7 @@ export const Dialog = (props: React.ComponentProps<typeof ArkDialog.Root>) => {
   );
 };
 
-export const DialogTrigger = (
-  props: React.ComponentProps<typeof ArkDialog.Trigger>
-) => <ArkDialog.Trigger {...props} />;
-
-export const dialogOverlayVariants = tv({
+const dialogOverlayVariants = tv({
   base: [
     "fixed inset-0 z-50",
     "bg-black/32 backdrop-blur-xs",
@@ -79,7 +73,7 @@ export const DialogOverlay = (
   );
 };
 
-export const DialogPositioner = (
+const DialogPositioner = (
   props: React.ComponentProps<typeof ArkDialog.Positioner>
 ) => {
   const { className, ...rest } = props;
@@ -99,7 +93,7 @@ export const DialogPositioner = (
   );
 };
 
-export const dialogContentVariants = tv({
+const dialogContentVariants = tv({
   base: [
     "[--space:--spacing(6)]",
     "z-[calc(50+var(--layer-index,0))]",

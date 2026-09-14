@@ -10,6 +10,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 
 /**
  * Guard for anything irreversible. `description` must name the exact target —
@@ -62,16 +63,21 @@ export function ConfirmDialog({
         </AlertDialogHeader>
         {consequence ? (
           <AlertDialogBody>
-            <p className="text-muted-foreground text-sm">{consequence}</p>
+            {/* The one place red belongs on this screen: it is describing what
+                the appliance will be in after the click, not colouring a control. */}
+            <p
+              className={cn(
+                "text-sm",
+                destructive ? "text-destructive-foreground" : "text-muted-foreground",
+              )}
+            >
+              {consequence}
+            </p>
           </AlertDialogBody>
         ) : null}
         <AlertDialogFooter>
           <AlertDialogCancel disabled={working}>Cancel</AlertDialogCancel>
-          <Button
-            isLoading={working}
-            onClick={confirm}
-            variant={destructive ? "destructive" : "default"}
-          >
+          <Button isLoading={working} onClick={confirm}>
             {confirmLabel}
           </Button>
         </AlertDialogFooter>

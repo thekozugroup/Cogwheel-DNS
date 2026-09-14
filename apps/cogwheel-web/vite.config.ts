@@ -37,7 +37,7 @@ export default defineConfig({
     //
     // The default is :30080 because that is what the documented development
     // command binds -- `COGWHEEL_PROFILE=dev cargo run -p cogwheel-server`
-    // listens on 127.0.0.1:30080 (crates/cogwheel-api/src/lib.rs). This used to
+    // listens on 127.0.0.1:30080 (apps/cogwheel-server/src/config.rs). This used to
     // point at :8080, the CONTAINER's port, so following DEPLOYMENT.md section
     // 13 gave a dev server on one port and a proxy aimed at another, and every
     // API call in `npm run dev` 404'd -- the exact failure the proxy was added

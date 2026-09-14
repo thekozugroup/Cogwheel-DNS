@@ -172,10 +172,10 @@ FROM debian:${DEBIAN_SUITE}-slim AS runtime
 #   filesystem, and the container has neither (cap_drop: ALL + read_only: true).
 #
 # No iproute2. The only thing the server shells out to is `hostname` /
-# `hostname -I` (GET /api/v1/resolver-access, to list the addresses a person
-# should point their router at), and `hostname` ships in the Essential
-# `hostname` package that every Debian base image already carries. Nothing
-# in the image needs `ip` on PATH.
+# `hostname -I` (GET /api/v1/overview's `connect.targets`, to list the
+# addresses a person should point their router at), and `hostname` ships in
+# the Essential `hostname` package that every Debian base image already
+# carries. Nothing in the image needs `ip` on PATH.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates \
@@ -243,8 +243,8 @@ RUN install -d -o ${COGWHEEL_UID} -g ${COGWHEEL_GID} -m 0750 /app/data \
 # --------------------------------------------------------------------------
 # Runtime configuration defaults.
 #
-# These are the real variable names read by cogwheel-api::load_from_env and
-# apps/cogwheel-server/src/main.rs. Override any of them at run time.
+# These are the real variable names read by apps/cogwheel-server/src/config.rs
+# (spec section 8). Override any of them at run time.
 # --------------------------------------------------------------------------
 ENV COGWHEEL_PROFILE=home \
     COGWHEEL_SERVER__HTTP_BIND_ADDR=0.0.0.0:8080 \

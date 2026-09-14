@@ -2,12 +2,9 @@
 
 import {
   SegmentGroup as ArkSegmentGroup,
-  useSegmentGroupContext,
 } from "@ark-ui/react/segment-group";
 import type React from "react";
 import { cn } from "@/lib/utils";
-
-export const useSegmentGroup = useSegmentGroupContext;
 
 type SegmentGroupVariant = "default" | "underline";
 
@@ -67,7 +64,7 @@ export const SegmentGroupItem = (
         "cursor-pointer",
         "data-[orientation=vertical]:w-full data-[orientation=vertical]:justify-start",
         "rounded-[inherit] border border-transparent",
-        "outline-none data-focus-visible:border-primary data-focus-visible:ring-[3px] data-focus-visible:ring-ring/32",
+        "data-focus-visible:border-primary",
         "data-disabled:pointer-events-none data-disabled:opacity-64",
         className
       )}
@@ -96,7 +93,7 @@ export const SegmentGroupItemText = (
   );
 };
 
-export const SegmentGroupIndicator = (
+const SegmentGroupIndicator = (
   props: React.ComponentProps<typeof ArkSegmentGroup.Indicator>
 ) => {
   const { className, ...rest } = props;

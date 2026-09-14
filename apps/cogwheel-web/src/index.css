@@ -193,6 +193,18 @@
     letter-spacing: -0.011em;
   }
 
+  /*
+   * One focus indicator for the whole app, defined once.
+   *
+   * Components used to carry their own `outline-none focus-visible:ring-[3px]
+   * focus-visible:ring-ring/32`, which painted nothing: tailwind-merge reads
+   * `ring-ring/32` as a ring *width* utility, drops the `ring-[3px]` beside it,
+   * and leaves a coloured ring zero pixels wide -- while the `outline-none` had
+   * already removed the outline that would have covered for it. A rule here
+   * cannot be lost that way, and every control looks the same under the
+   * keyboard. Nothing animates `outline`, either: a focus ring that eases in
+   * over 150 ms is a focus ring a fast keyboard user does not see.
+   */
   :focus-visible {
     outline: 2px solid var(--ring);
     outline-offset: 2px;
@@ -255,6 +267,23 @@
 
   .display-tight {
     letter-spacing: -0.02em;
+  }
+
+  /*
+   * A DataTable's stacked card gives the value about half the card's width, and
+   * `body { overflow-x: hidden }` means anything past the card edge is gone --
+   * not scrolled to, gone. So inside a stacked card nothing truncates and
+   * nothing refuses to wrap, whatever the cell renders in the table form: a
+   * long list URL, a protected-names note and a device name all break instead.
+   * The `!important` is aimed at the `truncate` utility the same render
+   * function applies for the table, which is the right behaviour there.
+   */
+  .stacked-value,
+  .stacked-value * {
+    overflow: visible !important;
+    text-overflow: clip !important;
+    white-space: normal !important;
+    overflow-wrap: anywhere;
   }
 }
 

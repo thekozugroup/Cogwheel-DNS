@@ -1,7 +1,7 @@
 import { NavLink, useLocation } from "react-router-dom";
 import { ActivityIcon, CogIcon, ListIcon } from "lucide-react";
 import { PRIMARY_NAV, type NavItem } from "@/lib/nav";
-import { formatCount } from "@/lib/format";
+import { formatCount, pluralize } from "@/lib/format";
 import { protectionState } from "@/lib/derive";
 import { useCogwheel } from "@/data/context";
 import {
@@ -20,7 +20,7 @@ import {
 import { Kbd } from "@/components/ui/kbd";
 import { Status } from "@/components/ui/status";
 import { ThemeToggle } from "@/components/layout/theme-toggle";
-import { SnoozeControl } from "@/components/layout/snooze-control";
+import { PauseControl } from "@/components/layout/pause-control";
 
 function NavRow({ item, onNavigate }: { item: NavItem; onNavigate: () => void }) {
   const location = useLocation();
@@ -71,7 +71,7 @@ export function AppSidebar() {
           : "default";
 
   return (
-    <Sidebar collapsible="icon">
+    <Sidebar>
       <SidebarHeader>
         <NavLink
           className="flex items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-sidebar-accent"
@@ -108,15 +108,15 @@ export function AppSidebar() {
           </p>
           <p className="tabular flex items-center gap-2 text-muted-foreground text-xs">
             <ActivityIcon aria-hidden className="size-3.5" />
-            {formatCount(day.queries)} queries · {formatCount(day.blocked)} blocked (24 h)
+            {pluralize(day.queries, "query", "queries")} · {formatCount(day.blocked)} blocked (24 h)
           </p>
           <p className="tabular flex items-center gap-2 text-muted-foreground text-xs">
             <ListIcon aria-hidden className="size-3.5" />
-            {formatCount(data.overview.lists.enabled)} enabled lists
+            {pluralize(data.overview.lists.enabled, "enabled list")}
           </p>
         </div>
 
-        <SnoozeControl />
+        <PauseControl />
 
         <ThemeToggle />
       </SidebarFooter>
