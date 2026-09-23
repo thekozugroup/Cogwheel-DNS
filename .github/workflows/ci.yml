@@ -589,10 +589,26 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import sys, xml.etree.ElementTree as ET
+          import os, sys, xml.etree.ElementTree as ET
 
           root = ET.parse('deploy/unraid/cogwheel.xml').getroot()
           problems = []
+
+          # The docs say `docker exec cogwheel ...` on every host, Unraid included.
+          if (root.findtext('Name') or '').strip() != 'cogwheel':
+              problems.append('<Name> must be cogwheel, the container name every doc and script uses')
+
+          # Both URLs are fetched from main by Unraid, so each must name a file in
+          # this tree -- and the icon must be a PNG, because Unraid caches it under
+          # a .png name and a browser will not draw SVG served as image/png.
+          raw = 'https://raw.githubusercontent.com/thekozugroup/Cogwheel-DNS/main/'
+          for field in ('TemplateURL', 'Icon'):
+              url = (root.findtext(field) or '').strip()
+              path = url[len(raw):] if url.startswith(raw) else ''
+              if not path or not os.path.isfile(path):
+                  problems.append(f'<{field}> {url!r} does not name a file in this repository')
+              elif field == 'Icon' and open(path, 'rb').read(8) != b'\x89PNG\r\n\x1a\n':
+                  problems.append(f'<Icon> {path} is not a PNG')
 
           repo = (root.findtext('Repository') or '').strip()
           if not repo.endswith(':latest'):
@@ -622,8 +638,27 @@ jobs:
           PY
           echo "ok   deploy/unraid/cogwheel.xml"
 
-          python3 -c "import xml.etree.ElementTree as ET; ET.parse('deploy/unraid/cogwheel.svg')"
-          echo "ok   deploy/unraid/cogwheel.svg"
+      # Serving 200 is not the same as rendering. The Unraid icon once shipped
+      # as an SVG that did not parse -- a double hyphen inside an XML comment --
+      # and a pre-tag check that only asked for a 200 passed it. Parse every
+      # SVG and XML file a browser or Unraid will read.
+      - name: Every shipped SVG and XML parses
+        run: |
+          python3 - <<'PY'
+          import glob, sys, xml.dom.minidom
+          dirs = ('docs/assets', 'deploy', 'apps/cogwheel-web/public')
+          files = sorted(f for d in dirs for f in glob.glob(f'{d}/**/*', recursive=True)
+                         if f.endswith(('.svg', '.xml')))
+          bad = not files
+          for f in files:
+              try:
+                  xml.dom.minidom.parse(f)
+                  print(f'ok   {f}')
+              except Exception as e:
+                  print(f'::error file={f}::{e}')
+                  bad = True
+          sys.exit(1 if bad else 0)
+          PY
 
       # rust-toolchain.toml governs every cargo invocation, including the ones
       # inside the Docker build. If the base image were a different version,

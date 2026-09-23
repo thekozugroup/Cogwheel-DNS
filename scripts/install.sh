@@ -34,8 +34,8 @@
 #
 # It bootstraps a Compose project rather than running `docker run` itself, and
 # that is the whole point. Afterwards this script is not in the update path at
-# all -- every Cogwheel host, however it was installed, upgrades with the same
-# two commands:
+# all -- a host it set up upgrades with the same two commands as any other
+# Compose install of Cogwheel:
 #
 #   cd /etc/cogwheel
 #   sudo docker compose pull && sudo docker compose up -d

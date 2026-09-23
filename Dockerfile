@@ -336,7 +336,7 @@ LABEL org.opencontainers.image.title="Cogwheel DNS" \
 # the container's published ports -- they are not shell or Docker syntax and
 # must reach Unraid literally.
 LABEL net.unraid.docker.webui="http://[IP]:[PORT:8080]" \
-      net.unraid.docker.icon="https://raw.githubusercontent.com/thekozugroup/Cogwheel-DNS/main/deploy/unraid/cogwheel.svg"
+      net.unraid.docker.icon="https://raw.githubusercontent.com/thekozugroup/Cogwheel-DNS/main/deploy/unraid/cogwheel.png"
 
 # Watchtower: watch and report, do not replace.
 #

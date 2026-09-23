@@ -10,7 +10,7 @@ contact_links:
     about: Report privately through a GitHub security advisory. Never in a public issue — Cogwheel sees every name your household resolves, and its control plane has no authentication.
 
   - name: A site is broken
-    url: https://github.com/thekozugroup/Cogwheel-DNS/blob/main/README.md#troubleshooting
+    url: https://github.com/thekozugroup/Cogwheel-DNS/blob/main/docs/USING.md#when-a-site-breaks
     about: Activity's row menu allows the name for everyone or for just that device, and a rule you write outranks every list. Open an issue only if that does not take effect.
 
   - name: Question or setup help

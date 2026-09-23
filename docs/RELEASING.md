@@ -7,9 +7,6 @@ follow.
 > to `ghcr.io/thekozugroup/cogwheel-dns`. Everything below describes the
 > machinery, which is in place and tested; `v0.1.0` will be the first time it
 > runs for real.
->
-> *Delete this block in the commit that tags `v0.1.0` — it is one of five,
-> listed under [Before the first tag](#before-the-first-tag-v010-only).*
 
 ---
 
@@ -42,35 +39,16 @@ re-runs the full gate against the tagged tree before publishing anything.
 
    Say whether the schema changed. If it did, say what the rollback costs.
 
-2. **Tag and push:**
+2. **Work through [Before a tag](../CONTRIBUTING.md#before-a-tag)** in
+   CONTRIBUTING.md — the checks every tag needs, including that what Unraid
+   fetches from `main` actually parses, and the extra list for `v0.1.0`.
+
+3. **Tag and push:**
 
    ```sh
    git tag -a v1.2.3 -m "Cogwheel 1.2.3"
    git push origin v1.2.3
    ```
-
-### Before the first tag, `v0.1.0`, only
-
-Five statements in the tree are true today and become false the moment an image
-exists. They are honest, not placeholders, so they stay until the tag — and
-then all five go in the same commit that makes them wrong:
-
-- [ ] `CHANGELOG.md` — rename `## [Unreleased]` to `## [0.1.0] — <date>`, add
-      the link reference at the foot, and open a fresh empty `## [Unreleased]`.
-- [ ] `README.md` — delete the **Before the first release** block under
-      **Quick start**.
-- [ ] `docs/QUICKSTART.md` — delete the **Before the first release** block.
-- [ ] `docs/DEPLOYMENT.md` — delete the **Before the first release** block.
-- [ ] `docs/RELEASING.md` — delete the note at the top of this file.
-
-The three **Before the first release** banners each end with a pointer back to
-this list, so one of them still in the tree after a tag is a missed step here.
-
-Then check the two URLs that are baked into image metadata at build time and
-cannot be corrected on an image already published:
-`deploy/unraid/cogwheel.xml` and `deploy/unraid/cogwheel.svg` must both serve
-200 from `raw.githubusercontent.com` on `main` before the tag is pushed, because
-`net.unraid.docker.icon` in the Dockerfile points at the second one.
 
 The workflow then, in order:
 
@@ -145,34 +123,6 @@ defensible; drifting into a pin and forgetting is not.
 
 A tag containing a hyphen (`v1.2.3-rc.1`) is a prerelease: it is published under
 that version and `latest` is deliberately not moved.
-
----
-
-## Before a release goes out
-
-A release candidate is not ready unless:
-
-- **The gate is green.** `sh scripts/verify.sh` with nothing skipped —
-  `cargo audit` and `cargo deny check` in particular, which skip themselves
-  when the tool is absent, and the Dockerfile check, which needs a daemon. A
-  skip is not a pass, and a release is the one time that matters most.
-  [CONTRIBUTING § The checks](../CONTRIBUTING.md#the-checks) has the reasoning.
-
-- **The protected-name invariant holds.** A list naming a protected suffix is
-  still installed, the names it hit are recorded in its `note`, and those names
-  still resolve — because protection is enforced in `cogwheel_policy::evaluate`
-  at query time, not by refusing the list. Covered by
-  `a_protected_domain_outranks_a_blocklist_entry` in
-  `crates/cogwheel-policy/src/tests.rs`.
-
-- **An upgrade against a copy of the previous release's data directory has been
-  run**, and the result verified with `scripts/verify-install.sh`. CI covers the
-  v0→v1 case and covers that a database from a *newer* Cogwheel is refused with
-  a message naming both versions; a real release should also be tried against a
-  real household database.
-
-- **The changelog section exists, is dated, and says whether the schema
-  changed.**
 
 ---
 

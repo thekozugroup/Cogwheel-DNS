@@ -5,9 +5,9 @@ up and removing Cogwheel. If a command here does not work, that is a bug —
 please [open an issue](https://github.com/thekozugroup/Cogwheel-DNS/issues).
 
 If you just want a filtered household and not the detail, start with
-**[the quick start](QUICKSTART.md)** instead; it is five minutes and four
-platforms. This file is what you read when something here has to be decided
-rather than accepted.
+**[the quick start](QUICKSTART.md)** instead; it is five minutes of attention
+once an image is published, and covers every host. This file is what you read
+when something here has to be decided rather than accepted.
 
 Cogwheel is a DNS filtering appliance. It binds port 53, answers queries for
 every device on your network, and serves a web control plane on port 8080. The
@@ -17,16 +17,15 @@ reference target is a **Raspberry Pi 5 running 64-bit Raspberry Pi OS**, but any
 > ### Before the first release
 >
 > Nothing has been tagged and no image has been pushed to
-> `ghcr.io/thekozugroup/cogwheel-dns`. Four paths in this file depend on
+> `ghcr.io/thekozugroup/cogwheel-dns`. Five paths in this file depend on
 > published artifacts and will fail until `v0.1.0` exists: the one-line
 > installer ([§2](#2-the-one-line-installer)), `docker compose
 > pull` ([§3](#3-docker-compose)), the release tarball
-> ([§4](#4-native-install-with-systemd)) and pinning a version
+> ([§4](#4-native-install-with-systemd)), the Unraid template
+> ([§1](#1-choosing-an-install-method)) and pinning a version
 > ([§10](#10-upgrades-and-rollback)). Building the image yourself works today —
-> [§3](#3-docker-compose).
->
-> *Delete this block in the commit that tags `v0.1.0` — it is one of five, listed
-> in [RELEASING.md](RELEASING.md#before-the-first-tag-v010-only).*
+> [§3](#3-docker-compose), or on Unraid
+> [QUICKSTART](QUICKSTART.md#building-the-image-yourself-on-unraid).
 
 ---
 
@@ -60,21 +59,22 @@ reference target is a **Raspberry Pi 5 running 64-bit Raspberry Pi OS**, but any
 
 The first two rows differ only in who wrote the Compose project. The installer
 writes one to `/etc/cogwheel` and then steps out of the update path entirely, so
-**every Docker install upgrades with the same two commands** —
-[§10](#10-upgrades-and-rollback).
+**both Compose installs upgrade with the same two commands** —
+[§10](#10-upgrades-and-rollback). A native install is rebuilt instead, and
+Unraid upgrades from its Docker tab.
 
 All three end up in the same place: a non-root process with
 `CAP_NET_BIND_SERVICE`, a persistent data directory, and bounded logs.
 
-**Unraid** is a fourth, and it is a Compose install with the Docker tab doing
-the writing: paste `deploy/unraid/cogwheel.xml` into the *Template* field and
-Unraid fills in the ports, the volume and the capability. The five steps are in
-[QUICKSTART §Unraid](QUICKSTART.md#unraid) rather than here, because there is
-nothing operator-specific about them — everything in this file from
-[§5](#5-networking-host-vs-bridge-and-why-it-decides-a-feature) onwards applies
-to an Unraid host unchanged, with the one exception noted in
-[§10](#10-upgrades-and-rollback): the upgrade is the Docker tab's own *check for
-updates*.
+**Unraid** is a fourth. There is no Compose project there: Unraid's Docker tab
+runs the container from `deploy/unraid/cogwheel.xml`, which carries the
+network, the volume and the capability, once that file is on the flash drive.
+The steps are in [QUICKSTART §Unraid](QUICKSTART.md#unraid) rather than here,
+because there is nothing operator-specific about them — everything in this
+file from [§5](#5-networking-host-vs-bridge-and-why-it-decides-a-feature)
+onwards applies to an Unraid host, with the exceptions noted in
+[§10](#10-upgrades-and-rollback): the upgrade is the Docker tab's own *check
+for updates*, and the post-upgrade check runs inside the container.
 
 **Requirements**
 
@@ -170,6 +170,11 @@ option until `v0.1.0` is tagged:
 docker build -t cogwheel-dns:dev .
 COGWHEEL_IMAGE=cogwheel-dns:dev docker compose up -d
 ```
+
+The build compiles the Rust server and the web app from source. As an estimate,
+not a timing of this build: about 10 minutes on a four-core x86_64 machine and
+30–60 minutes on a Raspberry Pi 5, plus downloading the Rust and Node build
+images.
 
 There is deliberately no `build:` block in `docker-compose.yml`. Compose builds
 a missing image when a service declares both `image:` and `build:`, and on a
@@ -343,15 +348,21 @@ the router hand out Cogwheel's address as the gateway's DNS forwarder.
 
 ## 7. Post-install verification checklist
 
-Run the scripted version. The installer leaves a copy on the host, so this works
-on a machine that has never had a checkout:
+Run the scripted version. The one-line installer leaves a copy on the host, so
+this works on a machine that has never had a checkout, and the image carries one
+for a host that only has the container:
 
 ```sh
-sudo /etc/cogwheel/verify-install.sh               # installed hosts
-sh scripts/verify-install.sh                       # from a checkout
+sudo /etc/cogwheel/verify-install.sh               # the one-line installer
+sudo sh scripts/verify-install.sh                  # from a checkout: Compose from a clone, or native
+docker exec cogwheel sh /app/verify-install.sh     # Unraid, or any host with only the container
 sh scripts/verify-install.sh --host 10.0.0.2       # remote
 sh scripts/verify-install.sh --skip-restart        # no restart test
 ```
+
+`sudo` on the first two because the persistence check restarts the container or
+the service. A native install with non-default ports needs `--http-port` and
+`--dns-port`; its closing summary prints the exact line.
 
 It exits non-zero if anything fails, so it also works from cron or a monitor.
 
@@ -464,6 +475,9 @@ answer, not the index.
 | Nothing resolves at all since switching to DNS-over-TLS | [8.8](#88-nothing-resolves-since-i-switched-to-dns-over-tls-or-dns-over-https) |
 | The web UI will not open from another machine | [8.9](#89-i-cannot-open-the-web-ui-from-another-machine) |
 | The upgrade came up healthy and then made things worse | [8.10](#810-the-upgrade-made-it-worse) |
+| The container restarts in a loop; the log mentions permissions, or `Operation not permitted` | [8.11](#811-the-container-restarts-in-a-loop-and-the-log-mentions-permissions) |
+| The dashboard says *Lists not downloaded yet* | [8.5](#85-blocklists-will-not-update) |
+| One site is broken | [USING.md](USING.md#when-a-site-breaks) — allow it from the Activity row |
 
 ### 8.1 Port 53 is already in use
 
@@ -483,8 +497,13 @@ sudo ss -lnptu '( sport = :53 )'
 Fix, the supported way:
 
 ```sh
-sudo ./scripts/install.sh --fix-port-53
+sudo ./scripts/install.sh --fix-port-53              # from a checkout
+sudo /etc/cogwheel/install.sh --fix-port-53          # a one-line install, no checkout
 ```
+
+On Unraid neither applies: the usual holders there are another DNS container on
+host networking and, with the VM Manager enabled, libvirt's `dnsmasq` —
+[QUICKSTART §Unraid](QUICKSTART.md#unraid) has the check and the way round it.
 
 That command:
 
@@ -629,13 +648,18 @@ the Mozilla root set compiled into the binary and deliberately does not read the
 host's certificate store.
 
 To get the house resolving again while you work it out, put a cleartext upstream
-back:
+back. On a one-line install:
 
 ```sh
 cd /etc/cogwheel
 sudo sed -i 's|^COGWHEEL_UPSTREAM__SERVERS=.*|COGWHEEL_UPSTREAM__SERVERS=1.1.1.1:53,1.0.0.1:53|' .env
 sudo docker compose up -d
 ```
+
+From a clone, run the same `sed` and `docker compose up -d` in the clone's
+directory. On a native install the file is `/etc/cogwheel/cogwheel.env` and the
+restart is `sudo systemctl restart cogwheel`; on Unraid, edit *Upstream
+resolvers* on the container and **Apply**.
 
 ### 8.9 I cannot open the web UI from another machine
 
@@ -691,7 +715,32 @@ you like what it is doing, and nothing rolls back an upgrade that succeeded.
 3. **Then say what happened.** A release that comes up healthy and behaves worse
    is the failure mode CI cannot catch, so the issue report is the only way it
    gets fixed: the two version numbers, what changed in behaviour, and the output
-   of `sudo /etc/cogwheel/verify-install.sh`.
+   of the verify command for your install ([§10](#then-verify)).
+
+### 8.11 The container restarts in a loop and the log mentions permissions
+
+Two causes, and the log tells them apart.
+
+**The data directory is not writable by uid 10001.** Cogwheel runs as that
+user, not as root. A Docker named volume inherits the right owner from the
+image and never has this problem; a bind mount does, because the host
+directory keeps whatever owner it was created with. Fix it once:
+
+```sh
+sudo chown -R 10001:10001 /path/to/the/bind-mounted/directory
+```
+
+On Unraid with the data in appdata that is
+`chown -R 10001:10001 /mnt/user/appdata/cogwheel`.
+
+**`NET_BIND_SERVICE` is missing from the container.** The log line is
+`exec /usr/local/bin/cogwheel-server failed: Operation not permitted`, before
+Cogwheel prints anything of its own. The capability is required, not a
+hardening nicety: the binary carries it as a file capability with the
+effective bit set, so without it in the container's bounding set the kernel
+refuses to run the binary at all, under any network mode. Every shipped
+configuration adds it — `cap_add` in both Compose files, `ExtraParams` in the
+Unraid template — so this means it was removed by hand.
 
 ---
 
@@ -866,9 +915,13 @@ surprise.
 
 ## 10. Upgrades and rollback
 
-Cogwheel is upgraded the way any Compose deployment is: pull a newer image,
-recreate the container. There is no self-updater, nothing in the product checks
-for new versions, and the installer is not in this path at all.
+How you upgrade depends on how you installed, and there are three answers. A
+Compose install — the one-line installer's or your own — is upgraded the way
+any Compose deployment is: pull a newer image, recreate the container. Unraid
+does the same thing from its Docker tab. A native install has no image, so it
+is rebuilt from source or re-installed from a newer release tarball. In every
+case there is no self-updater, nothing in the product checks for new versions,
+and the one-line installer is not in the path.
 
 ### The two commands
 
@@ -893,22 +946,37 @@ docker compose pull
 docker compose up -d
 ```
 
-**Unraid:** Docker tab → Cogwheel-DNS → *check for updates* → **Apply Update**.
+**Built from source** — the only Compose path before `v0.1.0` — has nothing to
+pull. Rebuild from the clone and recreate:
+
+```sh
+git pull
+docker build -t cogwheel-dns:dev .
+COGWHEEL_IMAGE=cogwheel-dns:dev docker compose up -d
+```
+
+**Unraid:** Docker tab → cogwheel → *check for updates* → **Apply Update**.
 That works because `deploy/unraid/cogwheel.xml` tracks the moving `:latest` tag
 and Unraid compares digests; a pinned tag has a digest that never moves, so the
 Docker tab would report "up-to-date" forever, through a security release
 included. Pinning is a real choice — see
 [Which tag should I track?](RELEASING.md#which-tag-should-i-track) — but
-make it knowingly.
+make it knowingly. An image you built yourself before `v0.1.0` has no registry
+digest to compare: rebuild it under the same name
+([QUICKSTART](QUICKSTART.md#building-the-image-yourself-on-unraid)), then
+**Edit** → **Apply** on the container to recreate it from the new image.
 
-**Native:**
+**Native**, from the checkout you installed from:
 
 ```sh
 git pull
 sudo ./scripts/install-native.sh
 ```
 
-`/etc/cogwheel/cogwheel.env` is preserved unless you pass `--force-env`.
+Or, installed from a release tarball, fetch the newer one and pass it with
+`--tarball` exactly as in [§4](#4-native-install-with-systemd).
+`/etc/cogwheel/cogwheel.env` is preserved either way unless you pass
+`--force-env`.
 
 Re-running `install.sh` on a Docker host is still safe and idempotent — it never
 rewrites your `.env` — but it is not how you upgrade, and there is no reason to
@@ -916,32 +984,42 @@ reach for it.
 
 ### Then verify
 
+The same script on every host; where it lives is what differs:
+
 ```sh
-sudo /etc/cogwheel/verify-install.sh
+sudo /etc/cogwheel/verify-install.sh              # the one-line installer
+sudo sh scripts/verify-install.sh                 # from the checkout: Compose from a clone, or native
+docker exec cogwheel sh /app/verify-install.sh    # Unraid
 ```
 
-From a checkout, `sh scripts/verify-install.sh`. The installer leaves a copy on
-the host precisely so the post-upgrade check works somewhere that has never had
-one. It exits non-zero on failure — see
-[§7](#7-post-install-verification-checklist) for what it covers.
+The one-line installer leaves a copy on the host precisely so the post-upgrade
+check works somewhere that has never had a checkout; `install-native.sh` copies
+nothing but `cogwheel.env` to `/etc/cogwheel`, so a native host runs it from
+its checkout or unpacked release tarball — both carry `scripts/` — with
+`--http-port` and `--dns-port` if you changed them. It exits non-zero on
+failure — see [§7](#7-post-install-verification-checklist) for what it covers.
 
 ### Is there anything newer?
 
-Nothing tells you. That is deliberate: the first thing a privacy appliance
+Cogwheel does not tell you. That is deliberate: the first thing a privacy appliance
 should not do is open an unannounced connection on first boot, even a harmless
 one, and even to answer a useful question. **Cogwheel makes no update check and
 no outbound request of its own.**
 
-So the check is a script you run:
+So the check is something you run, and which one depends on the install:
 
-```sh
-sudo /etc/cogwheel/check-update.sh
-```
+| Installed with | Ask with |
+|---|---|
+| The one-line installer | `sudo /etc/cogwheel/check-update.sh` |
+| Compose from a clone | `sudo sh scripts/check-update.sh`, from the clone |
+| Unraid | the Docker tab's *check for updates* — Unraid's feature, not Cogwheel's |
+| Native | the release-tag check [below](#a-native-install-has-no-update-check) |
 
-It speaks only to `ghcr.io`, the registry this host already pulls from — the
-same conversation `docker pull` has, minus the download. No credentials, no
-identifiers, nothing about DNS. It changes nothing, and prints the two commands
-to apply an update if there is one.
+The script speaks only to `ghcr.io`, the registry this host already pulls from
+— the same conversation `docker pull` has, minus the download. No credentials,
+no identifiers, nothing about DNS. It changes nothing, and prints the two
+commands to apply an update if there is one. It compares image digests, so it
+has nothing to say about an image you built yourself.
 
 | Exit | Meaning |
 |---|---|
@@ -949,7 +1027,9 @@ to apply an update if there is one.
 | `10` | a newer image exists for the tag this host follows |
 | `1` | could not find out |
 
-Which makes it usable from cron, where the exit status is the whole message:
+Which makes it usable from cron, where the exit status is the whole message.
+On a one-line install, in root's crontab (from a clone, use the clone's path to
+the script):
 
 ```sh
 # Weekly, Sunday 09:00. --quiet prints nothing when there is nothing to say,
@@ -975,6 +1055,26 @@ docker buildx imagetools inspect ghcr.io/thekozugroup/cogwheel-dns:latest \
 Compare `io.cogwheel.schema-version` against what the Settings page reports.
 Today both are `1`.
 
+#### A native install has no update check
+
+Everything above compares container images, and a native install has none —
+so neither the script nor the Docker tab applies, and nothing in the product
+will tell you a release is out. Ask GitHub yourself, when you choose to:
+
+```sh
+/usr/local/bin/cogwheel-server --version
+curl -fsSL https://api.github.com/repos/thekozugroup/Cogwheel-DNS/releases/latest | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p'
+```
+
+The first line is the version you run; the second is one anonymous request to
+`api.github.com`, made by you, which prints the newest final release's tag —
+`v0.1.0`, say. Prereleases are never "latest", so it will not offer you one.
+Before the first release exists, `curl` reports a 404 and nothing else prints.
+If the tag is newer than what `--version` prints, upgrade as
+[above](#the-two-commands). A build from `main` reports the version in
+`Cargo.toml`, which is the release it is heading towards, not one that has
+shipped.
+
 ### Unattended updates
 
 The image and both compose files carry
@@ -995,6 +1095,15 @@ DNS, at 04:00, with nobody watching. That is the case auto-update cannot fix,
 and it is why the label says monitor-only.
 
 ### Rolling back
+
+The commands below are for the one-line installer's project in
+`/etc/cogwheel`; from a clone, run the same ones in the clone's directory
+against its `.env`. On Unraid, put the older tag in the container's
+*Repository* field and **Apply**. On a native install, check out the older tag
+— or unpack that release's tarball — and re-run `install-native.sh`; across a
+schema change, stop the service first and put `cogwheel.db.pre-vN` back in
+`/var/lib/cogwheel`, deleting the `-wal` and `-shm` beside it, for the same
+reason as below.
 
 **No schema change — the normal case.** Put the tag you want back in
 `/etc/cogwheel/.env` and run the two upgrade commands:
@@ -1037,8 +1146,8 @@ and a container that will not start, with an error about permissions rather
 than about what you just did.
 
 What it costs: everything logged since the upgrade — query history, and any
-device, rule or list change you made in between. Verify afterwards with
-`sudo /etc/cogwheel/verify-install.sh`.
+device, rule or list change you made in between. Verify afterwards with the
+command for your install under [Then verify](#then-verify).
 
 Always take a backup before an upgrade ([§11](#11-backup-and-restore)) and run
 the verification checklist afterwards ([§7](#7-post-install-verification-checklist)).
@@ -1121,7 +1230,9 @@ it is overwritten by the next migration.
 
 To go back to it — this is the second half of
 [rolling back across a schema change](#rolling-back), repeated here because this
-is where people look:
+is where people look. As written it is for the one-line installer's project in
+`/etc/cogwheel`; [Rolling back](#rolling-back) says what differs on the other
+installs.
 
 ```sh
 cd /etc/cogwheel

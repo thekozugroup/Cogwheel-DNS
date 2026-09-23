@@ -2,9 +2,9 @@
 
 Issues and pull requests are welcome. This file covers getting a working
 checkout, running the appliance and the web app, the checks that have to pass
-before you open a pull request, and where the contracts live — because this
-repository has a written contract and a change that disagrees with it is a bug
-in one of the two.
+before you open a pull request, what a maintainer checks before a tag, and where
+the contracts live — because this repository has a written contract and a change
+that disagrees with it is a bug in one of the two.
 
 - [Setup](#setup)
 - [Running it](#running-it)
@@ -12,6 +12,7 @@ in one of the two.
 - [The repository](#the-repository)
 - [Commits and pull requests](#commits-and-pull-requests)
 - [What will get pushed back](#what-will-get-pushed-back)
+- [Before a tag](#before-a-tag)
 - [Where the contracts live](#where-the-contracts-live)
 
 ---
@@ -285,6 +286,92 @@ pull requests.
 
 - **Behaviour that disagrees with the spec**, without the spec changing in the
   same pull request. See below.
+
+---
+
+## Before a tag
+
+For maintainers. [docs/RELEASING.md](docs/RELEASING.md) describes the release
+machinery; this is what has to be true before a `v*` tag is pushed, because the
+workflow publishes whatever it is given.
+
+### Every tag
+
+- **The gate is green.** `sh scripts/verify.sh` with nothing skipped —
+  `cargo audit` and `cargo deny check` in particular, which skip themselves
+  when the tool is absent, and the Dockerfile check, which needs a daemon. A
+  skip is not a pass, and a release is the one time that matters most.
+  [The checks](#the-checks) has the reasoning.
+
+- **The protected-name invariant holds.** A list naming a protected suffix is
+  still installed, the names it hit are recorded in its `note`, and those names
+  still resolve — because protection is enforced in `cogwheel_policy::evaluate`
+  at query time, not by refusing the list. Covered by
+  `a_protected_domain_outranks_a_blocklist_entry` in
+  `crates/cogwheel-policy/src/tests.rs`.
+
+- **An upgrade against a copy of the previous release's data directory has been
+  run**, and the result verified with `scripts/verify-install.sh`. CI covers the
+  v0→v1 case and covers that a database from a *newer* Cogwheel is refused with
+  a message naming both versions; a real release should also be tried against a
+  real household database.
+
+- **The changelog section exists, is dated, and says whether the schema
+  changed.**
+
+- **What Unraid fetches from `main` is there, and parses.** Unraid reads the
+  template and its icon from `raw.githubusercontent.com` on `main`, not from
+  the image, and the Dockerfile bakes an icon URL into the image's metadata,
+  where it cannot be corrected once published. "It serves 200" is not the
+  check: a malformed SVG serves 200 too, and one did. CI's *Every shipped SVG
+  and XML parses* step covers the tree; this covers what is actually on `main`,
+  and exits non-zero on anything missing or malformed:
+
+  ```sh
+  python3 - <<'PY'
+  import urllib.request, xml.dom.minidom
+  base = 'https://raw.githubusercontent.com/thekozugroup/Cogwheel-DNS/main/deploy/unraid/'
+  bad = False
+  for name in ('cogwheel.xml', 'cogwheel.svg', 'cogwheel.png'):
+      try:
+          body = urllib.request.urlopen(base + name, timeout=20).read()
+          if name.endswith('.png'):
+              assert body.startswith(b'\x89PNG\r\n\x1a\n'), 'not a PNG'
+          else:
+              xml.dom.minidom.parseString(body)
+          print('ok  ', name)
+      except Exception as e:
+          print('FAIL', name, '-', e)
+          bad = True
+  raise SystemExit(bad)
+  PY
+  ```
+
+### The first tag, `v0.1.0`, only
+
+Several statements in the tree are true today and become false the moment an
+image exists. They are honest, not placeholders, so they stay until the tag —
+and then they all go in the same commit that makes them wrong:
+
+- [ ] `CHANGELOG.md` — rename `## [Unreleased]` to `## [0.1.0] — <date>`, add
+      the link reference at the foot, and open a fresh empty `## [Unreleased]`.
+- [ ] `README.md` — delete the **Before the first release** block under
+      **Quick start**, and the sentence about `v0.1.0` in the Unraid paragraph.
+- [ ] `docs/QUICKSTART.md` — delete the **Before the first release** block, the
+      note at the top of **Unraid**, and the *Repository* sentence in its
+      step 3.
+- [ ] `docs/DEPLOYMENT.md` — delete the **Before the first release** block.
+- [ ] `docs/RELEASING.md` — delete the note at the top.
+- [ ] `deploy/unraid/cogwheel.xml` — delete the *BEFORE v0.1.0* paragraph from
+      the Overview.
+
+Then read every hit of
+
+```sh
+git grep -n -i -e 'v0\.1\.0' -e 'first release' -- README.md docs deploy
+```
+
+— each one still in the tree has to be true once the image exists.
 
 ---
 

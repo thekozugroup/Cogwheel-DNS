@@ -1,13 +1,28 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Cogwheel DNS">
-  <!-- The Unraid Docker tab renders this at 48px on a dark chrome, so the mark
-       sits on its own tile rather than relying on the page behind it. The glyph
-       is the same path as docs/assets/logo.svg and the web app's favicon: filled
-       rectangles, no strokes, because a 2px stroke is the first thing to break
-       at 48px. The path is drawn on a 24-unit grid with a bounding box of
-       x 2..22, y 2..22, so scale 12 then translate 112 lands it at 136..376 --
-       centred, 240 units of a 512 tile. -->
-  <rect width="512" height="512" rx="112" fill="#0a0a0a"/>
-  <g transform="translate(112 112) scale(12)" fill="#fafafa">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="192" height="192" role="img" aria-label="Cogwheel DNS">
+  <!-- The Unraid Docker tab draws its icons at 48px on a dark chrome, and
+       smaller elsewhere, so the mark sits on its own tile rather than relying
+       on the page behind it. The glyph is the same path as docs/assets/logo.svg
+       and the web app's favicon: filled rectangles, no strokes.
+
+       The tile is 32 units and the glyph sits on it at 1:1, offset 4, so it
+       spans 6 to 26: centred, 20 units of 32. That size is chosen for the
+       pixel grid, not for looks. Every edge of the mark is on an even
+       coordinate, so on a 32-unit tile it lands on a whole pixel at 16, 32,
+       48, 64, 96, 128 and 192px, and the mark stays sharp there with no
+       anti-aliased grey fringe. (A 512-unit tile with the glyph at scale 12
+       puts every edge between two pixels at 48px, which is exactly the size
+       Unraid uses.) At a size where the grid cannot land, 24px, crispEdges on
+       the glyph snaps it to whole pixels rather than smearing it; the tile's
+       rounded corners keep their anti-aliasing.
+
+       The template's Icon points at cogwheel.png beside this file, which is
+       this tile rasterised at 192px. Unraid downloads a container's icon once
+       and caches it under a .png file name, and a browser will not draw SVG
+       bytes that arrive as image/png, so PNG is the one format that works
+       however that cache serves it. Regenerate the PNG whenever this file
+       changes, at 192 by 192 with a transparent background. -->
+  <rect width="32" height="32" rx="7" fill="#0a0a0a"/>
+  <g transform="translate(4 4)" fill="#fafafa" shape-rendering="crispEdges">
     <path d="M10 2h4v2h-4zM6 4h12v2H6zM4 6h16v2H4zM4 8h4v8H4zM16 8h4v8h-4zM2 10h2v4H2zM20 10h2v4h-2zM4 16h16v2H4zM6 18h12v2H6zM10 20h4v2h-4z"/>
   </g>
 </svg>

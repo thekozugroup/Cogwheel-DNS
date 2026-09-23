@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" role="img" aria-label="Cogwheel">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" shape-rendering="crispEdges" role="img" aria-label="Cogwheel">
   <!--
     Cogwheel's mark.
 
@@ -8,9 +8,14 @@
     geometry instead: ten rectangles, no strokes, nothing to thin out.
 
     Every edge lands on an even coordinate of the 24px grid, so the thinnest feature in the mark
-    — a tooth, a chamfer step — is two units, a twelfth of the whole. That is what survives the
-    scale to 16px. The opening is eight units square rather than round for the same reason: a
-    circle inside a 16px tile is four dark pixels pretending to be a curve.
+    — a tooth, a chamfer step — is two units, a twelfth of the whole. The opening is eight units
+    square rather than round because it has to sit on the same grid: a circle inside a 16px tile
+    is four dark pixels pretending to be a curve.
+
+    `shape-rendering="crispEdges"` is what keeps that grid sharp at sizes that are not a multiple
+    of 24. At 16px or 64px a two-unit edge falls between two pixels, and anti-aliasing turns it
+    into a grey fringe; crispEdges snaps it to a whole pixel instead, and because the mark is
+    symmetric the snap is too. Set it on every copy.
 
     The mark is symmetric about both axes and its bounding box is x 2..22, y 2..22 — square,
     centred on the viewBox, with a two-unit margin. A tile can centre it on the viewBox directly.
@@ -24,7 +29,8 @@
     component at `apps/cogwheel-web/src/components/layout/mark.tsx`, which is what
     `currentColor` was written for; the `<link rel="icon">` data URI in
     `apps/cogwheel-web/index.html`; and `deploy/unraid/cogwheel.svg`, which sets it on a dark
-    tile for Unraid's Docker tab.
+    tile for Unraid's Docker tab. That tile has a raster twin, `deploy/unraid/cogwheel.png`, which
+    is what the Unraid template actually points at; regenerate it whenever the tile changes.
   -->
   <path d="M10 2h4v2h-4zM6 4h12v2H6zM4 6h16v2H4zM4 8h4v8H4zM16 8h4v8h-4zM2 10h2v4H2zM20 10h2v4h-2zM4 16h16v2H4zM6 18h12v2H6zM10 20h4v2h-4z"/>
 </svg>

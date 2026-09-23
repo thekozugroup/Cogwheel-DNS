@@ -723,12 +723,17 @@ jobs:
 
           ## Upgrading
 
-          The same two commands on every host, whichever way it was installed:
+          A host set up by the installer, or any other Compose install, upgrades
+          with two commands from the directory holding its compose file:
 
           \`\`\`sh
           cd /etc/cogwheel
           sudo docker compose pull && sudo docker compose up -d
           \`\`\`
+
+          On Unraid it is the Docker tab's **Apply Update**. A native install is
+          rebuilt, or re-installed from this release's tarball — see
+          [DEPLOYMENT.md §10](https://github.com/${GITHUB_REPOSITORY}/blob/${TAG}/docs/DEPLOYMENT.md#10-upgrades-and-rollback).
 
           ## Container image
 

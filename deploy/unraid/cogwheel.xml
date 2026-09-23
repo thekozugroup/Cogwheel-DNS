@@ -1,10 +1,21 @@
 <?xml version="1.0"?>
 <!--
-  Cogwheel DNS — Unraid Community Applications template.
+  Cogwheel DNS — Unraid Docker template.
 
-  Add it in the Unraid web UI: Docker tab -> ADD CONTAINER -> paste this file's
-  raw URL into "Template". Everything below is then filled in, including the
-  ports, the data location and the two capabilities the image needs.
+  Unraid's ADD CONTAINER page picks a template from a list of files on the
+  flash drive; it does not fetch one from a URL. So put this file there first,
+  from the Unraid terminal:
+
+    mkdir -p /boot/config/plugins/dockerMan/templates-user
+    curl -fsSL -o /boot/config/plugins/dockerMan/templates-user/my-cogwheel.xml https://raw.githubusercontent.com/thekozugroup/Cogwheel-DNS/main/deploy/unraid/cogwheel.xml
+
+  then Docker tab -> ADD CONTAINER -> Template -> cogwheel. Everything below
+  is filled in: the network, the data location, and the one capability the
+  image needs. docs/QUICKSTART.md#unraid has the walkthrough.
+
+  The container is named `cogwheel`, the same name every other install uses,
+  so `docker exec cogwheel ...` and `docker logs cogwheel` in the docs work
+  here unchanged.
 
   Two choices in here are deliberate and worth reading before you change them.
 
@@ -29,7 +40,7 @@
      query from a second machine to that machine.
 -->
 <Container version="2">
-  <Name>Cogwheel-DNS</Name>
+  <Name>cogwheel</Name>
   <Repository>ghcr.io/thekozugroup/cogwheel-dns:latest</Repository>
   <Registry>https://github.com/thekozugroup/Cogwheel-DNS/pkgs/container/cogwheel-dns</Registry>
   <Network>host</Network>
@@ -44,9 +55,18 @@
     own rules — one tablet on a stricter profile than the rest of the house.
     It is one Rust binary and one SQLite file; there is no second service to run.
 
-    BEFORE YOU START: port 53 must be free on this server. Unraid does not run a
-    DNS server by default, so it usually is. If you also run Pi-hole or AdGuard
-    Home here, stop one of them first — two resolvers cannot share the port.
+    BEFORE YOU START: port 53 must be free on this server. Check from the Unraid
+    terminal with: ss -lnptu '( sport = :53 )' and expect only a header. Unraid
+    itself runs no DNS server, but two things commonly hold the port: another
+    DNS container on host networking (Pi-hole, AdGuard Home), and, with the VM
+    Manager enabled, libvirt's dnsmasq on virbr0. Under host networking
+    Cogwheel binds port 53 on every address, so anything already listening on
+    it, on any interface, stops it starting. Stop the other resolver, or give
+    Cogwheel its own br0 address instead.
+
+    BEFORE v0.1.0: no image has been published yet, so Apply fails at the pull
+    until the first release. Build the image yourself and put its name in
+    Repository; docs/QUICKSTART.md#unraid has the commands.
 
     AFTER IT STARTS: open the WebUI, then set your router's DNS server to this
     server's LAN address. Set it on the ROUTER, in the DHCP settings, rather than
@@ -56,11 +76,14 @@
 
     DATA: the default below is a Docker named volume called cogwheel-data, which
     works with no further steps because the image's data directory is owned by
-    uid 10001 and Docker copies that ownership onto a fresh named volume. If you
-    would rather keep the database in appdata so the CA Appdata Backup plugin
-    picks it up, change the Data path to /mnt/user/appdata/cogwheel and run this
-    once from the Unraid terminal before starting the container — a bind mount
-    comes up root-owned and Cogwheel does not run as root:
+    uid 10001 and Docker copies that ownership onto a fresh named volume. A
+    named volume lives inside Unraid's Docker storage, though, so deleting the
+    Docker image file (a common Unraid repair step) deletes the database with
+    it. If you would rather keep the database in appdata, where the Appdata
+    Backup plugin picks it up, change the Data path to
+    /mnt/user/appdata/cogwheel and run this once from the Unraid terminal
+    before starting the container. Whoever creates that folder, Unraid or you,
+    it is not owned by uid 10001, which is the user Cogwheel runs as:
 
       mkdir -p /mnt/user/appdata/cogwheel &amp;&amp; chown -R 10001:10001 /mnt/user/appdata/cogwheel
 
@@ -78,12 +101,12 @@
   <Category>Network:DNS Network:Privacy Tools:Utilities</Category>
   <WebUI>http://[IP]:8080/</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/thekozugroup/Cogwheel-DNS/main/deploy/unraid/cogwheel.xml</TemplateURL>
-  <Icon>https://raw.githubusercontent.com/thekozugroup/Cogwheel-DNS/main/deploy/unraid/cogwheel.svg</Icon>
+  <Icon>https://raw.githubusercontent.com/thekozugroup/Cogwheel-DNS/main/deploy/unraid/cogwheel.png</Icon>
   <DonateText/>
   <DonateLink/>
   <Requires/>
   <!--
-    The two capabilities below are not optional and not a hardening
+    The capability added below is not optional and not a hardening
     preference. The binary carries cap_net_bind_service as a FILE capability
     with the effective bit set, so execve(2) returns EPERM when that capability
     is missing from the bounding set: without the cap-add the container does

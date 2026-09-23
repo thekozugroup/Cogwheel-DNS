@@ -17,10 +17,8 @@ themselves.
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 [Quick start](#quick-start) · [What it looks like](#what-it-looks-like) ·
-[What it does](#what-it-does) · [Configuration](#configuration) · [Updating](#updating)
-
-[Install guide](docs/QUICKSTART.md) · [Architecture](docs/ARCHITECTURE.md) ·
-[Design](docs/DESIGN.md) · [Deployment](docs/DEPLOYMENT.md) · [Changelog](CHANGELOG.md)
+[What it does](#what-it-does) · [Deployment](docs/DEPLOYMENT.md) ·
+[Architecture](docs/ARCHITECTURE.md) · [Design](docs/DESIGN.md) · [Changelog](CHANGELOG.md)
 
 </div>
 
@@ -51,9 +49,6 @@ needs it. On a Raspberry Pi, use the 64-bit OS.
 > a clone"** block below, or
 > [docs/QUICKSTART.md](docs/QUICKSTART.md#build-it-yourself-until-v010-is-tagged) — which builds
 > the image locally and works today.
->
-> *Delete this block in the commit that tags `v0.1.0` — it is one of five, listed in
-> [docs/RELEASING.md](docs/RELEASING.md#before-the-first-tag-v010-only).*
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/thekozugroup/Cogwheel-DNS/main/scripts/install.sh | sudo sh
@@ -94,7 +89,8 @@ docker build -t cogwheel-dns:dev .
 COGWHEEL_IMAGE=cogwheel-dns:dev docker compose up -d
 ```
 
-The build compiles the Rust binary and the web UI from source, so the first one takes a while.
+The build compiles the Rust binary and the web UI from source, so the first one takes a while:
+roughly 10 minutes on a four-core x86_64 machine and 30–60 on a Raspberry Pi 5, as an estimate.
 `docker-compose.yml` has no `build:` section on purpose: with both `image:` and `build:` present,
 Compose silently builds whenever the image is missing, which on a Raspberry Pi turns a failed
 pull into a forty-minute surprise.
@@ -105,17 +101,25 @@ exists, use this path.
 
 </details>
 
-**On Unraid**, go to the Docker tab, **Add Container**, and paste this into the _Template_ field:
+**On Unraid**, put the template on the flash drive from the Unraid terminal, then pick
+**cogwheel** under Docker → **Add Container** → **Template** — that list reads files on the flash
+drive and does not take a URL:
 
-```
-https://raw.githubusercontent.com/thekozugroup/Cogwheel-DNS/main/deploy/unraid/cogwheel.xml
+```sh
+mkdir -p /boot/config/plugins/dockerMan/templates-user
+curl -fsSL -o /boot/config/plugins/dockerMan/templates-user/my-cogwheel.xml \
+  https://raw.githubusercontent.com/thekozugroup/Cogwheel-DNS/main/deploy/unraid/cogwheel.xml
 ```
 
-Everything else is filled in for you. Use host networking or a custom `br0` address, never plain
-bridge — under bridge, client IPs are rewritten to the Docker gateway and every device in the
-house looks like one client. [docs/QUICKSTART.md](docs/QUICKSTART.md#unraid) has the five-step
-walkthrough, including how to verify the install from Unraid's terminal, where there is no
-`/etc/cogwheel` and no checkout.
+Everything else is filled in for you, including `--cap-add NET_BIND_SERVICE`, without which the
+image does not start at all. The database goes in a named volume; to keep it in
+`/mnt/user/appdata/cogwheel` instead, `chown -R 10001:10001` that folder first, because Cogwheel
+runs as uid 10001. Use host networking or a custom `br0` address, never plain bridge — under
+bridge, client IPs are rewritten to the Docker gateway and every device in the house looks like
+one client. Until `v0.1.0` there is no image for the template to pull, and the clone path above
+needs Compose, which Unraid does not ship; [docs/QUICKSTART.md](docs/QUICKSTART.md#unraid) has
+the walkthrough, the build that works there today, and how to verify the install from Unraid's
+terminal.
 
 Either way it is one container and one volume. The binary serves the web UI from the same origin
 it serves the API on, so there is no reverse proxy to configure and no CORS policy to get wrong.
@@ -123,6 +127,14 @@ it serves the API on, so there is no reverse proxy to configure and no CORS poli
 [docs/QUICKSTART.md](docs/QUICKSTART.md) walks the same install through end to end, per host —
 Linux, Raspberry Pi, Unraid, Compose from a clone, or no Docker at all — plus what to do in the
 first five minutes after it is running.
+
+Upgrading depends on the install: `docker compose pull && docker compose up -d` in the directory
+holding the compose file, **Apply Update** in Unraid's Docker tab, or `git pull` and a re-run of
+`install-native.sh` without Docker. Cogwheel never checks for updates on its own — the first
+thing a privacy appliance should not do is phone home.
+[DEPLOYMENT.md](docs/DEPLOYMENT.md#10-upgrades-and-rollback) covers all five paths, how to ask
+whether there is anything newer, rollback and backup; its
+[troubleshooting section](docs/DEPLOYMENT.md#8-troubleshooting) is organised by symptom.
 
 > **The control plane has no authentication, and the box sees every name your household
 > resolves.** Both are deliberate and both have consequences — read [SECURITY.md](SECURITY.md)
@@ -243,9 +255,10 @@ what the appliance sits at, the second is what it has to survive. §12 of
 
 ## Configuration
 
-Everything is an environment variable — in `/etc/cogwheel/.env` for an installed box, `.env` for
-Compose, or the _Variables_ section of the Unraid template. See
-[`.env.example`](.env.example) for the annotated set. The ones people actually change:
+Everything is an environment variable — in `/etc/cogwheel/.env` after the one-line installer,
+`.env` for Compose from a clone, `/etc/cogwheel/cogwheel.env` for a native install, or the
+_Variables_ section of the Unraid template. See [`.env.example`](.env.example) for the annotated
+set. The ones people actually change:
 
 | Variable                                  | Default                    | Notes                                                                                                                      |
 | ----------------------------------------- | -------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
@@ -261,72 +274,6 @@ Compose, or the _Variables_ section of the Unraid template. See
 Those are the defaults the image and the shipped Compose file give you. A variable that is set
 but cannot be parsed stops startup rather than falling back to something nobody chose, and
 changing any of them needs a container restart.
-
-## Updating
-
-Every host upgrades the same way, whichever way it was installed. The installer is not in the
-update path.
-
-```sh
-cd /etc/cogwheel                    # or wherever your docker-compose.yml lives
-sudo docker compose pull
-sudo docker compose up -d
-```
-
-Then check it came back:
-
-```sh
-sudo /etc/cogwheel/verify-install.sh
-```
-
-On Unraid it is the Docker tab: **check for updates**, then **Apply Update**. That works because
-the template tracks `:latest`; a pinned tag has a digest that never moves, so the update check
-can only ever report up-to-date.
-
-**Is there anything newer?** Nothing tells you. Cogwheel makes no update check and opens no
-connection you did not ask for — the first thing a privacy appliance should not do is phone home.
-Ask on demand instead:
-
-```sh
-sudo /etc/cogwheel/check-update.sh   # 0 up to date · 10 update available · 1 could not find out
-```
-
-It talks only to `ghcr.io`, the registry this host already pulls from, and changes nothing.
-
-**To roll back**, set `COGWHEEL_IMAGE` in `/etc/cogwheel/.env` to the tag you want and run the
-two upgrade commands again. That is the whole procedure _unless the release you are leaving
-changed the database schema_ — the migration happens in place, and the older build will refuse to
-open the newer database. [DEPLOYMENT.md](docs/DEPLOYMENT.md) has the snapshot-restore procedure
-for that case, and every [CHANGELOG](CHANGELOG.md) entry says whether it applies.
-
-All the state is one SQLite file in the `cogwheel-data` volume, so backing up is copying one
-file — but copy it with the container stopped, or take the write-ahead log with it.
-[DEPLOYMENT.md](docs/DEPLOYMENT.md) has both forms.
-
-## Troubleshooting
-
-**A site is broken.** Open Activity, find the lookup, and use the row menu to allow it — for
-everyone or for just that device. The verdict column already names the list that decided, so you
-can tell a block from an outage before you change anything.
-
-**Devices are not being filtered.** Most devices cache their DNS setting until the DHCP lease
-renews, so reboot one to test. If a device still does not appear in Activity at all, it is not
-asking Cogwheel: check for DNS-over-HTTPS in the browser's settings, and for a hardcoded resolver
-on TVs and consoles.
-
-**The container restarts in a loop, or the log mentions permissions.** Either the data directory
-is not writable by uid 10001 — bind mounts only, `chown -R 10001:10001 <dir>` — or
-`NET_BIND_SERVICE` is missing from the container. The capability is required, not a hardening
-nicety: without it the binary does not execute at all.
-
-**Port 53 is already in use.** Something else on the box is a DNS server, usually
-`systemd-resolved` or `dnsmasq`. `sudo /etc/cogwheel/install.sh --fix-port-53` resolves it and
-exits — the installer leaves a copy of itself there, so this works on a host with no checkout.
-From a checkout it is `sudo sh scripts/install.sh --fix-port-53`; by hand, see
-[DEPLOYMENT.md](docs/DEPLOYMENT.md).
-
-**The dashboard says "Lists not downloaded yet".** The box has no route to the internet. It keeps
-serving from the last good copy of each list and picks the download back up on its own.
 
 ## Development
 
@@ -383,7 +330,7 @@ crates/cogwheel-storage    SQLite, the schema, and the migration that takes a sn
 apps/cogwheel-server       The composition root: HTTP, the query log writer, the refresh
                            scheduler. The only member allowed to depend on all four crates
 apps/cogwheel-web          The five-page control plane, served by the binary above
-deploy/                    The systemd unit and the Unraid Community Applications template
+deploy/                    The systemd unit, and the Unraid Docker template with its icon
 docs/                      Quick start, using it, architecture, design contract, deployment,
                            releasing, the spec every route and precedence rule is checked
                            against, and the ADRs

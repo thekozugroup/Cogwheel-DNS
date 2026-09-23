@@ -1,26 +1,15 @@
 # Quick start
 
 From nothing to a household that is filtering, in about five minutes of your
-attention. You do not need to know what a DNS server is, and nothing here asks
-you to learn.
+attention once there is a published image to pull. Until the first release
+there is not, and the build that stands in for it adds a wait — read the next
+block before you pick a host. You do not need to know what a DNS server is,
+and nothing here asks you to learn.
 
 Cogwheel is one container and one database file. It answers every name the
 devices on your network look up, returns nothing for the ones your blocklists
 name, and serves a small web page where you can see what happened and change
 your mind.
-
-**Pick the host you are installing on:**
-
-| | |
-|---|---|
-| [Linux with Docker](#linux-with-docker) | the usual case, and the shortest |
-| [Raspberry Pi](#raspberry-pi) | the reference target — a few Pi-specific steps |
-| [Unraid](#unraid) | a template, pasted into the Docker tab |
-| [Docker Compose from a clone](#docker-compose-from-a-clone) | you already run a Compose stack |
-| [Without Docker](#without-docker) | native binary under systemd |
-
-Then, whichever you picked: **[three things to do next](#you-are-filtering--now-do-these-three-things)**
-and **[the two things that go wrong first](#the-two-things-that-go-wrong-first)**.
 
 > ### Before the first release
 >
@@ -29,12 +18,30 @@ and **[the two things that go wrong first](#the-two-things-that-go-wrong-first)*
 > image — the one-line installer, `docker compose pull`, the Unraid template,
 > the release tarball — will fail until `v0.1.0` exists.
 >
-> Until then, [build the image yourself](#build-it-yourself-until-v010-is-tagged)
-> — a clone and one long build — or install
-> [without Docker](#without-docker), which also builds from source.
+> Until then, build the image yourself:
+> [on Linux or a Pi](#build-it-yourself-until-v010-is-tagged), or
+> [on Unraid](#building-the-image-yourself-on-unraid), which cannot run the
+> Linux block. Or install [without Docker](#without-docker), which also builds
+> from source.
 >
-> *Delete this block in the commit that tags `v0.1.0` — it is one of five,
-> listed in [RELEASING.md](RELEASING.md#before-the-first-tag-v010-only).*
+> **Budget for the build.** An estimate, not a timing of this exact build:
+> about **10 minutes on a four-core x86_64 machine** and about **30–60 minutes
+> on a Raspberry Pi 5**, plus the time to download the Rust and Node build
+> images. The image build compiles the Rust server and the web app from
+> source; the Rust compile alone took 3 min 21 s cold on that x86_64 machine.
+
+**Pick the host you are installing on:**
+
+| | |
+|---|---|
+| [Linux with Docker](#linux-with-docker) | the usual case, and the shortest |
+| [Raspberry Pi](#raspberry-pi) | the reference target — a few Pi-specific steps |
+| [Unraid](#unraid) | a template for the Docker tab |
+| [Docker Compose from a clone](#docker-compose-from-a-clone) | you already run a Compose stack |
+| [Without Docker](#without-docker) | native binary under systemd |
+
+Then, whichever you picked: **[three things to do next](#you-are-filtering--now-do-these-three-things)**
+and **[the two things that go wrong first](#the-two-things-that-go-wrong-first)**.
 
 ---
 
@@ -130,7 +137,7 @@ sudo /etc/cogwheel/install.sh --uninstall      # reverses exactly what it change
 **You do not need the installer again.** It bootstraps a Compose project and
 then gets out of the way; upgrading is
 [two Compose commands](DEPLOYMENT.md#10-upgrades-and-rollback) from `/etc/cogwheel`,
-the same two on every Cogwheel host however it was installed.
+the same two as any other Compose install of Cogwheel.
 
 → [Three things to do next](#you-are-filtering--now-do-these-three-things)
 
@@ -193,15 +200,67 @@ it to come back ready, so give it that long before deciding it has hung.
 
 ## Unraid
 
-1. **Docker** tab → **ADD CONTAINER**.
-2. Paste this into the **Template** field:
-   `https://raw.githubusercontent.com/thekozugroup/Cogwheel-DNS/main/deploy/unraid/cogwheel.xml`
-3. Everything fills in — ports, data location, the capability the image needs.
-   Leave **Network** on `host`.
+> **Before `v0.1.0`, the steps below cannot work on their own, for two
+> reasons.**
+>
+> 1. **There is no image to pull.** The template's *Repository* is
+>    `ghcr.io/thekozugroup/cogwheel-dns:latest`, which does not exist until the
+>    first release, so **Apply** stops at the pull and no container is created.
+> 2. **The workarounds at the top of this page do not run on Unraid.**
+>    [Build it yourself](#build-it-yourself-until-v010-is-tagged) ends in
+>    `docker compose`, which stock Unraid does not ship, and
+>    [Without Docker](#without-docker) needs systemd, which Unraid does not use.
+>
+> What does work is building the image with plain `docker build` and pointing
+> the template at it. Do [that](#building-the-image-yourself-on-unraid)
+> first, then come back to step 1.
+
+1. **Put the template on the flash drive.** Unraid's *Add Container* page picks
+   a template from a list of files stored there; it does not fetch one from a
+   URL. From the Unraid terminal, or over SSH:
+
+   ```sh
+   mkdir -p /boot/config/plugins/dockerMan/templates-user
+   curl -fsSL -o /boot/config/plugins/dockerMan/templates-user/my-cogwheel.xml \
+     https://raw.githubusercontent.com/thekozugroup/Cogwheel-DNS/main/deploy/unraid/cogwheel.xml
+   ```
+
+2. **Docker** tab → **Add Container** → **Template** → **cogwheel**.
+3. Everything fills in: the network, the data location, the capability the
+   image needs. Leave **Network** on `host`. Before `v0.1.0`, change
+   **Repository** to `cogwheel-dns:dev`, the image you built.
 4. **Apply.**
 5. Open the WebUI link Unraid puts on the container.
 
-Two notes, both already in the template's own comments:
+The container is called `cogwheel`, as it is on every other host, so the
+`docker exec cogwheel …` and `docker logs cogwheel` commands in these docs work
+on Unraid unchanged.
+
+**Port 53 must be free on the server.** Check before you Apply:
+
+```sh
+ss -lnptu '( sport = :53 )'      # free if only the header line prints
+```
+
+Unraid runs no DNS server of its own, but two things commonly hold the port:
+another DNS container on host networking — Pi-hole, AdGuard Home — and, with the
+VM Manager enabled, libvirt's `dnsmasq` on `virbr0`. Under host networking
+Cogwheel binds port 53 on every address, so either one stops it starting. Stop
+the other resolver, or give Cogwheel its own `br0` address instead.
+
+**Where the database lives.** The template's default is a Docker named volume,
+`cogwheel-data`, which needs no setup. It lives inside Unraid's Docker storage,
+though, so deleting the Docker image file — a common Unraid repair step —
+deletes the database with it. To keep it in appdata instead, where the Appdata
+Backup plugin sees it, set the *Data* path to `/mnt/user/appdata/cogwheel` and
+run this once before you Apply. Cogwheel runs as uid 10001, not root, and a
+folder Unraid or you create is not owned by it:
+
+```sh
+mkdir -p /mnt/user/appdata/cogwheel && chown -R 10001:10001 /mnt/user/appdata/cogwheel
+```
+
+Two more notes, both already in the template's own comments:
 
 - **Network must not be plain `bridge`.** Cogwheel tells devices apart by the
   source IP of their queries, and Unraid's bridge network rewrites that address
@@ -216,22 +275,69 @@ Two notes, both already in the template's own comments:
   knowingly.
 
 Updating afterwards is the Docker tab's own **check for updates** →
-**Apply Update**.
+**Apply Update**. An image you built yourself has no registry to check against:
+rebuild it with the same name, then **Edit** → **Apply** on the container to
+recreate it from the new image.
 
 **Checking it worked, on Unraid.** There is no `/etc/cogwheel` here and no
-checkout, so the two forms the next section gives are both unavailable to you.
-The image carries the same script; run it from Unraid's terminal:
+checkout, so the first two forms in
+[Then check it is actually working](#then-check-it-is-actually-working) are
+unavailable to you. The image carries the same script; run it from Unraid's
+terminal:
 
 ```sh
 docker exec cogwheel sh /app/verify-install.sh
 ```
 
 From inside the container it checks liveness, readiness, the API, the web
-assets and the advertised resolver address, and reports the restart and upgrade
-checks as SKIP rather than inventing a result — those need the Docker socket it
-deliberately cannot see. The end-to-end check is the human one anyway: open the
-WebUI link, look something up on another device, and watch a row appear on
-Activity.
+assets and the advertised resolver address, and reports the DNS lookups, the
+restart and the upgrade checks as SKIP rather than inventing a result — the
+image carries no `dig`, and it deliberately cannot see the Docker socket. The
+end-to-end check is the human one anyway: open the WebUI link, look something
+up on another device, and watch a row appear on Activity.
+
+### Building the image yourself on Unraid
+
+Before `v0.1.0` this is the only way to run Cogwheel on Unraid; afterwards it
+is how you run a build of `main`. The Dockerfile uses BuildKit cache mounts, so
+the build needs Docker's `buildx` plugin. Check for it on the Unraid terminal:
+
+```sh
+docker buildx version
+```
+
+If that prints a version, build on the server itself. This fetches the source
+as a tarball, so it needs no `git`:
+
+```sh
+cd /tmp
+curl -fsSL https://github.com/thekozugroup/Cogwheel-DNS/archive/refs/heads/main.tar.gz | tar -xz
+cd Cogwheel-DNS-main
+docker build -t cogwheel-dns:dev .
+```
+
+The build-time estimate at the top of this page applies: roughly ten minutes
+on a four-core x86_64 server, and it is an estimate. The unpacked source is
+about 3 MB, so `/tmp` — which lives in RAM on Unraid — is fine for it; the
+build itself happens in Docker's own storage.
+
+If `docker buildx version` fails, build on any **x86_64** Linux machine that
+has Docker, and copy the image across over SSH. It has to be x86_64: Unraid is,
+and an image built on a Raspberry Pi or an Apple-silicon Mac is arm64 and will
+not start there.
+
+```sh
+git clone https://github.com/thekozugroup/Cogwheel-DNS.git
+cd Cogwheel-DNS
+docker build -t cogwheel-dns:dev .
+docker save cogwheel-dns:dev | ssh root@tower docker load    # tower: your Unraid server's name or address
+```
+
+Then go back to [step 1](#unraid) and set **Repository** to `cogwheel-dns:dev`
+in step 3. Unraid only pulls an image it does not already have, so it uses the
+one you built. Once `v0.1.0` is out, set Repository back to
+`ghcr.io/thekozugroup/cogwheel-dns:latest`, so the Docker tab's update check
+has a published tag to compare against.
 
 → [Three things to do next](#you-are-filtering--now-do-these-three-things)
 
@@ -267,9 +373,8 @@ work at all.
 There is no `build:` block in `docker-compose.yml`, on purpose — Compose would
 then silently build a missing image, and on a Pi that turns `docker compose up`
 into a surprise half-hour. Build explicitly and point the compose file at what
-you built:
-
-This block stands on its own — it does not assume you ran the clone above:
+you built. This block stands on its own — it does not assume you ran the clone
+above:
 
 ```sh
 git clone https://github.com/thekozugroup/Cogwheel-DNS.git
@@ -284,6 +389,17 @@ docker build -t cogwheel-dns:dev .
 COGWHEEL_IMAGE=cogwheel-dns:dev docker compose up -d
 docker compose ps          # wait for STATUS = healthy
 ```
+
+**How long the build takes** — an estimate, not a timing of this build: about
+**10 minutes on a four-core x86_64 machine** and about **30–60 minutes on a
+Raspberry Pi 5**, plus the time to download the Rust and Node build images.
+`docker build` compiles the Rust server and the web app from source inside the
+image; the Rust compile alone took 3 min 21 s cold on that x86_64 machine, and
+a Pi 5 has a fraction of its CPU. Start it, then go and do
+[the router step](#1-point-the-router-at-it) while it runs.
+
+On Unraid this block does not apply — it ends in `docker compose`, which stock
+Unraid does not ship. [Unraid has its own version](#building-the-image-yourself-on-unraid).
 
 → [Three things to do next](#you-are-filtering--now-do-these-three-things)
 
@@ -380,16 +496,18 @@ and `.env.example` explains each one if you disagree with any of them.
 ### Then check it is actually working
 
 ```sh
-sudo /etc/cogwheel/verify-install.sh          # installed with the one-liner
-sh scripts/verify-install.sh                  # from a checkout
+sudo /etc/cogwheel/verify-install.sh            # installed with the one-liner
+sudo sh scripts/verify-install.sh               # from the checkout: Compose from a clone, or native
 docker exec cogwheel sh /app/verify-install.sh  # container only, e.g. Unraid
 ```
 
 Whichever you have, it checks liveness, readiness, the API, the web UI, the
 advertised resolver addresses, an allowed lookup, a blocked lookup, DNS over
-TCP, and that state survives a restart. It exits non-zero on failure, so it is
-safe to run from cron. Anything it cannot reach is reported as SKIP, never as a
-pass — from inside the container that is the restart and upgrade checks.
+TCP, and that state survives a restart — which is why the first two need
+`sudo`: they restart the container or the service. It exits non-zero on
+failure, so it is safe to run from cron. Anything it cannot reach is reported
+as SKIP, never as a pass — from inside the container that is the lookups (the
+image carries no `dig`), the restart and the upgrade checks.
 
 The honest end-to-end test is from a *different* device, after the router has
 handed out the new setting: open any site heavy with advertising and see the

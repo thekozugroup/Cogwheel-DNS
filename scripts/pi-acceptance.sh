@@ -17,11 +17,31 @@ DNS="127.0.0.1"
 FAILURES=0
 PASSES=0
 
+usage() {
+    cat <<'USAGE'
+Cogwheel acceptance test: run this ON the Raspberry Pi after installing.
+
+Usage:
+  sudo sh pi-acceptance.sh [--http HOST:PORT] [--dns HOST[:PORT]]
+
+Options:
+  --http HOST:PORT    Web UI / API address (default: 127.0.0.1:8080)
+  --dns HOST[:PORT]   DNS server to query (default: 127.0.0.1, port 53)
+  -h, --help          This message
+
+Proves the appliance works on the hardware rather than that it started:
+resolution, filtering, the web control plane, and state surviving a restart.
+Every check prints PASS or FAIL, and the exit status is non-zero if any FAIL.
+verify-install.sh checks that a deployment is wired up correctly; this one is
+run once per new hardware target.
+USAGE
+}
+
 while [ $# -gt 0 ]; do
     case "$1" in
         --http) HTTP="$2"; shift 2 ;;
         --dns) DNS="$2"; shift 2 ;;
-        -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+        -h|--help) usage; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done

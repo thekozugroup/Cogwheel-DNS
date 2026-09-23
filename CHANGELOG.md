@@ -105,10 +105,11 @@ Because everything here is new, this entry describes what Cogwheel _is_ rather t
   resolver answers a real query before telling you it worked. If any of that fails it rolls the
   host back. `--print-compose` prints what it would write without touching anything, which is
   worth reading before piping a script into root.
-- **Updating is Docker's job, not the installer's.** Every host, however it was installed,
-  upgrades the same way: `docker compose pull && docker compose up -d`. The installer is not in
-  the update path at all, and `/etc/cogwheel/.env` is yours — a second run fills in keys that are
-  missing and never rewrites one you set.
+- **Updating is Docker's job, not the installer's.** A host the installer set up upgrades like
+  any other Compose install: `docker compose pull && docker compose up -d`. Unraid uses its Docker
+  tab, and a native install is rebuilt. The installer is not in the update path at all, and
+  `/etc/cogwheel/.env` is yours — a second run fills in keys that are missing and never rewrites
+  one you set.
 - **Nothing phones home.** Cogwheel makes no update check and opens no connection you did not ask
   for. `/etc/cogwheel/check-update.sh` answers "is there anything newer?" on demand, by asking the
   same registry the host already pulls from, and exits 10 when there is. Nothing runs it for you.
@@ -123,8 +124,10 @@ Because everything here is new, this entry describes what Cogwheel _is_ rather t
   `NET_BIND_SERVICE`, which is what lets a non-root process bind port 53.
 - **A schema upgrade takes a snapshot first** and does the rewrite inside one immediate
   transaction, so a power cut during a migration costs a restart rather than the database.
-- An Unraid Community Applications template, a systemd unit for a native install, and a
+- An Unraid Docker template with a PNG icon, a systemd unit for a native install, and a
   `verify-install.sh` left on the host so the post-upgrade check is runnable without a checkout.
+  The template names the container `cogwheel`, as every other install does, so the same
+  `docker exec cogwheel …` commands work on Unraid.
 
 ### Known limitations
 
