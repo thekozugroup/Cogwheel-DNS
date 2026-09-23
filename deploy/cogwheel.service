@@ -15,7 +15,7 @@
 
 [Unit]
 Description=Cogwheel DNS filtering appliance
-Documentation=https://github.com/thekozugroup/Cogwheel-DNS/blob/main/DEPLOYMENT.md
+Documentation=https://github.com/thekozugroup/Cogwheel-DNS/blob/main/docs/DEPLOYMENT.md
 After=network-online.target
 Wants=network-online.target
 

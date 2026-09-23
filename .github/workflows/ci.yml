@@ -403,11 +403,78 @@ jobs:
 
           docker stop cogwheel-upgrade >/dev/null
 
+      # The other direction, and the one that takes a household's DNS down for
+      # real: an OLD image started on a volume a NEWER image has already
+      # migrated. Storage reads `user_version`, finds a number it does not
+      # understand, and refuses -- correctly. What matters is that the refusal
+      # is legible, because `restart: unless-stopped` turns it into a crash
+      # loop and the operator's only evidence is this message.
+      #
+      # No `--restart` here on purpose: the point is to read the error once,
+      # not to reproduce the loop.
+      - name: It must refuse a database from a newer Cogwheel, legibly
+        run: |
+          set -euo pipefail
+          SUPPORTED="$(sed -n 's/^pub const SCHEMA_VERSION: i64 = \([0-9]\+\);.*/\1/p' \
+            crates/cogwheel-storage/src/lib.rs | head -n 1)"
+          FUTURE=$(( SUPPORTED + 1 ))
+          echo "this build understands v${SUPPORTED}; presenting it with v${FUTURE}"
+
+          mkdir -p "${RUNNER_TEMP}/newer"
+          python3 - "${RUNNER_TEMP}/newer/cogwheel.db" "$FUTURE" <<'PY'
+          import sqlite3, sys
+
+          db = sqlite3.connect(sys.argv[1])
+          # Enough to be a real SQLite file. Storage reads user_version before
+          # it reads anything else, so the contents past that do not matter.
+          db.executescript(f"CREATE TABLE marker (x); PRAGMA user_version = {int(sys.argv[2])};")
+          db.commit()
+          db.close()
+          PY
+
+          docker volume create cogwheel-newer >/dev/null
+          docker run --rm --user 0 --entrypoint /bin/sh \
+            -v cogwheel-newer:/app/data -v "${RUNNER_TEMP}/newer:/seed:ro" cogwheel:ci \
+            -c 'cp /seed/cogwheel.db /app/data/cogwheel.db && chown 10001:10001 /app/data/cogwheel.db'
+
+          set +e
+          LOGS=$(docker run --name cogwheel-newer \
+            --cap-drop ALL --cap-add NET_BIND_SERVICE \
+            -e COGWHEEL_SERVER__HTTP_BIND_ADDR=0.0.0.0:8080 \
+            -e COGWHEEL_SERVER__DNS_UDP_BIND_ADDR=0.0.0.0:5353 \
+            -e COGWHEEL_SERVER__DNS_TCP_BIND_ADDR=0.0.0.0:5353 \
+            -e COGWHEEL_STORAGE__DATABASE_URL=sqlite:///app/data/cogwheel.db \
+            -v cogwheel-newer:/app/data --read-only --tmpfs /tmp:rw,size=64m --init \
+            cogwheel:ci 2>&1)
+          STATUS=$?
+          set -e
+          docker rm -f cogwheel-newer >/dev/null 2>&1 || true
+          echo "$LOGS"
+
+          if [ "$STATUS" -eq 0 ]; then
+            echo "::error::the server started on a v${FUTURE} database instead of refusing it"
+            exit 1
+          fi
+          case "$LOGS" in
+            *"is from a newer Cogwheel"*) ;;
+            *) echo "::error::it refused, but not with the schema-version message an operator needs"; exit 1 ;;
+          esac
+          case "$LOGS" in
+            *"schema version is ${FUTURE}"*) ;;
+            *) echo "::error::the message does not name the version it found (${FUTURE})"; exit 1 ;;
+          esac
+          case "$LOGS" in
+            *"understands ${SUPPORTED}"*) ;;
+            *) echo "::error::the message does not name the version this build supports (${SUPPORTED})"; exit 1 ;;
+          esac
+          echo "refused with a message that names both versions"
+
       - name: Container logs on failure
         if: failure()
         run: |
           docker logs cogwheel-ci 2>&1 | tail -50 || true
           docker logs cogwheel-upgrade 2>&1 | tail -50 || true
+          docker logs cogwheel-newer 2>&1 | tail -50 || true
 
   deploy-assets:
     name: shell + yaml + systemd
@@ -449,6 +516,114 @@ jobs:
                   bad = True
           sys.exit(1 if bad else 0)
           PY
+
+      # Parsing is not the same as Compose accepting it, and the difference is
+      # where the real mistakes live: a bad interpolation default, an option
+      # the schema does not have, a service that silently resolves to nothing.
+      #
+      # `config` is run in an empty directory on purpose. A fresh clone has no
+      # .env, and until `required: false` that made every compose verb -- pull,
+      # down, logs, config -- fail outright, which left anyone who deleted a bad
+      # .env with a project they could not even stop.
+      - name: Compose files are valid with no .env present
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          cp docker-compose.yml "$work/docker-compose.yml"
+          ( cd "$work" && docker compose config -q )
+          echo "ok   docker-compose.yml (no .env)"
+
+          # And the two files scripts/install.sh writes on a household box. They
+          # are only ever seen by users, so this is the only place they get
+          # checked before somebody's Raspberry Pi runs them.
+          for mode in host bridge; do
+            sh scripts/install.sh --print-compose --network "$mode" > "$work/${mode}.yml"
+            ( cd "$work" && docker compose -f "${mode}.yml" config -q )
+            echo "ok   install.sh --network ${mode}"
+          done
+
+      # `image:` and `build:` on the same service means Compose builds when the
+      # image is missing -- that is the default policy, not an opt-in. On a
+      # Raspberry Pi it turns `docker compose up -d` into a multi-hour Rust
+      # compile with no indication that is what is happening. It was there once;
+      # this is what stops it coming back.
+      - name: The production compose file must not build from source
+        run: |
+          if grep -qE '^[[:space:]]+build:' docker-compose.yml; then
+            echo "::error file=docker-compose.yml::a build: block makes 'docker compose up' compile on a host with no image"
+            exit 1
+          fi
+          if sh scripts/install.sh --print-compose | grep -qE '^[[:space:]]+build:'; then
+            echo "::error file=scripts/install.sh::the generated compose file contains a build: block"
+            exit 1
+          fi
+          echo "no build: block in either compose file"
+
+      # The schema-version label is what an operator (and scripts/install.sh,
+      # and anyone deciding whether an upgrade needs a snapshot) reads BEFORE
+      # pulling an image. A label that has drifted from the code is worse than
+      # no label, because it is the input to a rollback decision.
+      - name: The schema-version label matches the code
+        run: |
+          set -euo pipefail
+          CODE="$(sed -n 's/^pub const SCHEMA_VERSION: i64 = \([0-9]\+\);.*/\1/p' \
+            crates/cogwheel-storage/src/lib.rs | head -n 1)"
+          LABEL="$(sed -n 's/^ARG SCHEMA_VERSION=\([0-9]\+\).*/\1/p' Dockerfile | head -n 1)"
+          echo "crates/cogwheel-storage/src/lib.rs: ${CODE}"
+          echo "Dockerfile ARG SCHEMA_VERSION:      ${LABEL}"
+          if [ -z "$CODE" ] || [ -z "$LABEL" ]; then
+            echo "::error::could not read one of the two schema version declarations"
+            exit 1
+          fi
+          if [ "$CODE" != "$LABEL" ]; then
+            echo "::error file=Dockerfile::schema version mismatch: code says ${CODE}, Dockerfile says ${LABEL}"
+            exit 1
+          fi
+          echo "agree"
+
+      # Unraid's Docker tab reads this template, and its update check works by
+      # comparing the digest on disk against the registry's for the SAME tag.
+      # A pinned tag therefore reports "up-to-date" forever, including through
+      # a security release -- so the recommended tag has to be a moving one.
+      - name: Unraid template is well-formed and tracks a moving tag
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import sys, xml.etree.ElementTree as ET
+
+          root = ET.parse('deploy/unraid/cogwheel.xml').getroot()
+          problems = []
+
+          repo = (root.findtext('Repository') or '').strip()
+          if not repo.endswith(':latest'):
+              problems.append(
+                  f"Repository is {repo!r}; Unraid's update check compares digests for one "
+                  "tag, so a pinned tag can never report an update"
+              )
+
+          for field in ('Name', 'Repository', 'Overview', 'WebUI', 'Icon', 'Support', 'Project'):
+              if not (root.findtext(field) or '').strip():
+                  problems.append(f'<{field}> is empty')
+
+          targets = {c.get('Target') for c in root.findall('Config')}
+          if '/app/data' not in targets:
+              problems.append('no Config maps /app/data, so the database would not persist')
+
+          extra = root.findtext('ExtraParams') or ''
+          if 'NET_BIND_SERVICE' not in extra:
+              problems.append(
+                  'ExtraParams does not add NET_BIND_SERVICE; the binary carries a file '
+                  'capability with the effective bit set, so execve fails without it'
+              )
+
+          for p in problems:
+              print(f'::error file=deploy/unraid/cogwheel.xml::{p}')
+          sys.exit(1 if problems else 0)
+          PY
+          echo "ok   deploy/unraid/cogwheel.xml"
+
+          python3 -c "import xml.etree.ElementTree as ET; ET.parse('deploy/unraid/cogwheel.svg')"
+          echo "ok   deploy/unraid/cogwheel.svg"
 
       # rust-toolchain.toml governs every cargo invocation, including the ones
       # inside the Docker build. If the base image were a different version,

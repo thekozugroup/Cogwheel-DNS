@@ -12,6 +12,12 @@
 # The persistence check restarts Cogwheel, which causes a few seconds of DNS
 # downtime. Pass --skip-restart to leave it out.
 #
+# scripts/install.sh leaves a copy of this file at /etc/cogwheel/verify-install.sh,
+# so a host installed with `curl | sudo sh` -- which has no checkout -- can still
+# run it after an upgrade:
+#
+#   sudo /etc/cogwheel/verify-install.sh
+#
 # POSIX sh. Needs curl (or wget) and dig (or nslookup); it reports SKIP rather
 # than inventing a result when a tool is missing.
 
@@ -324,6 +330,59 @@ else
 fi
 
 # ==========================================================================
+head_ "4. The update path"
+# ==========================================================================
+#
+# Checking that Cogwheel answers is half the job. The other half is whether the
+# next update will reach this host at all, and that is the part nobody notices
+# is broken until a security fix has been out for three months. Everything here
+# is read-only.
+
+COMPOSE_DIR="${COGWHEEL_CONFIG_DIR:-/etc/cogwheel}"
+
+compose_cmd() {
+    if have docker && docker compose version >/dev/null 2>&1; then
+        ( cd "$COMPOSE_DIR" && docker compose "$@" )
+    elif have docker-compose; then
+        ( cd "$COMPOSE_DIR" && docker-compose "$@" )
+    else
+        return 127
+    fi
+}
+
+if [ ! -f "$COMPOSE_DIR/docker-compose.yml" ]; then
+    skip "update     no Compose project at $COMPOSE_DIR" \
+         "this host was not set up by scripts/install.sh; upgrade from wherever its compose file lives"
+elif ! have docker; then
+    skip "update     docker is not on PATH"
+elif ! compose_cmd config -q >/dev/null 2>&1; then
+    fail "update     $COMPOSE_DIR/docker-compose.yml does not parse" \
+         "run: cd $COMPOSE_DIR && docker compose config"
+else
+    pass "update     the Compose project at $COMPOSE_DIR is valid"
+    printf '           upgrade with: cd %s && sudo docker compose pull && sudo docker compose up -d\n' "$COMPOSE_DIR"
+
+    # Which tag this host follows decides whether an update can ever arrive by
+    # itself. Both answers are legitimate; only one of them is a surprise.
+    if have docker && docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+        REF=$(docker container inspect --format '{{.Config.Image}}' "$CONTAINER_NAME" 2>/dev/null || printf '')
+        case "$REF" in
+            *@sha256:*)
+                printf '           pinned by digest (%s)\n' "$REF"
+                printf '           %sdocker compose pull will never move this host. That is a choice; make sure it was yours.%s\n' "$C_YELLOW" "$C_RESET" ;;
+            *:latest)
+                printf '           following %s - a pull takes the newest final release\n' "$REF" ;;
+            *)
+                printf '           pinned to %s\n' "$REF"
+                printf '           edit COGWHEEL_IMAGE in %s/.env to follow a moving tag\n' "$COMPOSE_DIR" ;;
+        esac
+
+        SCHEMA=$(docker image inspect --format '{{index .Config.Labels "io.cogwheel.schema-version"}}' "$REF" 2>/dev/null || printf '')
+        [ -n "$SCHEMA" ] && printf '           database schema v%s (a release that changes this migrates in place)\n' "$SCHEMA"
+    fi
+fi
+
+# ==========================================================================
 printf '\n%s%s%s\n' "$C_BOLD" "-----------------------------------------------" "$C_RESET"
 printf '  %s%d passed%s' "$C_GREEN" "$PASS_COUNT" "$C_RESET"
 [ "$FAIL_COUNT" -gt 0 ] && printf ', %s%d failed%s' "$C_RED" "$FAIL_COUNT" "$C_RESET"
@@ -331,7 +390,7 @@ printf '  %s%d passed%s' "$C_GREEN" "$PASS_COUNT" "$C_RESET"
 printf '\n\n'
 
 if [ "$FAIL_COUNT" -gt 0 ]; then
-    printf '  Troubleshooting: DEPLOYMENT.md section 8.\n'
+    printf '  Troubleshooting: docs/DEPLOYMENT.md section 8.\n'
     printf '  Start with port 53 - it is the most common cause.\n\n'
     exit 1
 fi

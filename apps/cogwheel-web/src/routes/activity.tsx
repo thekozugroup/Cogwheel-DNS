@@ -2,24 +2,27 @@ import React from "react";
 import { useNavigate } from "react-router-dom";
 import { ActivityIcon, Trash2Icon } from "lucide-react";
 import { api, errorMessage, type QueryRow, type StreamQueryEvent } from "@/lib/api";
-import { checkSentence, qtypeLabel, reasonLabel } from "@/lib/derive";
-import { formatClock, pluralize } from "@/lib/format";
+import { checkSentence, reasonLabel } from "@/lib/derive";
+import { formatClock, formatCount, pluralize } from "@/lib/format";
 import { notify } from "@/lib/toast";
 import {
   ACTIVITY_ANNOUNCE_INTERVAL_MS,
   ACTIVITY_BUFFER_LIMIT,
   ACTIVITY_PAGE_SIZE,
+  ACTIVITY_VISIBLE_STEP,
 } from "@/lib/constants";
 import { useCogwheel } from "@/data/context";
 import { useQueryStream } from "@/hooks/use-event-stream";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
+import { Status } from "@/components/ui/status";
 import { SegmentGroup, SegmentGroupItem, SegmentGroupItemText } from "@/components/ui/segment-group";
 import { PageHeader, PageSections, PageShell } from "@/components/app/page";
 import { SectionCard } from "@/components/app/section-card";
 import { DataTable, type Column } from "@/components/app/data-table";
 import { SelectField } from "@/components/app/select-field";
 import { TextField } from "@/components/app/text-field";
+import { GroupLabel } from "@/components/app/form-field";
 import { RowMenu } from "@/components/app/row-menu";
 import { StatusPill } from "@/components/app/status-indicator";
 import { ConfirmDialog } from "@/components/app/confirm-dialog";
@@ -64,6 +67,12 @@ export function ActivityScreen() {
   const [error, setError] = React.useState<string | null>(null);
   const [clearing, setClearing] = React.useState(false);
   const [why, setWhy] = React.useState<string | null>(null);
+  // A page of history is 200 rows; the table draws 50 of them until asked for
+  // more. The fetch size is unchanged — this is about how much of it is put on
+  // screen at once, which on a phone is the difference between a page eleven
+  // screens long and one forty-nine screens long.
+  const [visible, setVisible] = React.useState(ACTIVITY_VISIBLE_STEP);
+  const verdictLabelId = React.useId();
 
   // Screen readers and a live table do not mix: wrapping the table in a live
   // region read out every column of every arriving row, and with Live on by
@@ -109,6 +118,8 @@ export function ActivityScreen() {
       controller.abort();
     };
   }, [filters]);
+
+  React.useEffect(() => setVisible(ACTIVITY_VISIBLE_STEP), [filters]);
 
   const onFrame = React.useCallback(
     (frame: StreamQueryEvent) => {
@@ -194,6 +205,36 @@ export function ActivityScreen() {
     }
   };
 
+  const rowMenu = (row: Row) => {
+    const named = data.devices.devices.find((entry) => entry.ip_address === row.client);
+    return (
+      <RowMenu
+        actions={[
+          { value: "allow", label: "Allow for everyone" },
+          { value: "block", label: "Block for everyone" },
+          ...(named
+            ? [
+                { value: "allow-device", label: `Allow on ${named.name}` },
+                { value: "block-device", label: `Block on ${named.name}` },
+              ]
+            : [{ value: "name", label: "Name this device…" }]),
+          { value: "why", label: "Why?" },
+        ]}
+        label={`Actions for ${row.domain}`}
+        onSelect={(value) => {
+          if (value === "allow") void addRule(row.domain, "allow");
+          else if (value === "block") void addRule(row.domain, "block");
+          else if (value === "allow-device") void addRule(row.domain, "allow", named?.id);
+          else if (value === "block-device") void addRule(row.domain, "block", named?.id);
+          else if (value === "name") navigate(`/devices?ip=${encodeURIComponent(row.client)}`);
+          else void explain(row);
+        }}
+      />
+    );
+  };
+
+  const shown = React.useMemo(() => rows.slice(0, visible), [rows, visible]);
+
   const columns: Column<Row>[] = [
     {
       key: "ts",
@@ -204,7 +245,7 @@ export function ActivityScreen() {
       key: "domain",
       header: "Domain",
       render: (row) => (
-        <span className="font-mono text-xs" title={row.domain}>
+        <span className="font-mono text-sm" title={row.domain}>
           {row.domain}
         </span>
       ),
@@ -217,64 +258,68 @@ export function ActivityScreen() {
           row.device_name
         ) : (
           <span className="flex items-center gap-2">
-            <span className="font-mono text-xs">{row.client}</span>
+            <span className="font-mono text-sm">{row.client}</span>
             <span className="text-muted-foreground text-xs">unnamed</span>
           </span>
         ),
     },
     {
-      key: "qtype",
-      header: "Type",
-      hideBelow: "xl",
-      render: (row) => <span className="text-muted-foreground text-xs">{qtypeLabel(row.qtype)}</span>,
-    },
-    {
       key: "verdict",
       header: "Verdict",
+      // A pill only for Blocked. Colour marks the exception, never the rule:
+      // a column of two hundred green "Allowed" pills pulls the eye to the
+      // 86% of rows that need no attention and buries the handful that do.
+      // This is the reasoning the Lists status column already applies to
+      // itself; Activity was doing the opposite.
       render: (row) => {
         const reason = reasonLabel(row.reason, row.list);
         return (
           <span className="flex flex-wrap items-center gap-2">
-            <StatusPill label={row.blocked ? "Blocked" : "Allowed"} tone={row.blocked ? "bad" : "good"} />
+            {row.blocked ? (
+              <StatusPill label="Blocked" tone="bad" />
+            ) : (
+              <span className="text-muted-foreground text-sm">Allowed</span>
+            )}
             {reason ? <span className="text-muted-foreground text-xs">{reason}</span> : null}
           </span>
         );
       },
     },
-    {
-      key: "actions",
-      header: "",
-      align: "end",
-      stackHeader: true,
-      render: (row) => {
-        const named = data.devices.devices.find((entry) => entry.ip_address === row.client);
-        return (
-          <RowMenu
-            actions={[
-              { value: "allow", label: "Allow for everyone" },
-              { value: "block", label: "Block for everyone" },
-              ...(named
-                ? [
-                    { value: "allow-device", label: `Allow on ${named.name}` },
-                    { value: "block-device", label: `Block on ${named.name}` },
-                  ]
-                : [{ value: "name", label: "Name this device…" }]),
-              { value: "why", label: "Why?" },
-            ]}
-            label={`Actions for ${row.domain}`}
-            onSelect={(value) => {
-              if (value === "allow") void addRule(row.domain, "allow");
-              else if (value === "block") void addRule(row.domain, "block");
-              else if (value === "allow-device") void addRule(row.domain, "allow", named?.id);
-              else if (value === "block-device") void addRule(row.domain, "block", named?.id);
-              else if (value === "name") navigate(`/devices?ip=${encodeURIComponent(row.client)}`);
-              else void explain(row);
-            }}
-          />
-        );
-      },
-    },
+    { key: "actions", header: "", align: "end", stackHeader: true, render: rowMenu },
   ];
+
+  // A log row is a domain and a verdict; everything else is context. Two lines
+  // at about 56px, against the five-line label/value card the generic stacked
+  // form would build — which at 200 rows was forty-nine phone screens of
+  // scroll with the only controls at the bottom of it.
+  //
+  // The verdict is a word on both lines' worth of width, not a bare dot with
+  // the word in sr-only: DESIGN.md's rule is that every tone pairs a dot with
+  // a word, and a red dot alone was the narrow form quietly opting out of it.
+  // The reason travels with it, because "Blocked · HaGeZi Pro" is the sentence
+  // the whole page is for — the desktop table has always said it and the phone
+  // dropped it.
+  const narrowRow = (row: Row) => {
+    const reason = reasonLabel(row.reason, row.list);
+    return (
+      <div className="flex items-start gap-3 py-3">
+        <div className="min-w-0 flex-1">
+          <p className="flex items-baseline gap-2">
+            {row.blocked ? <Status className="self-center" size="sm" variant="destructive" /> : null}
+            <span className="min-w-0 flex-1 truncate font-mono text-foreground text-sm">{row.domain}</span>
+            <span className="tabular shrink-0 text-muted-foreground text-xs">{formatClock(row.ts)}</span>
+          </p>
+          <p className="mt-1 truncate text-muted-foreground text-xs">
+            <span className={row.blocked ? "font-medium text-foreground" : undefined}>
+              {row.blocked ? "Blocked" : "Allowed"}
+            </span>
+            {reason ? ` · ${reason}` : ""} · {row.device_name ?? `${row.client} (unnamed)`}
+          </p>
+        </div>
+        {rowMenu(row)}
+      </div>
+    );
+  };
 
   return (
     <PageShell>
@@ -286,46 +331,49 @@ export function ActivityScreen() {
       <PageSections>
         {logging ? null : (
           <NoticeBanner
-            detail="Only the live stream is shown. Set a non-zero value and restart to keep history."
-            title="Query logging is off (COGWHEEL_RETENTION__HISTORY_DAYS=0)"
+            detail="Only the live stream is shown, and nothing survives a reload. Set COGWHEEL_RETENTION__HISTORY_DAYS to a non-zero number of days and restart to keep history."
+            title="Query logging is off"
             tone="warn"
           />
         )}
 
         <SectionCard
           actions={
-            <span className="flex items-center gap-2 text-sm">
-              <Switch
-                aria-label="Live"
-                checked={live}
-                onCheckedChange={(details) => setLive(details.checked)}
-              />
-              Live
-              {live ? (
-                <span className="text-muted-foreground text-xs">
-                  {stream.status === "open" ? "connected" : stream.status}
-                </span>
-              ) : null}
-            </span>
-          }
-          description={`${pluralize(rows.length, "row")} shown.`}
-          footer={
-            <div className="flex flex-wrap items-center gap-2">
-              <Button disabled={nextBefore === null} onClick={() => void loadOlder()} variant="outline">
-                Load older
-              </Button>
-              <Button onClick={() => setClearing(true)} variant="destructive">
+            <>
+              <span className="flex items-center gap-2 text-sm">
+                <Switch
+                  aria-label="Live"
+                  checked={live}
+                  onCheckedChange={(details) => setLive(details.checked)}
+                />
+                Live
+                {live ? (
+                  <span className="text-muted-foreground text-xs">
+                    {stream.status === "open" ? "connected" : stream.status}
+                  </span>
+                ) : null}
+              </span>
+              {/* One home for this action, and it is the header slot Settings
+                  already uses. Side by side with Load older in a footer, in
+                  identical outline styling, adjacency was the only thing
+                  separating the destructive verb from the benign one. */}
+              <Button className="sm:ms-4" onClick={() => setClearing(true)} variant="destructive">
                 <Trash2Icon aria-hidden />
                 Clear log
               </Button>
-            </div>
+            </>
           }
+          // No description: the count is stated once, in the footer beside the
+          // controls that change it, and the page header above already says
+          // what the rows are and what order they are in.
           title="Queries"
         >
-          {/* `min-w-0` on the columns: without it the Verdict segment group sizes
-              to its own content and pushes "Allowed" past the card's edge. */}
-          <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3 [&>*]:min-w-0">
+          {/* Each control is capped by what it holds rather than stretched to a
+              third of the card: a domain fragment is not 470px wide, and three
+              short words are not a 470px segment group. */}
+          <div className="mb-4 flex flex-wrap items-end gap-4 [&>*]:min-w-0">
             <TextField
+              className="max-w-md flex-1 basis-64"
               label="Domain contains"
               onChange={setSearch}
               placeholder="example.com"
@@ -333,6 +381,7 @@ export function ActivityScreen() {
               value={search}
             />
             <SelectField
+              className="max-w-xs flex-1 basis-56"
               label="Device"
               onChange={setDevice}
               options={[
@@ -345,17 +394,18 @@ export function ActivityScreen() {
               ]}
               value={device}
             />
-            <div className="flex flex-col justify-end gap-2">
-              <span className="font-medium text-foreground text-sm">Verdict</span>
+            <div className="flex flex-col gap-2">
+              <GroupLabel id={verdictLabelId}>Verdict</GroupLabel>
               <SegmentGroup
-                className="rounded-lg border border-border p-0.5"
+                aria-labelledby={verdictLabelId}
+                className="w-fit rounded-lg border border-border p-0.5"
                 onValueChange={(details) => {
                   if (details.value) setVerdict(details.value as Verdict);
                 }}
                 value={verdict}
               >
                 {(["all", "blocked", "allowed"] as const).map((option) => (
-                  <SegmentGroupItem className="min-w-0 flex-1 px-2 py-1.5" key={option} value={option}>
+                  <SegmentGroupItem className="px-3 py-1" key={option} value={option}>
                     <SegmentGroupItemText className="text-sm capitalize">{option}</SegmentGroupItemText>
                   </SegmentGroupItem>
                 ))}
@@ -387,6 +437,7 @@ export function ActivityScreen() {
           </p>
 
           <DataTable
+            card={narrowRow}
             columns={columns}
             empty={{
               icon: ActivityIcon,
@@ -398,9 +449,36 @@ export function ActivityScreen() {
             loading={loading}
             onRetry={() => void reload()}
             rowKey={(row) => row.key}
-            rows={rows}
+            rows={shown}
             stackBelow="xl"
+            stickyHeader
           />
+
+          {/* Under the rows but inside the card, and above the fold because the
+              table body is its own scroll container. These used to sit 9,500px
+              down the page at 1440px and 39,000px down on a phone. */}
+          {rows.length > 0 ? (
+            <div className="mt-4 flex flex-wrap items-center gap-2 border-border border-t pt-4">
+              {/* Two buttons that read as alternatives until you know the
+                  buffer exists. The first draws more of what is already
+                  held; the second goes back to the server for rows older
+                  than the oldest one held, and now says which time that is. */}
+              {rows.length > visible ? (
+                <Button
+                  onClick={() => setVisible((current) => current + ACTIVITY_VISIBLE_STEP)}
+                  variant="outline"
+                >
+                  Show {ACTIVITY_VISIBLE_STEP} more
+                </Button>
+              ) : null}
+              <Button disabled={nextBefore === null} onClick={() => void loadOlder()} variant="outline">
+                {nextBefore === null ? "Load older" : `Load older than ${formatClock(nextBefore)}`}
+              </Button>
+              <span className="tabular ms-auto text-muted-foreground text-xs">
+                Showing {formatCount(shown.length)} of {pluralize(rows.length, "row")} held
+              </span>
+            </div>
+          ) : null}
         </SectionCard>
       </PageSections>
 

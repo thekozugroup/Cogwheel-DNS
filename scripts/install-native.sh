@@ -302,7 +302,7 @@ fix_port_53() {
         sh "$REPO_ROOT/scripts/install.sh" --fix-port-53 --dns-port "$DNS_PORT"
     else
         warn "scripts/install.sh not found; skipping the port-53 conflict check.
-         If the service fails to start, see DEPLOYMENT.md 'Port 53 is already in use'."
+         If the service fails to start, see docs/DEPLOYMENT.md 'Port 53 is already in use'."
     fi
 }
 

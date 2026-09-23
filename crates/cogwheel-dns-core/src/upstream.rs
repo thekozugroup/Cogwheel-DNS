@@ -395,7 +395,7 @@ mod tests {
     }
 
     /// Every existing install has `1.1.1.1:53,1.0.0.1:53` written into
-    /// /etc/cogwheel/cogwheel.env. Upgrading must not require editing it.
+    /// /etc/cogwheel/.env. Upgrading must not require editing it.
     #[test]
     fn the_previously_shipped_format_still_parses() {
         for spec in [

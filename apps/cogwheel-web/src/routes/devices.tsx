@@ -1,6 +1,6 @@
 import React from "react";
 import { useSearchParams } from "react-router-dom";
-import { LaptopIcon, Trash2Icon, XIcon } from "lucide-react";
+import { LaptopIcon, PlusIcon, Trash2Icon, XIcon } from "lucide-react";
 import { api, type Device, type DeviceInput, type RuleAction } from "@/lib/api";
 import { isIpAddress, isRuleDomain, normalizeDomain } from "@/lib/derive";
 import { formatCount, formatRelative } from "@/lib/format";
@@ -8,6 +8,7 @@ import { notify } from "@/lib/toast";
 import { useCogwheel } from "@/data/context";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
+import { Status } from "@/components/ui/status";
 import { PageHeader, PageSections, PageShell } from "@/components/app/page";
 import { SectionCard } from "@/components/app/section-card";
 import { DataTable, type Column } from "@/components/app/data-table";
@@ -41,6 +42,10 @@ export function DevicesScreen() {
   const { data, phase, error, busy, mutate, reload } = useCogwheel();
   const [params, setParams] = useSearchParams();
   const [draft, setDraft] = React.useState<Draft>(BLANK);
+  // The form is opened on purpose — by "Add device", by clicking a row, or by
+  // arriving with ?device= / ?ip= from Activity. It is not what the page opens
+  // on: a page called Devices should lead with the devices.
+  const [adding, setAdding] = React.useState(false);
   const [deleting, setDeleting] = React.useState(false);
   const [ruleDomain, setRuleDomain] = React.useState("");
   const [ruleAction, setRuleAction] = React.useState<RuleAction>("block");
@@ -64,6 +69,7 @@ export function DevicesScreen() {
     if (prefilledIp && prefilled.current !== prefilledIp) {
       prefilled.current = prefilledIp;
       setDraft({ ...BLANK, ip_address: prefilledIp });
+      setAdding(true);
     }
   }, [devices, prefilledIp, selectedId]);
 
@@ -80,10 +86,19 @@ export function DevicesScreen() {
       { replace: true },
     );
     setDraft(device ? toDraft(device) : { ...BLANK, ip_address: ip ?? "" });
+    setAdding(Boolean(device) || Boolean(ip));
   };
 
   const editing = devices.find((device) => device.id === draft.id) ?? null;
   const started = draft.id !== null || draft.name !== "" || draft.ip_address !== "";
+  const formOpen = adding || draft.id !== null;
+
+  // Opened from Unnamed clients, which sits below the form, so the form has to
+  // come to the reader rather than appear off the top of their screen.
+  React.useEffect(() => {
+    if (!formOpen) return;
+    document.getElementById("device-form")?.scrollIntoView({ block: "nearest" });
+  }, [formOpen]);
   const ipError = draft.ip_address && !isIpAddress(draft.ip_address) ? "Not an IP address." : undefined;
   const valid = Boolean(draft.name.trim()) && isIpAddress(draft.ip_address);
 
@@ -150,13 +165,27 @@ export function DevicesScreen() {
     {
       key: "ip",
       header: "IP",
-      render: (row) => <span className="font-mono text-xs">{row.ip_address}</span>,
+      render: (row) => <span className="font-mono text-sm">{row.ip_address}</span>,
     },
     {
       key: "filtering",
       header: "Filtering",
-      render: (row) =>
-        row.filtering ? <StatusPill label="On" tone="good" /> : <StatusPill label="Off" tone="warn" />,
+      // One shape for both states: a dot and a word, which is DESIGN.md's rule
+      // and what makes the column scannable. The tone is what differs — the
+      // default dot for the state every device is supposed to be in, the
+      // warning dot for the one that is bypassing the filter. A pill on one
+      // row and bare text on the others put two component types in one column
+      // and gave the ordinary state no status affordance at all; a column of
+      // green pills would have been the opposite mistake, burying the one row
+      // worth finding under five that need nothing.
+      render: (row) => (
+        <span className="inline-flex items-center gap-2 text-sm">
+          <Status size="sm" variant={row.filtering ? "default" : "warning"} />
+          <span className={row.filtering ? "text-muted-foreground" : "font-medium text-foreground"}>
+            {row.filtering ? "On" : "Off"}
+          </span>
+        </span>
+      ),
     },
     {
       key: "lists",
@@ -193,6 +222,43 @@ export function DevicesScreen() {
     },
   ];
 
+  // The same two-line shape Activity uses, for the same reason. The generic
+  // stacked card printed seven label/value rows per device at roughly 220px
+  // each, inside a bordered card nested in the bordered Devices section card —
+  // a border around a border, and six devices to a phone screen and a half.
+  // Name and address identify the row; the state and the counts are what you
+  // came to read. The divider between rows is the only rule needed.
+  const narrowRow = (row: Device) => (
+    <button
+      className="flex w-full items-start gap-3 py-3 text-left"
+      onClick={() => select(row)}
+      type="button"
+    >
+      <span className="min-w-0 flex-1">
+        <span className="flex items-baseline gap-2">
+          <span className="min-w-0 flex-1 truncate font-medium text-foreground text-sm">{row.name}</span>
+          <span className="shrink-0 font-mono text-muted-foreground text-xs">{row.ip_address}</span>
+        </span>
+        <span className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-muted-foreground text-xs">
+          <span className="inline-flex items-center gap-1.5">
+            <Status size="sm" variant={row.filtering ? "default" : "warning"} />
+            <span className={row.filtering ? undefined : "font-medium text-foreground"}>
+              {row.filtering ? "Filtering on" : "Filtering off"}
+            </span>
+          </span>
+          <span aria-hidden>·</span>
+          <span>
+            {row.all_lists ? "All lists" : `${formatCount(row.lists.length)} of ${formatCount(enabledLists.length)} lists`}
+          </span>
+          <span aria-hidden>·</span>
+          <span className="tabular">
+            {formatCount(row.queries_24h)} queries, {formatCount(row.blocked_24h)} blocked
+          </span>
+        </span>
+      </span>
+    </button>
+  );
+
   return (
     <PageShell>
       <PageHeader
@@ -212,8 +278,52 @@ export function DevicesScreen() {
       />
 
       <PageSections>
-        <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+        <SectionCard
+          actions={
+            formOpen ? null : (
+              <Button onClick={() => setAdding(true)} variant="outline">
+                <PlusIcon aria-hidden />
+                Add device
+              </Button>
+            )
+          }
+          title={`Devices (${formatCount(devices.length)})`}
+        >
+          {/* Full width, so the table gets the page's own column rather than the
+              544px half of a two-column grid it used to sit in. Measured
+              minimum content widths: 406px for the four columns below @lg,
+              541px for the six at @lg, 589px for all seven at @xl — so a
+              desktop draws every column and a phone's container falls
+              through to cards. */}
+          <DataTable
+            columns={columns}
+            empty={{
+              icon: LaptopIcon,
+              title: "No devices named yet",
+              description:
+                "Name the ones the household will recognise first — the TV, the kids' tablets, the work laptop.",
+              action: (
+                <Button onClick={() => setAdding(true)} variant="outline">
+                  <PlusIcon aria-hidden />
+                  Add device
+                </Button>
+              ),
+            }}
+            error={error}
+            loading={phase === "loading"}
+            onRetry={() => void reload()}
+            onRowClick={(row) => select(row)}
+            card={narrowRow}
+            rowActionLabel={(row) => `Edit ${row.name}`}
+            rowKey={(row) => row.id}
+            rows={devices}
+            stackBelow="md"
+          />
+        </SectionCard>
+
+        {formOpen ? (
           <SectionCard
+            id="device-form"
             footer={
               <div className="flex flex-wrap items-center gap-2">
                 <Button disabled={!valid} isLoading={busy === "device-save"} onClick={() => void save()}>
@@ -235,13 +345,19 @@ export function DevicesScreen() {
             title={draft.id ? `Edit ${editing?.name ?? draft.name}` : "Add device"}
           >
             <div className="space-y-5">
+              {/* Capped by what they hold. A device name is a few words and an
+                  IP is fifteen characters; neither is 1,000px wide, and a field
+                  stretched to the card's full width reads as though it wants a
+                  paragraph. */}
               <TextField
+                className="max-w-md"
                 label="Name"
                 onChange={(value) => setDraft((current) => ({ ...current, name: value }))}
                 placeholder="Kitchen iPad"
                 value={draft.name}
               />
               <TextField
+                className="max-w-xs"
                 error={ipError}
                 hint="The address this device gets from your router."
                 label="IP address"
@@ -250,7 +366,7 @@ export function DevicesScreen() {
                 value={draft.ip_address}
               />
 
-              <div className="flex items-start justify-between gap-4">
+              <div className="flex max-w-md items-start justify-between gap-4">
                 <div className="min-w-0">
                   <p className="font-medium text-foreground text-sm">Filtering</p>
                   <p className="text-muted-foreground text-sm">
@@ -320,9 +436,9 @@ export function DevicesScreen() {
               {editing === null ? null : (
                 <div className="space-y-3">
                   <p className="font-medium text-foreground text-sm">Rules for this device</p>
-                  <div className="flex flex-wrap items-end gap-2">
+                  <div className="flex flex-wrap items-end gap-3">
                     <TextField
-                      className="min-w-48 flex-1"
+                      className="max-w-md flex-1 basis-64"
                       label="Domain"
                       onChange={setRuleDomain}
                       placeholder="ads.example.com"
@@ -351,8 +467,8 @@ export function DevicesScreen() {
                   {editing && editing.rules.length > 0 ? (
                     <ul className="divide-y divide-border">
                       {editing.rules.map((rule) => (
-                        <li className="flex items-center gap-3 py-1.5" key={rule.id}>
-                          <span className="min-w-0 flex-1 truncate font-mono text-xs">{rule.domain}</span>
+                        <li className="flex items-center gap-3 py-2" key={rule.id}>
+                          <span className="min-w-0 flex-1 truncate font-mono text-sm">{rule.domain}</span>
                           <StatusPill
                             label={rule.action === "allow" ? "Allow" : "Block"}
                             tone={rule.action === "allow" ? "good" : "bad"}
@@ -360,7 +476,7 @@ export function DevicesScreen() {
                           <Button
                             aria-label={`Remove ${rule.domain}`}
                             onClick={() => void deleteRule(rule.id, rule.domain)}
-                            size="icon-sm"
+                            size="icon-md"
                             variant="ghost"
                           >
                             <Trash2Icon aria-hidden />
@@ -373,71 +489,35 @@ export function DevicesScreen() {
               )}
             </div>
           </SectionCard>
+        ) : null}
 
-          <div className="flex flex-col gap-6">
-            <SectionCard title={`Devices (${formatCount(devices.length)})`}>
-              {/* This table lives in the narrower half of a two-column grid, so its
-                  container is 544px on a 1440px window and caps at 553px however
-                  wide the window gets — not the 1104px the page has. Measured
-                  minimum content widths: 406px for the four columns below @lg,
-                  541px for the six at @lg, 589px for all seven at @xl. So the
-                  desktop case is the six at @lg, @xl is reached only between about
-                  960px and 1280px where the page is still one column, and @md is
-                  the last width that holds a table at all; a phone's ~279px
-                  container falls through to cards. Last seen is one of the six
-                  rather than Rules: the card form renders every field, so a column
-                  the desktop cannot reach at any width would show a 1440px browser
-                  strictly less than a 375px phone, and a rule count is on the
-                  device's own edit form beside this table while a last-seen is
-                  nowhere else on the page. */}
-              <DataTable
-                columns={columns}
-                empty={{
-                  icon: LaptopIcon,
-                  title: "No devices named yet",
-                  description:
-                    "Name the ones the household will recognise first — the TV, the kids' tablets, the work laptop.",
-                }}
-                error={error}
-                loading={phase === "loading"}
-                onRetry={() => void reload()}
-                onRowClick={(row) => select(row)}
-                rowActionLabel={(row) => `Edit ${row.name}`}
-                rowKey={(row) => row.id}
-                rows={devices}
-                stackBelow="md"
-              />
-            </SectionCard>
-
-            <SectionCard
-              description="Addresses that have resolved through Cogwheel but have no name yet."
-              title="Unnamed clients"
-            >
-              {data.devices.unnamed_clients.length === 0 ? (
-                <EmptyState
-                  description="Every address seen in the last 24 hours already has a name."
-                  icon={LaptopIcon}
-                  title="Nothing unnamed"
-                />
-              ) : (
-                <ul className="divide-y divide-border">
-                  {data.devices.unnamed_clients.map((client) => (
-                    <li className="flex flex-wrap items-center gap-3 py-2" key={client.ip}>
-                      <span className="min-w-0 flex-1 font-mono text-sm">{client.ip}</span>
-                      <span className="tabular text-muted-foreground text-xs">
-                        {formatCount(client.queries_24h)} / {formatCount(client.blocked_24h)} ·{" "}
-                        {formatRelative(client.last_seen_at)}
-                      </span>
-                      <Button onClick={() => select(null, client.ip)} size="sm" variant="outline">
-                        Name this device
-                      </Button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </SectionCard>
-          </div>
-        </div>
+        <SectionCard
+          description="Addresses that have resolved through Cogwheel but have no name yet."
+          title="Unnamed clients"
+        >
+          {data.devices.unnamed_clients.length === 0 ? (
+            <EmptyState
+              description="Every address seen in the last 24 hours already has a name."
+              icon={LaptopIcon}
+              title="Nothing unnamed"
+            />
+          ) : (
+            <ul className="divide-y divide-border">
+              {data.devices.unnamed_clients.map((client) => (
+                <li className="flex flex-wrap items-center gap-3 py-2" key={client.ip}>
+                  <span className="min-w-0 flex-1 font-mono text-sm">{client.ip}</span>
+                  <span className="tabular text-muted-foreground text-xs">
+                    {formatCount(client.queries_24h)} / {formatCount(client.blocked_24h)} ·{" "}
+                    {formatRelative(client.last_seen_at)}
+                  </span>
+                  <Button onClick={() => select(null, client.ip)} size="sm" variant="outline">
+                    Name this device
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </SectionCard>
       </PageSections>
 
       <ConfirmDialog

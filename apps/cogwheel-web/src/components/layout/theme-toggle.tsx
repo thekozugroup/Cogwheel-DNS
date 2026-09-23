@@ -27,7 +27,7 @@ export function ThemeToggle({ compact = false }: { compact?: boolean }) {
           title={option.label}
           value={option.value}
         >
-          <SegmentGroupItemText className="flex items-center gap-1.5 text-xs">
+          <SegmentGroupItemText className="flex items-center gap-2 text-xs">
             <option.icon aria-hidden className="size-3.5" />
             {compact ? <span className="sr-only">{option.label}</span> : option.label}
           </SegmentGroupItemText>

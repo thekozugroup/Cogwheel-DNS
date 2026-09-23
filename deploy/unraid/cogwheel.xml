@@ -1,0 +1,124 @@
+<?xml version="1.0"?>
+<!--
+  Cogwheel DNS — Unraid Community Applications template.
+
+  Add it in the Unraid web UI: Docker tab -> ADD CONTAINER -> paste this file's
+  raw URL into "Template". Everything below is then filled in, including the
+  ports, the data location and the two capabilities the image needs.
+
+  Two choices in here are deliberate and worth reading before you change them.
+
+  1. Repository is the MOVING `:latest` tag, not a pinned version. Unraid's
+     "check for updates" works by comparing the digest you have against the
+     registry's digest for the same tag. A pinned tag has a digest that never
+     moves, so the Docker tab would report "up-to-date" forever, including
+     through a security release. Pin a version here if you would rather review
+     each upgrade — that is a real choice, just make it knowingly.
+
+  2. Network is `host`, not `bridge`. Cogwheel applies settings per device and
+     identifies a device by the source IP of its DNS query. Under Unraid's
+     default bridge network that address is frequently rewritten to the docker
+     gateway, at which point every device in the house looks like one client
+     and per-device profiles silently collapse to the household policy — no
+     error, just wrong behaviour. Host networking binds :53 and :8080 on the
+     server's own interfaces and sees the real client.
+
+     If you need isolation instead, use a custom `br0` network with its own
+     LAN address rather than bridge: that also preserves client IPs. Do not
+     use plain bridge unless you have checked the Activity page attributes a
+     query from a second machine to that machine.
+-->
+<Container version="2">
+  <Name>Cogwheel-DNS</Name>
+  <Repository>ghcr.io/thekozugroup/cogwheel-dns:latest</Repository>
+  <Registry>https://github.com/thekozugroup/Cogwheel-DNS/pkgs/container/cogwheel-dns</Registry>
+  <Network>host</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/thekozugroup/Cogwheel-DNS/issues</Support>
+  <Project>https://github.com/thekozugroup/Cogwheel-DNS</Project>
+  <Overview>
+    Cogwheel is a DNS filter for a household. It answers every name your devices
+    look up, drops the ones on your blocklists, and lets you give a device its
+    own rules — one tablet on a stricter profile than the rest of the house.
+    It is one Rust binary and one SQLite file; there is no second service to run.
+
+    BEFORE YOU START: port 53 must be free on this server. Unraid does not run a
+    DNS server by default, so it usually is. If you also run Pi-hole or AdGuard
+    Home here, stop one of them first — two resolvers cannot share the port.
+
+    AFTER IT STARTS: open the WebUI, then set your router's DNS server to this
+    server's LAN address. Set it on the ROUTER, in the DHCP settings, rather than
+    on each device, so everything on the network is covered. On a dual-stack
+    network set the IPv6 address too: a client that keeps an IPv6 resolver
+    configured will bypass an IPv4-only setting entirely.
+
+    DATA: the default below is a Docker named volume called cogwheel-data, which
+    works with no further steps because the image's data directory is owned by
+    uid 10001 and Docker copies that ownership onto a fresh named volume. If you
+    would rather keep the database in appdata so the CA Appdata Backup plugin
+    picks it up, change the Data path to /mnt/user/appdata/cogwheel and run this
+    once from the Unraid terminal before starting the container — a bind mount
+    comes up root-owned and Cogwheel does not run as root:
+
+      mkdir -p /mnt/user/appdata/cogwheel &amp;&amp; chown -R 10001:10001 /mnt/user/appdata/cogwheel
+
+    UPDATES: the Docker tab's update check works against the :latest tag above.
+    An upgrade that changes the database schema migrates it in place and leaves
+    a copy of the previous file beside it as cogwheel.db.pre-vN, so going back
+    to an older version means restoring that copy first — the older build
+    refuses to open a database it does not recognise. Whether a release migrates
+    is readable from the image before you pull it:
+
+      docker buildx imagetools inspect ghcr.io/thekozugroup/cogwheel-dns:latest --format '{{ json .Image.Config.Labels }}'
+
+    and the io.cogwheel.schema-version label is the number to compare.
+  </Overview>
+  <Category>Network:DNS Network:Privacy Tools:Utilities</Category>
+  <WebUI>http://[IP]:8080/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/thekozugroup/Cogwheel-DNS/main/deploy/unraid/cogwheel.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/thekozugroup/Cogwheel-DNS/main/deploy/unraid/cogwheel.svg</Icon>
+  <DonateText/>
+  <DonateLink/>
+  <Requires/>
+  <!--
+    The two capabilities below are not optional and not a hardening
+    preference. The binary carries cap_net_bind_service as a FILE capability
+    with the effective bit set, so execve(2) returns EPERM when that capability
+    is missing from the bounding set: without the cap-add the container does
+    not start at all, under any network mode.
+
+    Read-only rootfs plus the tmpfs is safe because the only path Cogwheel
+    writes to is /app/data, which is the mount above.
+
+    A stop-timeout of 60 covers the one slow stop there is: a release that
+    migrates the schema copies the database before it touches anything, and
+    that copy runs before the server has a shutdown handler installed.
+
+    (XML comments cannot contain a double hyphen, which is why the flags are
+    named in words here rather than quoted.)
+  -->
+  <ExtraParams>--cap-drop ALL --cap-add NET_BIND_SERVICE --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m --init --stop-timeout 60 --ulimit nofile=65535:65535</ExtraParams>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled/>
+
+  <Config Name="Data" Target="/app/data" Default="cogwheel-data" Mode="rw" Type="Path" Display="always" Required="true" Mask="false"
+          Description="Where the SQLite database lives. Leave this as the named volume cogwheel-data unless you want it in appdata — see the note about ownership in the description above.">cogwheel-data</Config>
+
+  <Config Name="Web UI bind address" Target="COGWHEEL_SERVER__HTTP_BIND_ADDR" Default="0.0.0.0:8080" Mode="" Type="Variable" Display="advanced" Required="false" Mask="false"
+          Description="Host socket for the web interface under host networking. Change the port here if 8080 is taken on this server, and update the WebUI link to match.">0.0.0.0:8080</Config>
+
+  <Config Name="Upstream resolvers" Target="COGWHEEL_UPSTREAM__SERVERS" Default="1.1.1.1:53,1.0.0.1:53" Mode="" Type="Variable" Display="always" Required="false" Mask="false"
+          Description="Comma-separated. The default is cleartext, which works everywhere and is readable by your ISP. For DNS-over-TLS use, for example, tls://1.1.1.1#cloudflare-dns.com,tls://1.0.0.1#cloudflare-dns.com — the name after # is the one the certificate must match and it is required.">1.1.1.1:53,1.0.0.1:53</Config>
+
+  <Config Name="Blocking mode" Target="COGWHEEL_BLOCKING__MODE" Default="null_ip" Mode="" Type="Variable" Display="advanced" Required="false" Mask="false"
+          Description="How a blocked name is answered: null_ip (0.0.0.0 / ::), nxdomain, nodata or refused. null_ip is the default because clients handle it most predictably.">null_ip</Config>
+
+  <Config Name="Query log retention (days)" Target="COGWHEEL_RETENTION__HISTORY_DAYS" Default="7" Mode="" Type="Variable" Display="always" Required="false" Mask="false"
+          Description="How long the Activity page keeps per-query history. This is a record of every name every device in the house looked up, so it is worth setting deliberately. 0 stops the query log entirely; the charts and per-device counts still work, because those are counts rather than browsing history.">7</Config>
+
+  <Config Name="Profile" Target="COGWHEEL_PROFILE" Default="home" Mode="" Type="Variable" Display="advanced" Required="false" Mask="false"
+          Description="home is the household default. dev binds loopback on high ports and is for local hacking only.">home</Config>
+</Container>

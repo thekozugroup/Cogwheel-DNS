@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { SidebarInset, SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { Toaster } from "@/components/ui/toast";
 import { AppSidebar } from "@/components/layout/app-sidebar";
+import { Mark } from "@/components/layout/mark";
 
 /** True when the event target is a place a bare keystroke means something else. */
 function isTextEntry(target: EventTarget | null): boolean {
@@ -64,7 +65,7 @@ function StaleBanner() {
       role="status"
     >
       <WifiOffIcon aria-hidden className="size-4 shrink-0 text-warning-foreground" />
-      <p className="min-w-0 flex-1 text-foreground text-xs">
+      <p className="min-w-0 flex-1 text-foreground text-sm">
         <span className="font-medium">Showing last-known data.</span>{" "}
         {lastUpdatedAt ? `Last successful update ${formatRelative(Math.floor(lastUpdatedAt / 1000))}.` : null}{" "}
         {error ? <span className="text-muted-foreground">{error}</span> : null}
@@ -106,7 +107,13 @@ export function AppLayout() {
       <SidebarInset className="min-w-0">
         <header className="sticky top-0 z-20 flex h-12 shrink-0 items-center gap-2 border-border border-b bg-background/95 px-4 backdrop-blur sm:px-6">
           <SidebarTrigger aria-label="Toggle sidebar" />
-          <span className="text-muted-foreground text-xs md:hidden">Cogwheel</span>
+          {/* On a phone this bar is the only chrome the product has. The
+              wordmark was 12px muted grey here, which read as a breadcrumb
+              rather than as the thing you are looking at. */}
+          <span className="flex items-center gap-2 md:hidden">
+            <Mark className="size-4 text-foreground" />
+            <span className="display-tight font-semibold text-foreground text-sm">Cogwheel</span>
+          </span>
         </header>
 
         <StaleBanner />

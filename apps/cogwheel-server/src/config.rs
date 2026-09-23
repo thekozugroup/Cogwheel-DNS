@@ -1,7 +1,8 @@
 //! Everything the appliance can be told, read once from the environment (§8).
 //!
 //! Configuration is environment-only by design: an installed box keeps it in
-//! `/etc/cogwheel/cogwheel.env`, nothing in the control plane writes it back, and
+//! `/etc/cogwheel/.env` (Docker, either way it was installed) or
+//! `/etc/cogwheel/cogwheel.env` (native systemd), nothing in the control plane writes it back, and
 //! `GET /api/v1/settings` is read-only. Unknown variables are ignored, but a variable that is
 //! set and cannot be parsed stops startup — a resolver that quietly falls back to a default
 //! bind address is a resolver nobody on the network can find.

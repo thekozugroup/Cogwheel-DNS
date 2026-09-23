@@ -240,6 +240,22 @@ RUN setcap 'cap_net_bind_service=+ep' /usr/local/bin/cogwheel-server
 RUN install -d -o ${COGWHEEL_UID} -g ${COGWHEEL_GID} -m 0750 /app/data \
  && chown -R ${COGWHEEL_UID}:${COGWHEEL_GID} /app/web
 
+# The post-install check, carried inside the image.
+#
+# scripts/install.sh leaves a copy at /etc/cogwheel/verify-install.sh, but a
+# host that never ran the installer -- Unraid's Docker tab, a plain
+# `docker run`, somebody else's Compose stack -- has neither that file nor a
+# checkout, and until now had no way to check an install at all:
+#
+#   docker exec cogwheel sh /app/verify-install.sh
+#
+# It reports SKIP rather than inventing a result for anything it cannot reach
+# from in here, which is the restart and upgrade checks (no docker socket) and
+# the resolver checks on an image with no dig. The HTTP checks -- liveness,
+# readiness, the API, the web assets and the advertised resolver address --
+# all run, and those are the ones that answer "did this come up correctly?".
+COPY scripts/verify-install.sh /app/verify-install.sh
+
 # --------------------------------------------------------------------------
 # Runtime configuration defaults.
 #
@@ -268,7 +284,7 @@ EXPOSE 8080/tcp 53/udp 53/tcp
 # (503 until storage, policy and the DNS listeners are all up) and is the one to
 # gate a rolling upgrade on -- but using it here would report the container
 # unhealthy during a slow first blocklist compile, so liveness is correct for
-# this probe. See DEPLOYMENT.md.
+# this probe. See docs/DEPLOYMENT.md.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
   CMD ["/bin/sh", "-c", "addr=\"${COGWHEEL_SERVER__HTTP_BIND_ADDR:-0.0.0.0:8080}\"; exec curl -fsS -o /dev/null --max-time 4 \"http://127.0.0.1:${addr##*:}/health/live\""]
 
@@ -287,14 +303,67 @@ ARG VERSION=0.0.0-dev
 ARG REVISION=unknown
 ARG CREATED=1970-01-01T00:00:00Z
 ARG DEBIAN_SUITE
+
+# The database schema version this build understands, mirroring SCHEMA_VERSION
+# in crates/cogwheel-storage/src/lib.rs. CI asserts the two agree, because a
+# label that drifts is worse than no label: this is the one fact that tells an
+# operator, BEFORE pulling, whether a release will migrate their database --
+# and therefore whether rolling back afterwards needs the .pre-vN snapshot
+# restoring first. Read it without pulling the image:
+#
+#   docker buildx imagetools inspect ghcr.io/thekozugroup/cogwheel-dns:latest \
+#     --format '{{ json .Image.Config.Labels }}'
+#
+# scripts/install.sh compares it across an upgrade and says what it means.
+ARG SCHEMA_VERSION=1
+
 LABEL org.opencontainers.image.title="Cogwheel DNS" \
-      org.opencontainers.image.description="Rust DNS adblock appliance with per-device block profiles" \
+      org.opencontainers.image.description="Network-wide DNS ad and tracker blocking, with per-device policy" \
       org.opencontainers.image.url="https://github.com/thekozugroup/Cogwheel-DNS" \
       org.opencontainers.image.source="https://github.com/thekozugroup/Cogwheel-DNS" \
-      org.opencontainers.image.documentation="https://github.com/thekozugroup/Cogwheel-DNS/blob/main/DEPLOYMENT.md" \
-      org.opencontainers.image.vendor="Tachyon Labs" \
+      org.opencontainers.image.documentation="https://github.com/thekozugroup/Cogwheel-DNS/blob/main/docs/DEPLOYMENT.md" \
+      org.opencontainers.image.vendor="The Kozu Group" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${REVISION}" \
       org.opencontainers.image.created="${CREATED}" \
-      org.opencontainers.image.base.name="docker.io/library/debian:${DEBIAN_SUITE}-slim"
+      org.opencontainers.image.base.name="docker.io/library/debian:${DEBIAN_SUITE}-slim" \
+      io.cogwheel.schema-version="${SCHEMA_VERSION}"
+
+# Unraid reads these two from the image when a container is added from a
+# template, so the WebUI button and the icon work without the operator typing
+# either. [IP] and [PORT:8080] are Unraid's own substitutions, filled in from
+# the container's published ports -- they are not shell or Docker syntax and
+# must reach Unraid literally.
+LABEL net.unraid.docker.webui="http://[IP]:[PORT:8080]" \
+      net.unraid.docker.icon="https://raw.githubusercontent.com/thekozugroup/Cogwheel-DNS/main/deploy/unraid/cogwheel.svg"
+
+# Watchtower: watch and report, do not replace.
+#
+# Watchtower's update is stop -> pull -> start with the same flags, unattended,
+# on a timer. It does not wait for health, so a container that starts, migrates
+# the database, fails and enters a restart loop is recorded as a successful
+# update -- at 04:00, on the box that resolves every name in the house, with
+# nobody watching. `monitor-only` keeps the useful half (it still tells you a
+# new image exists) and drops the half that can leave a household with no DNS.
+#
+# What is NOT the reason for this: the migration itself is crash-safe, and
+# that is measured rather than hoped for. The whole schema rewrite is one
+# TransactionBehavior::Immediate transaction committed at
+# crates/cogwheel-storage/src/migrate.rs (upgrade_in_transaction), so a SIGKILL
+# partway through rolls it back and leaves the database exactly as it was; and
+# the pre-migration `VACUUM INTO` copy, which runs outside that transaction, is
+# deleted and re-taken on the next boot if it was left partial. A kill mid
+# migration costs a restart, not data.
+#
+# The risk this guards is the other one: a release that migrates successfully
+# and then cannot serve, or that you then want to leave. Going back across a
+# schema change needs the .pre-vN copy restored first, and that is a decision,
+# not something to discover from a crash loop the next morning.
+#
+# To opt in to automatic updates, override it on the container -- one line in
+# docker-compose.yml, where you can see it:
+#     labels:
+#       com.centurylinklabs.watchtower.monitor-only: "false"
+# Check io.cogwheel.schema-version on the new tag before you do.
+LABEL com.centurylinklabs.watchtower.monitor-only="true"

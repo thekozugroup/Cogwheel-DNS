@@ -1,0 +1,72 @@
+name: Feature request
+description: Something Cogwheel should do and does not.
+labels: ['enhancement']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Cogwheel has a deliberately narrow
+        [scope boundary](https://github.com/thekozugroup/Cogwheel-DNS/blob/main/docs/ARCHITECTURE.md#1-scope-boundary--what-cogwheel-is-not):
+        it is a DNS filter for one household network, and it does not do machine-learning
+        classification, threat feeds, multi-node sync, VPN or exit-node integration,
+        notifications, a backup API or a metrics exporter. A request that needs one of those
+        is likely out of scope — but say it anyway, because the boundary is worth arguing
+        about and sometimes the answer is a configuration change rather than a no.
+
+        **"Support this blocklist" is almost never a feature request.** Any list URL already
+        works, in `hosts`, `domains` or Adblock syntax — add it on the Lists page. The preset
+        picker is a convenience, not the set of lists Cogwheel can read.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is the problem
+      description: |
+        Describe the situation you are in, not the feature you have in mind. The best
+        requests here have come from someone explaining what went wrong on their network.
+      placeholder: |
+        Two of us change filtering rules. When a site breaks, neither of us can tell whether
+        the other allowed something last week or whether a list updated.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like it to do
+      description: If you have a specific shape in mind, say so. If you do not, that is fine too.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you do instead today
+      description: |
+        The workaround matters. A request with a painful workaround is a stronger case than
+        one where nobody has needed it enough to work around at all.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part of Cogwheel
+      options:
+        - Resolving and caching
+        - Blocklists and updates
+        - Rules and the protected set
+        - Devices and per-device policy
+        - Query log and Activity
+        - Web UI
+        - Deployment, Docker and networking
+        - Configuration
+        - Something else
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: willing
+    attributes:
+      label: Would you be up for building it
+      description: Entirely optional, and a "no" costs nothing.
+      options:
+        - label: I would be willing to open a pull request for this

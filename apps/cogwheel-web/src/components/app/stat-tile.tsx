@@ -21,6 +21,7 @@ export function StatTile({
   hint,
   footer,
   className,
+  variant = "metric",
 }: {
   label: string;
   value: React.ReactNode;
@@ -36,23 +37,41 @@ export function StatTile({
   hint?: React.ReactNode;
   footer?: React.ReactNode;
   className?: string;
+  /**
+   * `state` is for a tile whose value is a word, not a quantity. Protection
+   * sat in a row of three numerals with "Protected" set at 24px/600 as though
+   * it were one of them; a state reads as a status line with the dot in front
+   * of it, which is what it is.
+   */
+  variant?: "metric" | "state";
 }) {
+  const state = variant === "state";
+
   return (
     <div className={cn("flex flex-col rounded-xl border border-border bg-card p-4", className)}>
+      {/* Sentence case, normal tracking. These labels were the only uppercase
+          letter-spaced text in the product. */}
       <div className="flex items-center justify-between gap-2">
-        <p className="font-medium text-muted-foreground text-xs uppercase tracking-wide">{label}</p>
-        {tone === "neutral" ? null : (
-          <span className="flex items-center gap-1.5 text-foreground text-xs">
+        <p className="font-medium text-muted-foreground text-xs">{label}</p>
+        {state || tone === "neutral" ? null : (
+          <span className="flex items-center gap-2 text-foreground text-xs">
             <Status size="sm" variant={DOT[tone]} />
             {toneLabel}
           </span>
         )}
       </div>
 
-      <p className="display-tight tabular mt-2 font-semibold text-2xl text-foreground">{value}</p>
+      {state ? (
+        <p className="mt-2 flex items-center gap-2 font-semibold text-base text-foreground">
+          {tone === "neutral" ? null : <Status size="sm" variant={DOT[tone]} />}
+          {value}
+        </p>
+      ) : (
+        <p className="display-tight tabular mt-2 font-semibold text-2xl text-foreground">{value}</p>
+      )}
 
-      {delta ? <p className="tabular mt-1 text-muted-foreground text-xs">{delta}</p> : null}
-      {hint ? <p className="mt-1 text-muted-foreground text-xs">{hint}</p> : null}
+      {delta ? <p className="tabular mt-1 text-muted-foreground text-sm">{delta}</p> : null}
+      {hint ? <p className="mt-1 text-muted-foreground text-sm">{hint}</p> : null}
       {footer ? <div className="mt-3">{footer}</div> : null}
     </div>
   );

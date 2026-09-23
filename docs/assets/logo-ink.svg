@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="#111111" role="img" aria-label="Cogwheel">
+  <!--
+    Cogwheel's mark with the ink fixed rather than inherited. `logo.svg` is the master and uses
+    `fill="currentColor"`; that is right inside the product, where the mark is inlined as SVG and
+    takes the colour of the text beside it, but wrong in a README. GitHub renders a README image
+    through an <img>, and currentColor inside an <img> resolves against the SVG's own default —
+    black — so the master disappears against a dark README. This pair is selected by a <picture>
+    element instead. The path is identical in every copy; `logo.svg` lists the six files
+    that carry it.
+  -->
+  <path d="M10 2h4v2h-4zM6 4h12v2H6zM4 6h16v2H4zM4 8h4v8H4zM16 8h4v8h-4zM2 10h2v4H2zM20 10h2v4h-2zM4 16h16v2H4zM6 18h12v2H6zM10 20h4v2h-4z"/>
+</svg>

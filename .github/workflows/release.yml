@@ -28,6 +28,7 @@ jobs:
       version: ${{ steps.v.outputs.version }}
       image_name: ${{ steps.v.outputs.image_name }}
       created: ${{ steps.v.outputs.created }}
+      schema_version: ${{ steps.v.outputs.schema_version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -72,23 +73,50 @@ jobs:
           # them. Lowercase it rather than hardcoding the owner.
           IMAGE_NAME="$(printf '%s' "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
 
+          # The schema version this build understands, lifted from the one
+          # place that defines it. It becomes an OCI label on the image, which
+          # is what lets an operator -- or scripts/install.sh, or the Unraid
+          # update check -- tell BEFORE pulling whether a release will migrate
+          # their database and therefore whether rolling back afterwards needs
+          # the .pre-vN snapshot restoring first.
+          SCHEMA_VERSION="$(sed -n 's/^pub const SCHEMA_VERSION: i64 = \([0-9]\+\);.*/\1/p' \
+            crates/cogwheel-storage/src/lib.rs | head -n 1)"
+          if [ -z "${SCHEMA_VERSION}" ]; then
+            echo "::error::could not read SCHEMA_VERSION from crates/cogwheel-storage/src/lib.rs"
+            exit 1
+          fi
+
           {
             echo "version=${VERSION}"
             echo "image_name=${IMAGE_NAME}"
             echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "schema_version=${SCHEMA_VERSION}"
           } >> "$GITHUB_OUTPUT"
 
-          echo "Releasing ${VERSION} as ${IMAGE_NAME}"
+          echo "Releasing ${VERSION} as ${IMAGE_NAME} (database schema v${SCHEMA_VERSION})"
 
-          # Advisory only: a mismatch is worth seeing but should not block a
-          # hotfix tag at 02:00.
+          # Fatal, not advisory. The Settings page reports CARGO_PKG_VERSION
+          # (apps/cogwheel-server/src/api/settings.rs), which is the only place
+          # in the product an operator can see what they are running -- so a tag
+          # that disagrees with Cargo.toml produces an image that misreports
+          # itself for the life of that release, and every test passes either
+          # way. This used to be a `::warning::`, which is to say nothing.
+          #
+          # The prerelease suffix is stripped before comparing: v0.2.0-rc.1 is
+          # built from the 0.2.0 source, and requiring Cargo.toml to carry
+          # `-rc.1` would mean a commit whose only purpose is to be reverted.
+          #
           # awk rather than `sed ... | head -1`: under `set -o pipefail` the
           # early close by head can surface as SIGPIPE and fail this step, and
           # this job gates every other one.
+          EXPECTED="${VERSION%%-*}"
           MANIFEST_VERSION="$(awk -F'"' '/^version = "/ { print $2; exit }' Cargo.toml)"
-          if [ "${MANIFEST_VERSION}" != "${VERSION}" ]; then
-            echo "::warning::tag version ${VERSION} does not match Cargo.toml workspace version ${MANIFEST_VERSION}"
+          if [ "${MANIFEST_VERSION}" != "${EXPECTED}" ]; then
+            echo "::error file=Cargo.toml::workspace version is ${MANIFEST_VERSION}; the tag says ${EXPECTED}"
+            echo "Bump the version in Cargo.toml, commit, then move the tag."
+            exit 1
           fi
+          echo "Cargo.toml reports ${MANIFEST_VERSION}"
 
   # ==========================================================================
   # Web assets: architecture-independent, so built exactly once and reused by
@@ -171,6 +199,7 @@ jobs:
             VERSION=${{ needs.meta.outputs.version }}
             REVISION=${{ github.sha }}
             CREATED=${{ needs.meta.outputs.created }}
+            SCHEMA_VERSION=${{ needs.meta.outputs.schema_version }}
           cache-from: type=gha,scope=release-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=release-${{ matrix.arch }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ needs.meta.outputs.image_name }},push-by-digest=true,name-canonical=true,push=true
@@ -234,6 +263,13 @@ jobs:
 
       - id: meta
         uses: docker/metadata-action@v5
+        env:
+          # `imagetools create` needs index-level annotations, not manifest-level
+          # ones: the thing a tag resolves to here is the manifest list, and GHCR
+          # reads the index's annotations to link the package to its repository
+          # and show a description. This is what makes the `annotations` output
+          # below usable rather than decorative.
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: index
         with:
           images: ${{ env.REGISTRY }}/${{ needs.meta.outputs.image_name }}
           # The semver patterns only match a tag ref. On workflow_dispatch they
@@ -241,18 +277,41 @@ jobs:
           # error -- so a dispatch run gets the dev version computed by `meta`
           # as its single tag. `Resolve the manifest digest` below looks the
           # image up by exactly that version, so the two must agree.
-          # `latest` is deliberately NOT applied to every tag. scripts/install.sh
-          # defaults to ghcr.io/…:latest and DEPLOYMENT.md's upgrade path is
-          # "re-run the installer", so whatever `latest` points at is what every
-          # appliance installs and upgrades onto. Tagging a prerelease as latest
-          # would silently move every household onto a release candidate.
+          # `latest` is deliberately NOT applied to every tag. It is the tag a
+          # household actually follows: scripts/install.sh writes it into
+          # /etc/cogwheel/.env, `docker compose pull` resolves it on every
+          # upgrade, and Unraid's "check for updates" compares its digest.
+          # Whatever `latest` points at is therefore what every appliance moves
+          # onto unattended, so tagging a prerelease as latest would ship a
+          # release candidate to people who never opted into one.
           # A semver prerelease always carries a '-' (v0.2.0-rc.1); build
           # metadata ('+') is already rejected by the meta job.
+          #
+          # Tags, so an operator can choose how closely to follow:
+          #   1.2.3   exactly this release, forever
+          #   1.2     the newest 1.2.x -- fixes only
+          #   1       the newest 1.x -- no breaking change
+          #   latest  the newest final release
+          # `{{major}}` is skipped below 1.0.0: a "0" tag would promise a stable
+          # major line that 0.x explicitly does not have, and semver says so. A
+          # 0.x tag therefore publishes three of these, not four; nothing in the
+          # docs or the release body should claim a fixed count.
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}},enable=${{ github.ref_type == 'tag' && !startsWith(github.ref_name, 'v0.') && !contains(github.ref_name, '-') }}
             type=raw,value=latest,enable=${{ github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
             type=raw,value=${{ needs.meta.outputs.version }},enable=${{ github.ref_type != 'tag' }}
+          # Spelled out rather than inferred from the repository description,
+          # which is editable in the GitHub UI and would silently change what
+          # every published index says about itself. These mirror the Dockerfile's
+          # per-architecture labels so the index and the images agree.
+          labels: |
+            org.opencontainers.image.title=Cogwheel DNS
+            org.opencontainers.image.description=Network-wide DNS ad and tracker blocking, with per-device policy
+            org.opencontainers.image.vendor=The Kozu Group
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.documentation=https://github.com/${{ github.repository }}/blob/main/docs/DEPLOYMENT.md
 
       - name: Create the manifest list
         working-directory: /tmp/digests
@@ -283,12 +342,33 @@ jobs:
             exit 1
           fi
 
-          echo "creating: docker buildx imagetools create ${tags}${refs}"
-          # Word splitting is the point: both are pre-built argument lists.
+          # Annotations, on the INDEX rather than on each per-arch manifest.
+          # `imagetools create` does not inherit annotations from the manifests
+          # it stitches together, so without this the thing `:latest` actually
+          # resolves to carries none -- and GHCR reads exactly those to link the
+          # package to this repository and show a description. They come from
+          # the same metadata-action step as the tags, which is what stops that
+          # step's `annotations` output from being computed and thrown away.
+          #
+          # An array, not a string: the description contains spaces, so word
+          # splitting -- correct for the tags and refs below -- would shred it
+          # into six arguments buildx does not understand.
+          annotations=()
+          while IFS= read -r line; do
+            [ -n "$line" ] && annotations+=(--annotation "$line")
+          done <<< "$INDEX_ANNOTATIONS"
+          if [ "${#annotations[@]}" -eq 0 ]; then
+            echo "::warning::docker/metadata-action produced no index annotations"
+          fi
+
+          echo "creating: docker buildx imagetools create ${annotations[*]} ${tags}${refs}"
+          # Word splitting is the point for these two: both are pre-built
+          # argument lists of tokens that cannot contain spaces.
           # shellcheck disable=SC2086
-          docker buildx imagetools create $tags $refs
+          docker buildx imagetools create "${annotations[@]}" $tags $refs
         env:
           IMAGE_NAME: ${{ needs.meta.outputs.image_name }}
+          INDEX_ANNOTATIONS: ${{ steps.meta.outputs.annotations }}
 
       - name: Resolve the manifest digest
         id: digest
@@ -353,6 +433,83 @@ jobs:
             echo "The images are already pushed; the re-run reuses them and only publishes the release."
           } >> "$GITHUB_STEP_SUMMARY"
           exit 1
+
+      # A pushed image that cannot start is worse than no release: `latest` now
+      # points at it, and every appliance that runs `docker compose pull` takes
+      # it. CI exercises this Dockerfile thoroughly, but CI builds its own
+      # image -- it does not test the artifact. This does.
+      #
+      # Only linux/amd64 is started. The runner cannot run the arm64 image at
+      # native speed, and an emulated boot proves little beyond "qemu works";
+      # the arm64 half is covered by ci.yml running the same Dockerfile on a
+      # native arm64 runner.
+      #
+      # The version assertion closes the Cargo.toml-mismatch hole from the
+      # other end: `meta` checks the source, this checks the binary that was
+      # actually published, via the one endpoint the Settings page reads.
+      - name: The published image must start, serve, and report its own version
+        env:
+          IMAGE_NAME: ${{ needs.meta.outputs.image_name }}
+          DIGEST: ${{ steps.digest.outputs.digest }}
+          VERSION: ${{ needs.meta.outputs.version }}
+          SCHEMA_VERSION: ${{ needs.meta.outputs.schema_version }}
+        run: |
+          set -euo pipefail
+          REF="${REGISTRY}/${IMAGE_NAME}@${DIGEST}"
+
+          # Bridge networking with :5353 inside the container: the runner's own
+          # systemd-resolved holds :53. NET_BIND_SERVICE is still required --
+          # the binary carries the capability as a file capability, so execve
+          # fails without it whatever port would be bound.
+          docker run -d --name cogwheel-release \
+            --platform linux/amd64 \
+            --cap-drop ALL --cap-add NET_BIND_SERVICE \
+            --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m --init \
+            -e COGWHEEL_SERVER__HTTP_BIND_ADDR=0.0.0.0:8080 \
+            -e COGWHEEL_SERVER__DNS_UDP_BIND_ADDR=0.0.0.0:5353 \
+            -e COGWHEEL_SERVER__DNS_TCP_BIND_ADDR=0.0.0.0:5353 \
+            -p 18080:8080/tcp "$REF"
+
+          ready=no
+          for attempt in $(seq 1 60); do
+            if curl -fsS -o /dev/null --max-time 3 http://127.0.0.1:18080/health/ready; then
+              echo "ready after ${attempt} attempts"; ready=yes; break
+            fi
+            sleep 3
+          done
+          if [ "$ready" != yes ]; then
+            echo "::error::the published image never became ready"
+            docker logs cogwheel-release 2>&1 | tail -80
+            exit 1
+          fi
+
+          body="$(curl -fsS --max-time 10 http://127.0.0.1:18080/api/v1/settings)"
+          reported="$(jq -r '.data.version' <<< "$body")"
+          schema="$(jq -r '.data.schema_version' <<< "$body")"
+
+          # The tag may carry a prerelease suffix that the manifests do not:
+          # v0.2.0-rc.1 is built from the 0.2.0 source.
+          expected="${VERSION%%-*}"
+          if [ "$reported" != "$expected" ]; then
+            echo "::error::the published image reports version ${reported}; the tag says ${expected}"
+            exit 1
+          fi
+          if [ "$schema" != "$SCHEMA_VERSION" ]; then
+            echo "::error::the published image reports schema v${schema}; the source says v${SCHEMA_VERSION}"
+            exit 1
+          fi
+
+          # And the label an operator reads BEFORE pulling has to agree with
+          # what the running binary then says. A label that drifts is worse
+          # than no label, because it is the input to a rollback decision.
+          labelled="$(docker image inspect --format '{{index .Config.Labels "io.cogwheel.schema-version"}}' "$REF")"
+          if [ "$labelled" != "$SCHEMA_VERSION" ]; then
+            echo "::error::io.cogwheel.schema-version is '${labelled}'; the source says ${SCHEMA_VERSION}"
+            exit 1
+          fi
+
+          echo "published image: version ${reported}, database schema v${schema}, label agrees"
+          docker rm -f cogwheel-release >/dev/null
 
       - name: Attest build provenance for the image
         uses: actions/attest-build-provenance@v2
@@ -443,7 +600,11 @@ jobs:
           install -Dm0755 scripts/install-native.sh "stage/${NAME}/scripts/install-native.sh"
           install -Dm0755 scripts/install.sh "stage/${NAME}/scripts/install.sh"
           install -Dm0755 scripts/verify-install.sh "stage/${NAME}/scripts/verify-install.sh"
-          install -Dm0644 DEPLOYMENT.md "stage/${NAME}/DEPLOYMENT.md"
+          install -Dm0755 scripts/check-update.sh "stage/${NAME}/scripts/check-update.sh"
+          install -Dm0644 docker-compose.yml "stage/${NAME}/docker-compose.yml"
+          install -Dm0644 .env.example "stage/${NAME}/.env.example"
+          install -Dm0644 deploy/unraid/cogwheel.xml "stage/${NAME}/deploy/unraid/cogwheel.xml"
+          install -Dm0644 docs/DEPLOYMENT.md "stage/${NAME}/docs/DEPLOYMENT.md"
           tar -czf "${NAME}.tar.gz" -C stage "${NAME}"
           sha256sum "${NAME}.tar.gz"
         env:
@@ -516,17 +677,57 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.meta.outputs.version }}
           IMAGE_NAME: ${{ needs.meta.outputs.image_name }}
+          SCHEMA_VERSION: ${{ needs.meta.outputs.schema_version }}
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
 
-          cat > notes.md <<NOTES
+          # The release body leads with CHANGELOG.md rather than with generated
+          # commit subjects. Somebody deciding whether to take an update to the
+          # thing that resolves every name in their house needs to know what
+          # changed and whether it needs their attention; a list of commit
+          # titles does not tell them that.
+          #
+          # The awk stops at the next version heading AND at the link-reference
+          # block at the foot of the file -- without that second rule the newest
+          # entry, which has no heading after it, swallows the `[0.1.0]: https…`
+          # lines into the release body.
+          : > notes.md
+          if [ -f CHANGELOG.md ] && awk -v v="${VERSION}" '
+                $0 ~ "^## \\[" v "\\]" { found = 1; next }
+                found && /^## \[/ { exit }
+                found && /^\[[^]]+\]: / { exit }
+                found { print }
+              ' CHANGELOG.md > changelog.md && [ -s changelog.md ]; then
+            cat changelog.md >> notes.md
+            printf '\n' >> notes.md
+            echo "found a changelog section for ${VERSION}"
+          else
+            echo "::warning::CHANGELOG.md has no section for ${VERSION}; released with a pointer"
+            printf 'See [CHANGELOG.md](https://github.com/%s/blob/%s/CHANGELOG.md).\n\n' \
+              "${GITHUB_REPOSITORY}" "${TAG}" >> notes.md
+          fi
+
+          cat >> notes.md <<NOTES
+          ---
+
           ## Install
 
           One line, on the machine that will run Cogwheel:
 
           \`\`\`sh
           curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${TAG}/scripts/install.sh | sudo sh
+          \`\`\`
+
+          It writes a Docker Compose project to \`/etc/cogwheel\` and starts it.
+
+          ## Upgrading
+
+          The same two commands on every host, whichever way it was installed:
+
+          \`\`\`sh
+          cd /etc/cogwheel
+          sudo docker compose pull && sudo docker compose up -d
           \`\`\`
 
           ## Container image
@@ -536,6 +737,48 @@ jobs:
           \`\`\`
 
           Multi-arch: \`linux/amd64\` and \`linux/arm64\` (Raspberry Pi 5).
+
+          Pick the tag that matches how closely you want to follow releases:
+
+          | Tag | You get |
+          | --- | --- |
+          | \`${VERSION}\` | exactly this release, forever |
+          | \`\${VERSION%.*}\` | the newest patch on this minor line |
+          | \`latest\` | the newest final release, never a prerelease |
+
+          \`latest\` is the default the installer and the Unraid template use,
+          and that is deliberate: a moving tag is what makes \`docker compose
+          pull\` an upgrade, and it is the only thing an Unraid-style update
+          check can compare a digest against.
+
+          ## Database schema
+
+          This release understands schema **v${SCHEMA_VERSION}**, published on the image as
+          \`io.cogwheel.schema-version\`. Read it from any tag without pulling it:
+
+          \`\`\`sh
+          docker buildx imagetools inspect ${REGISTRY}/${IMAGE_NAME}:${VERSION} \\
+            --format '{{ json .Image.Config.Labels }}'
+          \`\`\`
+
+          If that number is higher than the one you are running, this upgrade
+          migrates your database in place and leaves a copy of the previous file
+          beside it as \`cogwheel.db.pre-v${SCHEMA_VERSION}\`. Rolling back across
+          that point means restoring the copy first — an older build refuses to
+          open a database it does not recognise, and \`restart: unless-stopped\`
+          turns that refusal into a crash loop.
+
+          ## Rolling back
+
+          Pin the release you want in \`/etc/cogwheel/.env\` and bring it up:
+
+          \`\`\`sh
+          cd /etc/cogwheel
+          sudo sed -i 's|^COGWHEEL_IMAGE=.*|COGWHEEL_IMAGE=${REGISTRY}/${IMAGE_NAME}:PREVIOUS|' .env
+          sudo docker compose pull && sudo docker compose up -d
+          \`\`\`
+
+          Read the schema note above first.
 
           ## Verifying what you downloaded
 
@@ -548,7 +791,7 @@ jobs:
           An SPDX SBOM for the source tree is attached; the image SBOM is
           attested to the image itself.
 
-          See [DEPLOYMENT.md](https://github.com/${GITHUB_REPOSITORY}/blob/${TAG}/DEPLOYMENT.md)
+          See [docs/DEPLOYMENT.md](https://github.com/${GITHUB_REPOSITORY}/blob/${TAG}/docs/DEPLOYMENT.md)
           for upgrades, troubleshooting and backing up the data volume.
           NOTES
 

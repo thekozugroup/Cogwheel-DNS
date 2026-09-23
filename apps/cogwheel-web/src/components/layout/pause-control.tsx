@@ -49,7 +49,7 @@ export function PauseControl() {
 
   return (
     <>
-      <div className="flex flex-col gap-1.5">
+      <div className="flex flex-col gap-2">
         <p className="text-muted-foreground text-xs">Pause protection</p>
         <div className="flex gap-1">
           {PAUSE_OPTIONS.map((minutes) => (
@@ -69,10 +69,12 @@ export function PauseControl() {
         </div>
       </div>
 
+      {/* The description says what happens; the consequence says only what the
+          description does not. They used to say the same thing twice. */}
       <ConfirmDialog
         confirmLabel={`Pause for ${pending ?? 0} minutes`}
-        consequence="Every device on the network resolves unfiltered until the window expires or you resume manually. The pause is stored, so a restart does not end it early."
-        description={`Blocking stops for ${pending ?? 0} minutes across the whole network, not just this browser.`}
+        consequence="The pause is stored on the appliance, so restarting it does not end the pause early."
+        description={`Blocking stops for ${pending ?? 0} minutes across the whole network, not just this browser. Every device resolves unfiltered until it expires or you resume.`}
         destructive
         onConfirm={async () => {
           if (pending !== null) await pause(pending);

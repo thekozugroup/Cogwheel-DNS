@@ -16,12 +16,35 @@
 #      For a real DNS server (dnsmasq, bind, unbound, ...) it stops and tells
 #      you, because silently disabling someone's DNS server is not a decision
 #      an installer gets to make.
-#   3. Pulls the image, writes /etc/cogwheel/cogwheel.env, starts the container.
+#   3. Writes /etc/cogwheel/docker-compose.yml and /etc/cogwheel/.env, then
+#      runs `docker compose up -d` against them.
 #   4. Waits for the container to report healthy and then proves the resolver
 #      actually answers a query.
-#   5. If any of that fails, rolls back: restores the previous container if
-#      there was one, otherwise removes what it created and reverts the host
-#      DNS changes.
+#   5. If any of that fails, rolls back: restores the previous image if there
+#      was one, otherwise removes what it created and reverts the host DNS
+#      changes.
+#   6. Leaves a copy of itself, verify-install.sh and check-update.sh in
+#      /etc/cogwheel, so --fix-port-53, --uninstall, the post-upgrade check and
+#      the "is there anything newer?" check are all runnable on a host that has
+#      no checkout.
+#
+# Nothing here is irreversible without being told so first, and
+# `--print-compose` prints the deployment it would write without touching
+# anything -- worth a look before piping a script off the internet into root.
+#
+# It bootstraps a Compose project rather than running `docker run` itself, and
+# that is the whole point. Afterwards this script is not in the update path at
+# all -- every Cogwheel host, however it was installed, upgrades with the same
+# two commands:
+#
+#   cd /etc/cogwheel
+#   sudo docker compose pull && sudo docker compose up -d
+#
+# Running this installer again is safe and does the same thing, but it is not
+# how you upgrade. /etc/cogwheel/.env is yours: a second run fills in keys that
+# are missing and never rewrites one you have set, so the upstream resolvers,
+# block mode and profile you chose survive. Pass --force-env if you genuinely
+# want the file regenerated from this run's flags.
 #
 # Everything it changes on the host is recorded in /etc/cogwheel/install-state
 # so `--uninstall` can reverse exactly those changes and nothing else.
@@ -31,7 +54,7 @@
 
 set -eu
 
-COGWHEEL_INSTALLER_VERSION="1.0.0"
+COGWHEEL_INSTALLER_VERSION="2.0.0"
 
 # --------------------------------------------------------------------------
 # Defaults. Every one is overridable by flag or environment.
@@ -47,19 +70,41 @@ PROFILE="${COGWHEEL_PROFILE:-home}"
 # How blocked names are answered.
 BLOCK_MODE="${COGWHEEL_BLOCK_MODE:-null_ip}"
 CPU_LIMIT="${COGWHEEL_CPU_LIMIT:-2.0}"
-MEMORY_LIMIT="${COGWHEEL_MEMORY_LIMIT:-1024m}"
-MEMORY_RESERVATION="${COGWHEEL_MEMORY_RESERVATION:-192m}"
+MEMORY_LIMIT="${COGWHEEL_MEMORY_LIMIT:-1024M}"
+MEMORY_RESERVATION="${COGWHEEL_MEMORY_RESERVATION:-192M}"
+# 60s, not the 20s a clean shutdown needs. A release that migrates the schema
+# takes a VACUUM INTO copy of the database before it touches anything, and that
+# copy runs before the server has a shutdown handler installed. On a household
+# database it is well under a second; on a large one with a slow SD card it is
+# not, and that is the one stop worth waiting out rather than cutting short.
+STOP_GRACE_PERIOD="${COGWHEEL_STOP_GRACE_PERIOD:-60s}"
 HEALTH_TIMEOUT="${COGWHEEL_HEALTH_TIMEOUT:-180}"
 
+# The Compose project directory. Everything the deployment needs lives here and
+# nowhere else: the compose file, the .env beside it that Compose reads for both
+# interpolation and container environment, the install state, and a copy of
+# verify-install.sh so the post-upgrade check is runnable on a host that has no
+# checkout. Every compose command in this script and in the docs runs with this
+# as the working directory, so Compose finds .env on every version of Compose
+# rather than only the ones that resolve it from the project directory.
 CONFIG_DIR=/etc/cogwheel
-ENV_FILE="$CONFIG_DIR/cogwheel.env"
+COMPOSE_FILE="$CONFIG_DIR/docker-compose.yml"
+ENV_FILE="$CONFIG_DIR/.env"
+VERIFY_SCRIPT="$CONFIG_DIR/verify-install.sh"
+UPDATE_SCRIPT="$CONFIG_DIR/check-update.sh"
+INSTALLER_COPY="$CONFIG_DIR/install.sh"
 STATE_FILE="$CONFIG_DIR/install-state"
+RAW_BASE="https://raw.githubusercontent.com/thekozugroup/Cogwheel-DNS/main/scripts"
 RESOLVED_DROPIN=/etc/systemd/resolved.conf.d/10-cogwheel-stub-listener.conf
 RESOLV_BACKUP="$CONFIG_DIR/resolv.conf.pre-cogwheel"
+# Local tag used to name a previous image that has no registry digest, so a
+# rollback still has something to put in COGWHEEL_IMAGE.
+ROLLBACK_TAG="cogwheel-dns:rollback"
 
 ACTION=install
 PURGE=no
 SKIP_START=no
+FORCE_ENV=no
 
 # Populated as we go; consumed by rollback and by the state file.
 STATE_RESOLVED_DROPIN=no
@@ -68,6 +113,16 @@ STATE_RESOLV_PREV_TARGET=
 PREVIOUS_IMAGE=
 PREVIOUS_IMAGE_REF=
 FRESH_INSTALL=yes
+# Schema version of the image that was running before this run, and of the one
+# about to replace it, read from the io.cogwheel.schema-version OCI label. When
+# they differ the upgrade migrates the database in place, which changes what a
+# rollback means -- so the operator is told before it happens and told again if
+# it goes wrong. Empty means the label was absent (an image older than this
+# label, or a local build), and an unknown version is never reported as "no
+# change".
+PREVIOUS_SCHEMA=
+NEW_SCHEMA=
+MIGRATION_EXPECTED=unknown
 
 # How to tell the operator to run this script again.
 #
@@ -126,7 +181,7 @@ Options:
                         host   - real client IPs, per-device profiles work
                         bridge - isolated, but client IPs may be rewritten to
                                  the Docker gateway, which breaks per-device
-                                 profiles. See DEPLOYMENT.md.
+                                 profiles. See docs/DEPLOYMENT.md.
   --upstream LIST       Comma-separated upstream resolvers
                         (default: 1.1.1.1:53,1.0.0.1:53)
   --profile NAME        dev | home | smb (default: home)
@@ -135,7 +190,14 @@ Options:
                         nxdomain - as if the name did not exist
                         nodata   - NOERROR with no answers
                         refused  - REFUSED
+  --force-env           Regenerate /etc/cogwheel/.env from this run's flags.
+                        Without it an existing .env is kept and only missing
+                        keys are appended, so a re-run is not a reset.
   --no-start            Write configuration but do not start the container
+  --print-compose       Print the docker-compose.yml this run would write and
+                        exit. Reads nothing, writes nothing, needs no root --
+                        it is there so you can see the deployment before you
+                        accept it, and so CI can check the file parses.
   --fix-port-53         Only resolve the port-53 conflict, then exit
   --uninstall           Remove Cogwheel and revert host DNS changes
   --purge               With --uninstall, also delete the data volume
@@ -145,6 +207,15 @@ Options:
 Environment equivalents: COGWHEEL_IMAGE, COGWHEEL_CONTAINER_NAME,
 COGWHEEL_VOLUME_NAME, COGWHEEL_DNS_PORT, COGWHEEL_HTTP_PORT,
 COGWHEEL_NETWORK_MODE, COGWHEEL_UPSTREAM_SERVERS, COGWHEEL_PROFILE.
+
+This installer writes a Docker Compose project to /etc/cogwheel and starts it.
+Upgrading afterwards does not involve this script:
+
+  cd /etc/cogwheel
+  sudo docker compose pull && sudo docker compose up -d
+
+Rolling back is the same two commands with COGWHEEL_IMAGE in
+/etc/cogwheel/.env set to the tag you want back.
 USAGE
 }
 
@@ -160,7 +231,9 @@ parse_args() {
             --upstream)   UPSTREAM_SERVERS="${2:?--upstream needs a value}"; shift 2 ;;
             --profile)    PROFILE="${2:?--profile needs a value}"; shift 2 ;;
             --block-mode) BLOCK_MODE="${2:?--block-mode needs a value}"; shift 2 ;;
+            --force-env)  FORCE_ENV=yes; shift ;;
             --no-start)   SKIP_START=yes; shift ;;
+            --print-compose) ACTION=print-compose; shift ;;
             --fix-port-53) ACTION=fix-port-53; shift ;;
             --uninstall)  ACTION=uninstall; shift ;;
             --purge)      PURGE=yes; shift ;;
@@ -202,7 +275,7 @@ detect_platform() {
         die "Cogwheel's appliance install is Linux-only (found $PLATFORM_OS).
      Docker Desktop cannot bind host port 53 the way a DNS appliance needs.
      For a Mac or Windows workstation, run the dev profile instead:
-     see DEPLOYMENT.md section 'Local development'."
+     see docs/DEPLOYMENT.md section 'Local development'."
     fi
 
     case "$PLATFORM_ARCH" in
@@ -235,6 +308,42 @@ require_docker() {
      Then re-run this installer."
     fi
     step "Docker: $(docker version --format '{{.Server.Version}}' 2>/dev/null || echo present)"
+    require_compose
+}
+
+# Compose is not optional any more: the deployment this installer writes IS a
+# Compose project, and so is the documented upgrade. Checking for it here, with
+# the package name for each distribution, is the difference between a clear
+# stop before anything is changed and a failure two minutes in with the host's
+# resolver already rewritten.
+#
+# `compose` is defined as a function rather than a string so the v2 plugin and
+# the standalone v1 binary are called the same way everywhere below.
+require_compose() {
+    if docker compose version >/dev/null 2>&1; then
+        compose() { docker compose "$@"; }
+        step "Compose: $(docker compose version --short 2>/dev/null || echo v2)"
+    elif command -v docker-compose >/dev/null 2>&1; then
+        compose() { docker-compose "$@"; }
+        warn "using the standalone docker-compose; the v2 plugin is recommended"
+        step "Compose: $(docker-compose version --short 2>/dev/null || echo v1)"
+    else
+        die "the Docker Compose plugin is not installed.
+     Cogwheel is deployed as a Compose project, and so is every upgrade.
+     Install it:
+       Debian/Ubuntu  sudo apt-get install -y docker-compose-plugin
+       Fedora/RHEL    sudo dnf install -y docker-compose-plugin
+       Arch           sudo pacman -S docker-compose
+     Verify with:  docker compose version"
+    fi
+}
+
+# Every compose invocation runs from $CONFIG_DIR. Doing it in one place means
+# no call site can forget, and means .env is found for interpolation on Compose
+# versions that resolve it from the working directory rather than the project
+# directory. A subshell so the installer's own cwd is never moved.
+compose_here() {
+    ( cd "$CONFIG_DIR" && compose "$@" )
 }
 
 # $CONFIG_DIR holds the env file, the install state -- and the backup of
@@ -663,6 +772,104 @@ detect_advertised_targets() {
 # --------------------------------------------------------------------------
 # Install
 # --------------------------------------------------------------------------
+
+# .env
+#
+# This file belongs to the operator, not to the installer. A second run fills
+# in keys that are missing and leaves every key that is present exactly as it
+# was found, which is what makes re-running this script safe rather than a
+# silent reset of every choice made at first install.
+#
+# The old behaviour -- regenerate the whole file from this run's flags -- meant
+# a box installed with `--upstream 9.9.9.9:53` reverted to 1.1.1.1 the next
+# time anyone ran the installer, and any DNS-over-TLS upstream added by hand
+# was erased. Nothing reported it. --force-env is the way to ask for the reset
+# deliberately.
+env_get() {
+    [ -f "$ENV_FILE" ] || return 1
+    _v=$(sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1)
+    [ -n "${_v:-}" ] || return 1
+    printf '%s\n' "$_v"
+}
+
+env_has() { [ -f "$ENV_FILE" ] && grep -q "^$1=" "$ENV_FILE" 2>/dev/null; }
+
+env_append() {
+    printf '%s=%s\n' "$1" "$2" >> "$ENV_FILE"
+    step "Added $1 to $ENV_FILE"
+}
+
+# On an upgrade the file on disk is the authority for anything that decides how
+# the container is built, and it has to win BEFORE the port check and before
+# the compose file is written -- otherwise the installer probes one port and
+# starts another, or writes a bridge compose file for a host-mode install.
+# Carry a pre-Compose install's configuration forward.
+#
+# Installer 1.x wrote /etc/cogwheel/cogwheel.env and passed it to `docker run
+# --env-file`. The Compose deployment reads `.env` in the same directory
+# instead, and writing a fresh one beside the old file would silently revert
+# every upstream, block mode and advertised target that install chose -- the
+# exact failure this release exists to stop, reintroduced by the fix for it.
+#
+# Only the Docker installer's file is taken. install-native.sh writes a file of
+# the same name for the systemd deployment, and that one belongs to a running
+# service: it names a host database path and the web asset directory, neither
+# of which exists inside a container. Both markers are checked, not one.
+migrate_legacy_env_file() {
+    _legacy="$CONFIG_DIR/cogwheel.env"
+    [ -f "$ENV_FILE" ] && return 0
+    [ -r "$_legacy" ] || return 0
+    grep -q '^COGWHEEL_STORAGE__DATABASE_URL=sqlite:///app/data/' "$_legacy" || return 0
+    grep -q '^COGWHEEL_WEB_DIST_DIR=' "$_legacy" && return 0
+
+    {
+        printf '# Cogwheel DNS. Carried over from %s by install.sh %s.\n' \
+            "$_legacy" "$COGWHEEL_INSTALLER_VERSION"
+        printf '# The deployment is a Compose project now; this file is the one Compose\n'
+        printf '# reads, and it is yours to edit. See .env.example for every option.\n'
+        printf '#\n'
+        printf '#   cd %s && docker compose up -d     # apply a change\n' "$CONFIG_DIR"
+        printf '\n'
+        grep -v '^#' "$_legacy" | grep -v '^[[:space:]]*$'
+    } > "$ENV_FILE"
+    chmod 0644 "$ENV_FILE"
+    mv "$_legacy" "$_legacy.migrated"
+    step "Carried your settings over from cogwheel.env into $ENV_FILE"
+    step "  (the old file is kept as $_legacy.migrated)"
+}
+
+adopt_existing_env() {
+    migrate_legacy_env_file
+    [ -f "$ENV_FILE" ] || return 0
+
+    _v=$(env_get COGWHEEL_IMAGE || true)
+    if [ -n "${_v:-}" ] && [ "$_v" != "$IMAGE" ] && [ "$FORCE_ENV" = no ]; then
+        step "Keeping the image pinned in $ENV_FILE: $_v"
+        IMAGE=$_v
+    fi
+    _v=$(env_get COGWHEEL_CONTAINER_NAME || true); [ -n "${_v:-}" ] && CONTAINER_NAME=$_v
+    _v=$(env_get COGWHEEL_VOLUME_NAME || true);    [ -n "${_v:-}" ] && VOLUME_NAME=$_v
+    _v=$(env_get COGWHEEL_SERVER__ADVERTISED_DNS_PORT || true); [ -n "${_v:-}" ] && DNS_PORT=$_v
+
+    # Which network mode this install uses is recorded in the bind address, not
+    # in a flag: host mode binds the real DNS port, bridge mode always binds
+    # 5353 inside the container. Reading it back from the file is what stops a
+    # re-run without --network from quietly rebuilding a bridge install as a
+    # host one.
+    _v=$(env_get COGWHEEL_SERVER__DNS_UDP_BIND_ADDR || true)
+    if [ -n "${_v:-}" ]; then
+        case "$_v" in
+            *:5353) NETWORK_MODE=bridge ;;
+            *)      NETWORK_MODE=host ;;
+        esac
+    fi
+    _v=$(env_get COGWHEEL_SERVER__HTTP_BIND_ADDR || true)
+    if [ -n "${_v:-}" ] && [ "$NETWORK_MODE" = host ]; then
+        HTTP_PORT=${_v##*:}
+    fi
+    return 0
+}
+
 write_env_file() {
     ensure_config_dir
 
@@ -676,23 +883,316 @@ write_env_file() {
         _http_bind="0.0.0.0:8080"
     fi
 
-    # Written fresh each run: the installer owns this file. Operator edits
-    # belong in a docker-compose deployment, not here.
+    if [ -f "$ENV_FILE" ] && [ "$FORCE_ENV" = no ]; then
+        # Upgrade: fill gaps only. A key that is present is the operator's.
+        env_has COGWHEEL_IMAGE          || env_append COGWHEEL_IMAGE "$IMAGE"
+        env_has COGWHEEL_CONTAINER_NAME || env_append COGWHEEL_CONTAINER_NAME "$CONTAINER_NAME"
+        env_has COGWHEEL_VOLUME_NAME    || env_append COGWHEEL_VOLUME_NAME "$VOLUME_NAME"
+        env_has COGWHEEL_PROFILE        || env_append COGWHEEL_PROFILE "$PROFILE"
+        env_has COGWHEEL_SERVER__HTTP_BIND_ADDR    || env_append COGWHEEL_SERVER__HTTP_BIND_ADDR "$_http_bind"
+        env_has COGWHEEL_SERVER__DNS_UDP_BIND_ADDR || env_append COGWHEEL_SERVER__DNS_UDP_BIND_ADDR "$_dns_bind"
+        env_has COGWHEEL_SERVER__DNS_TCP_BIND_ADDR || env_append COGWHEEL_SERVER__DNS_TCP_BIND_ADDR "$_dns_bind"
+        env_has COGWHEEL_SERVER__ADVERTISED_DNS_PORT    || env_append COGWHEEL_SERVER__ADVERTISED_DNS_PORT "$DNS_PORT"
+        env_has COGWHEEL_SERVER__ADVERTISED_DNS_TARGETS || env_append COGWHEEL_SERVER__ADVERTISED_DNS_TARGETS "$ADVERTISED_TARGETS"
+        env_has COGWHEEL_STORAGE__DATABASE_URL || env_append COGWHEEL_STORAGE__DATABASE_URL "sqlite:///app/data/cogwheel.db"
+        env_has COGWHEEL_UPSTREAM__SERVERS     || env_append COGWHEEL_UPSTREAM__SERVERS "$UPSTREAM_SERVERS"
+        env_has COGWHEEL_BLOCKING__MODE        || env_append COGWHEEL_BLOCKING__MODE "$BLOCK_MODE"
+        env_has COGWHEEL_CPU_LIMIT             || env_append COGWHEEL_CPU_LIMIT "$CPU_LIMIT"
+        env_has COGWHEEL_MEMORY_LIMIT          || env_append COGWHEEL_MEMORY_LIMIT "$MEMORY_LIMIT"
+        env_has COGWHEEL_MEMORY_RESERVATION    || env_append COGWHEEL_MEMORY_RESERVATION "$MEMORY_RESERVATION"
+        env_has COGWHEEL_STOP_GRACE_PERIOD     || env_append COGWHEEL_STOP_GRACE_PERIOD "$STOP_GRACE_PERIOD"
+        if [ "$NETWORK_MODE" = bridge ]; then
+            env_has COGWHEEL_DNS_HOST_PORT  || env_append COGWHEEL_DNS_HOST_PORT "$DNS_PORT"
+            env_has COGWHEEL_HTTP_HOST_PORT || env_append COGWHEEL_HTTP_HOST_PORT "$HTTP_PORT"
+        fi
+        step "Kept your $ENV_FILE (--force-env regenerates it)"
+        return 0
+    fi
+
     cat > "$ENV_FILE" <<EOF
-# Generated by the Cogwheel installer $COGWHEEL_INSTALLER_VERSION -- do not edit.
-# Re-running scripts/install.sh overwrites this file.
+# Cogwheel DNS. Written by install.sh $COGWHEEL_INSTALLER_VERSION on $(date -u '+%Y-%m-%d %H:%M:%S UTC').
+#
+# This file is yours to edit. Re-running the installer fills in keys that are
+# missing and never overwrites one that is here, so nothing below is lost on an
+# upgrade. Apply a change with:
+#
+#   cd $CONFIG_DIR && docker compose up -d
+#
+# The full annotated set, with every optional variable, is at
+# https://github.com/thekozugroup/Cogwheel-DNS/blob/main/.env.example
+
+# --- Image -----------------------------------------------------------------
+# A moving tag is what makes 'docker compose pull' an upgrade, and it is the
+# only thing an Unraid-style update check can compare against. Pin an exact
+# release here if you would rather review each one first -- and pin the
+# previous release here to roll back.
+COGWHEEL_IMAGE=$IMAGE
+COGWHEEL_CONTAINER_NAME=$CONTAINER_NAME
+COGWHEEL_VOLUME_NAME=$VOLUME_NAME
+
+# --- Server ----------------------------------------------------------------
 COGWHEEL_PROFILE=$PROFILE
 COGWHEEL_SERVER__HTTP_BIND_ADDR=$_http_bind
 COGWHEEL_SERVER__DNS_UDP_BIND_ADDR=$_dns_bind
 COGWHEEL_SERVER__DNS_TCP_BIND_ADDR=$_dns_bind
+# The port CLIENTS use, which is not necessarily the one the process bound.
 COGWHEEL_SERVER__ADVERTISED_DNS_PORT=$DNS_PORT
+# What the Overview page tells you to type into your router. Detected from this
+# host's own interfaces at install time; edit if it picked the wrong one.
 COGWHEEL_SERVER__ADVERTISED_DNS_TARGETS=$ADVERTISED_TARGETS
 COGWHEEL_STORAGE__DATABASE_URL=sqlite:///app/data/cogwheel.db
+
+# --- Upstream resolvers ----------------------------------------------------
+# Cleartext by default, because it works on every network. That also means the
+# name of every site every device here looks up is readable by your ISP. To
+# encrypt, replace both entries with a DNS-over-TLS pair, for example:
+#   tls://1.1.1.1#cloudflare-dns.com,tls://1.0.0.1#cloudflare-dns.com
 COGWHEEL_UPSTREAM__SERVERS=$UPSTREAM_SERVERS
+
+# --- Blocking --------------------------------------------------------------
+# null_ip | nxdomain | nodata | refused
 COGWHEEL_BLOCKING__MODE=$BLOCK_MODE
+
+# --- Compose-level knobs (not read by the server) --------------------------
+COGWHEEL_CPU_LIMIT=$CPU_LIMIT
+COGWHEEL_MEMORY_LIMIT=$MEMORY_LIMIT
+COGWHEEL_MEMORY_RESERVATION=$MEMORY_RESERVATION
+COGWHEEL_STOP_GRACE_PERIOD=$STOP_GRACE_PERIOD
 EOF
+
+    if [ "$NETWORK_MODE" = bridge ]; then
+        cat >> "$ENV_FILE" <<EOF
+
+# Host ports published by the bridge-mode compose file.
+COGWHEEL_DNS_HOST_PORT=$DNS_PORT
+COGWHEEL_HTTP_HOST_PORT=$HTTP_PORT
+EOF
+    fi
+
     chmod 0644 "$ENV_FILE"
     step "Wrote $ENV_FILE"
+}
+
+# docker-compose.yml
+#
+# Static: every value it needs comes from .env beside it, so this file is
+# byte-identical on every run and an upgrade has nothing to diff. Written with
+# a quoted heredoc so ${...} reaches Compose intact rather than being expanded
+# by this shell.
+#
+# It is also deliberately the same shape as the repository's docker-compose.yml
+# -- one image, one named volume, the same hardening -- so that what is
+# documented for a Compose install is true for an installer install too.
+write_compose_file() {
+    ensure_config_dir
+
+    cat > "$COMPOSE_FILE.tmp" <<'COMPOSE_HEAD'
+# Cogwheel DNS. Written by install.sh -- edit .env beside this file, not this.
+#
+# Upgrade:
+#   cd /etc/cogwheel && sudo docker compose pull && sudo docker compose up -d
+#
+# Roll back:
+#   set COGWHEEL_IMAGE in .env to the tag you want, then the two commands above.
+#
+# There is no `build:` block here on purpose: Compose builds a missing image
+# when a service declares both `image:` and `build:`, which on a Raspberry Pi
+# turns a thirty-second update into a multi-hour Rust compile.
+
+name: cogwheel
+
+services:
+  cogwheel:
+    image: ${COGWHEEL_IMAGE:-ghcr.io/thekozugroup/cogwheel-dns:latest}
+    container_name: ${COGWHEEL_CONTAINER_NAME:-cogwheel}
+    restart: unless-stopped
+COMPOSE_HEAD
+
+    if [ "$NETWORK_MODE" = host ]; then
+        cat >> "$COMPOSE_FILE.tmp" <<'COMPOSE_NET'
+
+    # Host networking: the DNS sockets are bound on the host's own interfaces,
+    # so the source address of every query is the real LAN client. That is what
+    # makes per-device profiles work -- Cogwheel identifies a device by the
+    # source IP of its query. Under Docker's bridge NAT that address is often
+    # rewritten to the gateway, and every device in the house then looks like
+    # one client.
+    network_mode: host
+COMPOSE_NET
+    else
+        cat >> "$COMPOSE_FILE.tmp" <<'COMPOSE_NET'
+
+    # Bridge networking, chosen with --network bridge. Isolated, but inbound
+    # queries traverse Docker's NAT path and the source address the container
+    # sees is frequently rewritten to the bridge gateway (172.x.0.1). When that
+    # happens every device looks like one client and per-device profiles
+    # silently collapse to the household policy -- no error, just wrong
+    # behaviour. Check the Activity page attributes a query from a second
+    # machine to that machine, not to the gateway.
+    ports:
+      - "${COGWHEEL_DNS_HOST_PORT:-53}:5353/udp"
+      - "${COGWHEEL_DNS_HOST_PORT:-53}:5353/tcp"
+      - "${COGWHEEL_HTTP_HOST_PORT:-8080}:8080/tcp"
+COMPOSE_NET
+    fi
+
+    cat >> "$COMPOSE_FILE.tmp" <<'COMPOSE_TAIL'
+
+    env_file:
+      - path: .env
+        required: false
+
+    volumes:
+      # Named volume, not a bind mount: the image creates /app/data owned by
+      # uid 10001 and Docker copies that ownership onto a fresh named volume.
+      # A bind mount would come up root-owned and the non-root process could
+      # not open the database.
+      - cogwheel-data:/app/data
+
+    # Drop everything, then add back the one capability the image needs. The
+    # binary carries cap_net_bind_service=+ep as a FILE capability, and because
+    # its effective bit is set, execve(2) returns EPERM when the capability is
+    # missing from the bounding set. Removing this does not merely lose the
+    # low-port bind -- the container will not exec at all, under either network
+    # mode.
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+
+    init: true
+
+    # Sized for the one stop that is not instant: an upgrade that migrates the
+    # database takes a VACUUM INTO copy of it first, before the server has a
+    # shutdown handler installed. This is a ceiling, not a delay.
+    stop_grace_period: ${COGWHEEL_STOP_GRACE_PERIOD:-60s}
+
+    deploy:
+      resources:
+        limits:
+          cpus: ${COGWHEEL_CPU_LIMIT:-2.0}
+          memory: ${COGWHEEL_MEMORY_LIMIT:-1024M}
+        reservations:
+          memory: ${COGWHEEL_MEMORY_RESERVATION:-192M}
+
+    # Bounded on purpose: unrotated logs on an appliance fill the SD card, and
+    # a full disk takes DNS down for the whole house.
+    logging:
+      driver: json-file
+      options:
+        max-size: ${COGWHEEL_LOG_MAX_SIZE:-10m}
+        max-file: "${COGWHEEL_LOG_MAX_FILE:-3}"
+
+    # Watchtower: watch and report, do not replace. Watchtower's update is
+    # stop -> pull -> start on a timer with no health gate, so a release that
+    # starts, migrates the database, fails and crash-loops is recorded as a
+    # successful update -- at 04:00, on the box that resolves every name in the
+    # house. This keeps the half that helps and drops the half that does not.
+    #
+    # The migration itself is crash-safe: it is one Immediate transaction, so a
+    # kill partway through rolls it back. What this guards is going BACK across
+    # a schema change, which needs the .pre-vN copy restored first.
+    #
+    # Set to "false" to opt in to automatic updates.
+    labels:
+      com.centurylinklabs.watchtower.monitor-only: "true"
+
+volumes:
+  cogwheel-data:
+    # Named explicitly rather than left to Compose's <project>_<volume>
+    # convention, so an existing install's volume is adopted rather than a new
+    # empty one created beside it.
+    name: ${COGWHEEL_VOLUME_NAME:-cogwheel-data}
+COMPOSE_TAIL
+
+    mv "$COMPOSE_FILE.tmp" "$COMPOSE_FILE"
+    chmod 0644 "$COMPOSE_FILE"
+    step "Wrote $COMPOSE_FILE"
+}
+
+# Helper scripts, placed on the host.
+#
+# docs/DEPLOYMENT.md ends the upgrade procedure with verify-install.sh, and until now
+# that was a command most hosts could not run: a `curl | sudo sh` install has no
+# checkout, and neither does an Unraid or Compose-only host. Copy from a
+# checkout when there is one, fetch when there is not, and never fail an install
+# over it -- these are conveniences, not the product.
+install_helper_scripts() {
+    ensure_config_dir
+    for _name in install.sh verify-install.sh check-update.sh; do
+        install_one_script "$_name"
+    done
+
+    # Now that a copy of this script exists at a fixed path, prefer it for
+    # anything the operator is told to run later. The advertised install is
+    # `curl … | sudo sh`, and a script read from a pipe has no path -- $0 is
+    # the shell's own name -- which is why the uninstall instruction used to be
+    # a curl one-liner against main. A local copy is shorter, needs no network,
+    # and is the same script that made the changes it is being asked to undo.
+    [ -x "$INSTALLER_COPY" ] && SELF_CMD="sudo $INSTALLER_COPY"
+    return 0
+}
+
+install_one_script() {
+    _name=$1
+    _dest="$CONFIG_DIR/$_name"
+    # Where this script was read from, if it was read from anywhere: the
+    # advertised install is `curl … | sudo sh`, and a script arriving down a
+    # pipe has no path at all -- $0 is the shell's own name. Resolved to an
+    # absolute path so the "am I already the installed copy?" test below is a
+    # string comparison rather than a guess. -ef would be the natural test and
+    # is not POSIX.
+    _src=""
+    _dir=""
+    case "$0" in
+        */*) _dir=$(CDPATH='' cd -- "${0%/*}" 2>/dev/null && pwd || printf '') ;;
+    esac
+    if [ -n "$_dir" ] && [ -r "$_dir/$_name" ]; then
+        _src="$_dir/$_name"
+    fi
+
+    # Re-running the installed copy: source and destination are the same file
+    # and `cp` would refuse. There is nothing to do and nothing is wrong.
+    if [ "$_src" = "$_dest" ]; then
+        return 0
+    fi
+
+    if [ -n "$_src" ]; then
+        if cp "$_src" "$_dest" && chmod 0755 "$_dest"; then
+            step "Copied $_name to $_dest"
+            return 0
+        fi
+    else
+        if command -v curl >/dev/null 2>&1; then
+            curl -fsSL "$RAW_BASE/$_name" -o "$_dest.tmp" 2>/dev/null || true
+        elif command -v wget >/dev/null 2>&1; then
+            wget -q -O "$_dest.tmp" "$RAW_BASE/$_name" 2>/dev/null || true
+        fi
+
+        # A truncated download is worse than no download: it would be run by
+        # somebody following the docs after an upgrade. Check it is a shell
+        # script before letting it take the name.
+        if [ -s "$_dest.tmp" ] && head -n 1 "$_dest.tmp" | grep -q '^#!/bin/sh'; then
+            mv "$_dest.tmp" "$_dest"
+            chmod 0755 "$_dest"
+            step "Fetched $_name to $_dest"
+            return 0
+        fi
+        rm -f "$_dest.tmp"
+    fi
+
+    warn "could not place $_name in $CONFIG_DIR; that check will need a checkout.
+         Everything else is unaffected."
+    return 0
 }
 
 # Every key is STATE_-prefixed on purpose. This file gets sourced by
@@ -747,6 +1247,11 @@ STATE_INSTALLER_VERSION=$COGWHEEL_INSTALLER_VERSION
 STATE_CONTAINER_NAME=$CONTAINER_NAME
 STATE_VOLUME_NAME=$VOLUME_NAME
 STATE_IMAGE=$IMAGE
+STATE_COMPOSE_FILE=$COMPOSE_FILE
+# The schema version the running image understands, from its OCI label. Kept so
+# a later run, or a person reading this file, can tell what a rollback across
+# this point would mean without having to pull an image to find out.
+STATE_SCHEMA_VERSION=$NEW_SCHEMA
 STATE_NETWORK_MODE=$NETWORK_MODE
 STATE_DNS_PORT=$DNS_PORT
 STATE_HTTP_PORT=$HTTP_PORT
@@ -799,59 +1304,117 @@ remember_previous() {
         PREVIOUS_IMAGE=$(docker container inspect --format '{{.Image}}' "$CONTAINER_NAME" 2>/dev/null || printf '')
         PREVIOUS_IMAGE_REF=$(docker container inspect --format '{{.Config.Image}}' "$CONTAINER_NAME" 2>/dev/null || printf '')
         step "Existing install found (image: ${PREVIOUS_IMAGE_REF:-unknown}) -- upgrading in place"
+        adopt_legacy_container
     fi
 }
 
-start_container() {
+# A container this installer created before version 2.0.0 was made by
+# `docker run`, so it carries none of Compose's project labels. `docker compose
+# up -d` will not adopt it -- it fails outright with "container name is already
+# in use". Remove it here, after remember_previous has recorded its image, so
+# the same rollback still works. The data volume is untouched: it is a named
+# volume and the compose file names it explicitly.
+adopt_legacy_container() {
+    _project=$(docker container inspect \
+        --format '{{index .Config.Labels "com.docker.compose.project"}}' \
+        "$CONTAINER_NAME" 2>/dev/null || printf '')
+    [ -n "$_project" ] && return 0
+
+    step "'$CONTAINER_NAME' predates the Compose deployment; replacing it"
+    step "  (the data volume '$VOLUME_NAME' is named explicitly and is carried over)"
     docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+}
 
-    # Split into a positional set so the two network modes share one run call.
-    set -- \
-        --name "$CONTAINER_NAME" \
-        --detach \
-        --restart unless-stopped \
-        --env-file "$ENV_FILE" \
-        --volume "$VOLUME_NAME:/app/data" \
-        --cap-drop ALL \
-        --cap-add NET_BIND_SERVICE \
-        --read-only \
-        --tmpfs /tmp:rw,noexec,nosuid,size=64m \
-        --init \
-        --stop-timeout 20 \
-        --ulimit nofile=65535:65535 \
-        --cpus "$CPU_LIMIT" \
-        --memory "$MEMORY_LIMIT" \
-        --memory-reservation "$MEMORY_RESERVATION" \
-        --log-driver json-file \
-        --log-opt max-size=10m \
-        --log-opt max-file=3 \
-        --label io.cogwheel.installed-by="install.sh/$COGWHEEL_INSTALLER_VERSION"
+# The schema version each image understands, from its OCI label. This is what
+# lets the installer say, BEFORE it starts anything, whether this upgrade
+# migrates the database -- and lets the rollback path stop claiming the volume
+# was untouched when it was.
+image_schema_version() {
+    docker image inspect --format '{{index .Config.Labels "io.cogwheel.schema-version"}}' \
+        "$1" 2>/dev/null || printf ''
+}
 
-    if [ "$NETWORK_MODE" = host ]; then
-        set -- "$@" --network host
-    else
-        set -- "$@" \
-            --publish "$DNS_PORT:5353/udp" \
-            --publish "$DNS_PORT:5353/tcp" \
-            --publish "$HTTP_PORT:8080/tcp"
+detect_migration() {
+    NEW_SCHEMA=$(image_schema_version "$IMAGE")
+    if [ "$FRESH_INSTALL" = yes ]; then
+        MIGRATION_EXPECTED=no
+        return 0
+    fi
+    [ -n "$PREVIOUS_IMAGE" ] && PREVIOUS_SCHEMA=$(image_schema_version "$PREVIOUS_IMAGE")
+
+    if [ -z "$PREVIOUS_SCHEMA" ] || [ -z "$NEW_SCHEMA" ]; then
+        # One of the two images does not carry the label. Saying "no migration"
+        # here would be a guess dressed as a fact, and the whole value of this
+        # check is that it is not one.
+        MIGRATION_EXPECTED=unknown
+        return 0
+    fi
+    if [ "$PREVIOUS_SCHEMA" = "$NEW_SCHEMA" ]; then
+        MIGRATION_EXPECTED=no
+        step "Schema version unchanged (v$NEW_SCHEMA) -- this upgrade does not migrate the database"
+        return 0
     fi
 
-    # `docker run` can be refused by the daemon rather than by Cogwheel -- an
-    # unavailable ulimit, a cgroup the host does not support, a name clash, a
-    # seccomp/apparmor denial. Under `set -e` an unchecked failure here killed
-    # the installer outright: no explanation, and no rollback, even though the
-    # port-53 fix had ALREADY edited this host's resolver configuration. That
-    # left a box with a rewritten /etc/resolv.conf, no Cogwheel, and a bare
-    # exit code. Return instead, so do_install can roll the host back.
-    #
-    # `2>&1 >/dev/null` in that order: stderr to the capture, stdout to the
-    # bin. The reverse would capture the container id and discard the error.
-    if ! _run_err=$(docker run "$@" "$IMAGE" 2>&1 >/dev/null); then
-        err "the Docker daemon refused to start the container:"
-        printf '%s\n' "$_run_err" | sed 's/^/       /' >&2
+    MIGRATION_EXPECTED=yes
+    warn "this upgrade migrates the database: schema v$PREVIOUS_SCHEMA -> v$NEW_SCHEMA."
+    warn "the migration happens in place and leaves a copy of the old file at"
+    warn "  /app/data/cogwheel.db.pre-v$NEW_SCHEMA  (inside the volume '$VOLUME_NAME')"
+    warn "going back to $PREVIOUS_IMAGE_REF afterwards means restoring that copy first:"
+    warn "  the older build refuses to open a database it does not recognise, and"
+    warn "  'restart: unless-stopped' turns that refusal into a crash loop."
+    return 0
+}
+
+# Start (or replace) the container through Compose.
+#
+# This is the one place the deployment is created, and it runs the same command
+# the operator will run for every upgrade from here on -- so if this works, the
+# documented upgrade works. Compose reconciles: an already-correct container is
+# left alone, a changed image or setting recreates it.
+compose_up() {
+    if ! _up_err=$(compose_here up -d --remove-orphans 2>&1 >/dev/null); then
+        err "docker compose up failed:"
+        printf '%s\n' "$_up_err" | sed 's/^/       /' >&2
+        err "the usual causes are a port still held by something else and a bad"
+        err "value in $ENV_FILE. The project is at $CONFIG_DIR."
         return 1
     fi
-    step "Started container '$CONTAINER_NAME'"
+    step "Started the Compose project in $CONFIG_DIR"
+}
+
+# Rewrite one key in .env in place, keeping every other line. Used by the
+# rollback path, which has to change the image the project runs without
+# touching the upstreams, block mode or anything else the operator set.
+set_env_key() {
+    [ -f "$ENV_FILE" ] || return 1
+    _k=$1
+    _v=$2
+    _tmp="$ENV_FILE.tmp"
+    if grep -q "^$_k=" "$ENV_FILE" 2>/dev/null; then
+        # The value can contain '/' and '@' (an image digest does), so use a
+        # separator that cannot appear in an image reference.
+        sed "s|^$_k=.*|$_k=$_v|" "$ENV_FILE" > "$_tmp" && mv "$_tmp" "$ENV_FILE"
+    else
+        printf '%s=%s\n' "$_k" "$_v" >> "$ENV_FILE"
+    fi
+    chmod 0644 "$ENV_FILE"
+}
+
+# An immutable reference to the image that was running before this run.
+#
+# NOT the tag it was started from: `docker pull` has already repointed that tag
+# at the new image by the time anything can fail, so rolling back "to :latest"
+# would re-run the image that just failed. A registry digest is the same bytes
+# forever and can still be pulled on another host. When there is no digest --
+# an image built locally and never pushed -- fall back to a local tag pinned to
+# the image id, and say so, because that reference only means anything here.
+previous_pin() {
+    _pin=$(docker image inspect --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' \
+        "$PREVIOUS_IMAGE" 2>/dev/null || printf '')
+    if [ -z "$_pin" ] && docker tag "$PREVIOUS_IMAGE" "$ROLLBACK_TAG" >/dev/null 2>&1; then
+        _pin=$ROLLBACK_TAG
+    fi
+    printf '%s' "$_pin"
 }
 
 wait_for_health() {
@@ -929,6 +1492,49 @@ probe_dns() {
     fi
 }
 
+# What to say about the data volume when an install or upgrade has failed.
+#
+# The old text was one line -- "Your data volume was not touched" -- printed in
+# exactly the case where it can be false. By the time rollback runs, the new
+# image has already booted (wait_for_health ran first), and if that release
+# migrates the schema it has already rewritten the database in place. The old
+# build then refuses to open it, `restart: unless-stopped` turns the refusal
+# into a crash loop, and the household has no DNS while being told nothing
+# happened to their data.
+#
+# So: say what is true for the case at hand, and say where the copy is.
+say_volume_state() {
+    case "$MIGRATION_EXPECTED" in
+        no)
+            err "Your data volume '$VOLUME_NAME' was not touched: this release does not"
+            err "change the database schema." ;;
+        yes)
+            err "Your data is intact but MIGRATED: this release upgraded the database"
+            err "from schema v$PREVIOUS_SCHEMA to v$NEW_SCHEMA before it failed, in place."
+            err "A copy of the old file is on the volume at:"
+            err "    /app/data/cogwheel.db.pre-v$NEW_SCHEMA"
+            err "Restore it before running the older image again -- that build refuses to"
+            err "open a v$NEW_SCHEMA database and will crash-loop instead."
+            err ""
+            err "The write-ahead log has to go with it. A -wal left behind by the v$NEW_SCHEMA"
+            err "database would be replayed onto the restored v$PREVIOUS_SCHEMA file on first"
+            err "open, which is how a careful rollback turns into a corrupt database:"
+            err "    docker run --rm -v $VOLUME_NAME:/data --entrypoint /bin/sh $IMAGE \\"
+            err "      -c 'rm -f /data/cogwheel.db-wal /data/cogwheel.db-shm &&"
+            err "          cp /data/cogwheel.db.pre-v$NEW_SCHEMA /data/cogwheel.db'"
+            err ""
+            err "(That image and no other: it runs as uid 10001, so the restored file is"
+            err "owned by the user that has to open it. A root-owned copy would not be.)" ;;
+        *)
+            err "Nothing was deleted from the data volume '$VOLUME_NAME'."
+            err "One of these two images carries no schema-version label, so whether this"
+            err "upgrade migrated the database could not be established. Check for a"
+            err "cogwheel.db.pre-v* file on the volume before running an older image:"
+            err "    docker run --rm -v $VOLUME_NAME:/data --entrypoint /bin/sh $IMAGE \\"
+            err "      -c 'ls -la /data'" ;;
+    esac
+}
+
 rollback() {
     err "Install failed -- rolling back"
 
@@ -944,7 +1550,10 @@ rollback() {
         printf '\n%sThe container was never created, so there are no logs.%s\n\n' "$C_BOLD" "$C_RESET" >&2
     fi
 
-    docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    # Stop the project rather than only removing the container: the container
+    # carries `restart: unless-stopped`, so a `docker rm -f` alone can race the
+    # daemon into restarting a crash-looping image.
+    compose_here down --remove-orphans >/dev/null 2>&1 || docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
 
     # The previous image is addressed by digest, so this is a genuinely
     # different image from the one that just failed. Both conditions are
@@ -956,22 +1565,58 @@ rollback() {
     if [ "$FRESH_INSTALL" = no ] && [ -n "$PREVIOUS_IMAGE" ] &&
        [ "$PREVIOUS_IMAGE" != "$IMAGE" ] &&
        docker image inspect "$PREVIOUS_IMAGE" >/dev/null 2>&1; then
-        warn "restoring the previous image: ${PREVIOUS_IMAGE_REF:-$PREVIOUS_IMAGE} ($PREVIOUS_IMAGE)"
+
+        # A rollback across a schema change cannot work: the older build reads
+        # `user_version` and refuses a database from a newer one. Starting it
+        # anyway would produce a crash loop and a second 180-second wait on a
+        # box whose household already has no DNS. Stop, and hand over the two
+        # facts that get it back -- where the snapshot is, and what to run.
+        if [ "$MIGRATION_EXPECTED" = yes ]; then
+            err "Not restarting the previous image automatically."
+            err "This upgrade migrated the database to schema v$NEW_SCHEMA, and"
+            err "${PREVIOUS_IMAGE_REF:-the previous image} only understands v$PREVIOUS_SCHEMA."
+            err "It would refuse to open the database and crash-loop."
+            printf '\n' >&2
+            say_volume_state
+            printf '\n' >&2
+            err "Then pin the old release and bring it back up:"
+            err "    cd $CONFIG_DIR"
+            err "    sudo sed -i 's|^COGWHEEL_IMAGE=.*|COGWHEEL_IMAGE=$(previous_pin)|' .env"
+            err "    sudo docker compose up -d"
+            err "This host is NOT serving DNS until then. Point your router back at its"
+            err "previous resolver in the meantime."
+            exit 1
+        fi
+
+        _pin=$(previous_pin)
+        if [ -z "$_pin" ]; then
+            err "The previous image has no reference this script can pin to."
+            err "Roll back by hand: set COGWHEEL_IMAGE in $ENV_FILE to a known-good"
+            err "tag and run:  cd $CONFIG_DIR && sudo docker compose up -d"
+            say_volume_state
+            exit 1
+        fi
+
+        warn "restoring the previous image: ${PREVIOUS_IMAGE_REF:-$PREVIOUS_IMAGE} ($_pin)"
         _failed_image=$IMAGE
-        IMAGE=$PREVIOUS_IMAGE
-        if start_container && wait_for_health; then
-            IMAGE=$_failed_image
-            err "Rolled back to ${PREVIOUS_IMAGE_REF:-$PREVIOUS_IMAGE}, which is healthy. The new image ($_failed_image) did not start."
-            err "Your data volume '$VOLUME_NAME' was not touched."
+        set_env_key COGWHEEL_IMAGE "$_pin"
+        IMAGE=$_pin
+        if compose_up && wait_for_health; then
+            err "Rolled back to ${PREVIOUS_IMAGE_REF:-$PREVIOUS_IMAGE}, which is healthy."
+            err "The new image ($_failed_image) did not start."
+            err "$ENV_FILE now pins COGWHEEL_IMAGE=$_pin, so the next"
+            err "'docker compose pull && docker compose up -d' will NOT move you forward"
+            err "again. Put a tag back there when the problem is fixed."
+            say_volume_state
             exit 1
         fi
         IMAGE=$_failed_image
         # Say the true thing. This used to claim "Container removed." while
-        # leaving a container behind with --restart unless-stopped, i.e. a
+        # leaving a container behind with `restart: unless-stopped`, i.e. a
         # crash loop the operator had just been told did not exist.
-        docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
-        err "Rollback to ${PREVIOUS_IMAGE_REF:-$PREVIOUS_IMAGE} also failed; the container has been removed."
-        err "Your data volume '$VOLUME_NAME' is intact; nothing was deleted."
+        compose_here down --remove-orphans >/dev/null 2>&1 || docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+        err "Rollback to ${PREVIOUS_IMAGE_REF:-$PREVIOUS_IMAGE} also failed; the project has been stopped."
+        say_volume_state
         err "This host is NOT serving DNS. Point your router back at its previous"
         err "resolver, then investigate with:  docker logs $CONTAINER_NAME"
         exit 1
@@ -986,8 +1631,12 @@ rollback() {
         if [ -n "$PREVIOUS_IMAGE" ]; then
             err "The image this install was running ($PREVIOUS_IMAGE) is no longer in the local store."
         fi
-        err "Your data volume '$VOLUME_NAME' is intact; nothing was deleted."
-        err "Reinstall a known-good version with:  $SELF_CMD --image <ref>"
+        say_volume_state
+        err "Pin a known-good release and bring it back up:"
+        err "    cd $CONFIG_DIR"
+        err "    sudo sed -i 's|^COGWHEEL_IMAGE=.*|COGWHEEL_IMAGE=ghcr.io/thekozugroup/cogwheel-dns:VERSION|' .env"
+        err "    sudo docker compose pull && sudo docker compose up -d"
+        err "Releases: https://github.com/thekozugroup/Cogwheel-DNS/releases"
         exit 1
     fi
 
@@ -1066,9 +1715,28 @@ print_success() {
     printf '\n'
     # Every command here has to work when this script arrived down a pipe, so
     # none of them may be built from $0 or assume a checkout is present.
+    printf '  %sUpgrading, from now on, is these two commands -- on this host and on\n' "$C_BOLD"
+    printf '  every other one, however Cogwheel was installed:%s\n' "$C_RESET"
+    printf '\n'
+    printf '      cd %s\n' "$CONFIG_DIR"
+    printf '      sudo docker compose pull && sudo docker compose up -d\n'
+    printf '\n'
+    printf '  You do not need this installer again. Your settings live in\n'
+    printf '  %s and are never rewritten by an upgrade.\n' "$ENV_FILE"
+    printf '\n'
     printf '  Check it:    curl -fsS http://127.0.0.1:%s/health/ready\n' "$HTTP_PORT"
-    printf '  Logs:        docker logs -f %s\n' "$CONTAINER_NAME"
-    printf '  Upgrade:     re-run this installer\n'
+    if [ -x "$VERIFY_SCRIPT" ]; then
+        printf '  Verify:      sudo %s\n' "$VERIFY_SCRIPT"
+    fi
+    if [ -x "$UPDATE_SCRIPT" ]; then
+        printf '  Is it stale: sudo %s\n' "$UPDATE_SCRIPT"
+        printf '               asks ghcr.io and changes nothing. Cogwheel itself makes\n'
+        printf '               no update check and no outbound request of its own.\n'
+    fi
+    printf '  Logs:        cd %s && sudo docker compose logs -f\n' "$CONFIG_DIR"
+    printf '  Stop:        cd %s && sudo docker compose down   (the data volume is kept)\n' "$CONFIG_DIR"
+    printf '  Roll back:   set COGWHEEL_IMAGE in %s to an older\n' "$ENV_FILE"
+    printf '               tag, then run the two upgrade commands above\n'
     printf '  Uninstall:   %s --uninstall\n' "$SELF_CMD"
     printf '\n'
 }
@@ -1080,6 +1748,12 @@ do_install() {
     # Before resolve_port_conflict, which is what takes the /etc/resolv.conf
     # backup that --uninstall depends on.
     ensure_config_dir
+
+    # Before the port check and before anything is written: an existing .env is
+    # the authority on which ports and which network mode this install uses, so
+    # reading it here is what stops a re-run from probing one port and starting
+    # another, or rebuilding a bridge install as a host one.
+    adopt_existing_env
 
     resolve_port_conflict
     detect_advertised_targets
@@ -1098,7 +1772,7 @@ do_install() {
      The image exists but is not public, so this host cannot download it.
      If you are the publisher: make the package public in its GitHub package
      settings. Otherwise log in first:  docker login ghcr.io
-     You can also install without Docker -- see DEPLOYMENT.md section 3." ;;
+     You can also install without Docker -- see docs/DEPLOYMENT.md section 3." ;;
             *"not found"*|*"manifest unknown"*)
                 die "$IMAGE does not exist.
      Check the tag, and that it was published for linux/$DOCKER_ARCH.
@@ -1110,16 +1784,20 @@ do_install() {
     fi
 
     remember_previous
+    detect_migration
     ensure_volume
     write_env_file
+    write_compose_file
+    install_helper_scripts
 
     if [ "$SKIP_START" = yes ]; then
         write_state_file
-        log "Configuration written to $ENV_FILE; not starting (--no-start)"
+        log "Compose project written to $CONFIG_DIR; not starting (--no-start)"
+        log "Start it with:  cd $CONFIG_DIR && sudo docker compose up -d"
         return 0
     fi
 
-    if ! start_container; then
+    if ! compose_up; then
         rollback
     fi
 
@@ -1179,6 +1857,11 @@ do_uninstall() {
         fi
     fi
 
+    if [ -f "$COMPOSE_FILE" ] && docker compose version >/dev/null 2>&1; then
+        ( cd "$CONFIG_DIR" && docker compose down --remove-orphans ) >/dev/null 2>&1 || true
+        step "Stopped the Compose project in $CONFIG_DIR"
+    fi
+
     if docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
         docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
         step "Removed container '$CONTAINER_NAME'"
@@ -1188,9 +1871,14 @@ do_uninstall() {
 
     revert_host_dns
 
-    rm -f "$ENV_FILE" "$STATE_FILE"
+    # The installer's own copy goes last of all: it is very likely the script
+    # currently executing, and on Linux an unlinked file keeps running to the
+    # end. Removing it here rather than leaving it behind means --uninstall
+    # really does leave nothing.
+    rm -f "$ENV_FILE" "$COMPOSE_FILE" "$VERIFY_SCRIPT" "$UPDATE_SCRIPT" \
+        "$STATE_FILE" "$INSTALLER_COPY"
     rmdir "$CONFIG_DIR" 2>/dev/null || true
-    step "Removed installer configuration"
+    step "Removed the Compose project and installer configuration"
 
     if [ "$PURGE" = yes ]; then
         if docker volume inspect "$VOLUME_NAME" >/dev/null 2>&1; then
@@ -1219,12 +1907,31 @@ do_fix_port_53() {
     log "Port $DNS_PORT is available."
 }
 
+# Print the compose file this invocation would write, and nothing else.
+#
+# Everything is redirected into a temporary directory, so this is safe to run
+# as an ordinary user on a machine that has no Cogwheel and no Docker. It
+# exists for two reasons: piping a script off the internet into a root shell is
+# easier to accept when you can read what it will deploy first, and it gives CI
+# something to feed `docker compose config` -- so the file this installer
+# writes on a household Raspberry Pi is checked on every commit rather than the
+# first time somebody runs it.
+do_print_compose() {
+    _dir=$(mktemp -d)
+    CONFIG_DIR=$_dir
+    COMPOSE_FILE="$_dir/docker-compose.yml"
+    write_compose_file >/dev/null
+    cat "$COMPOSE_FILE"
+    rm -rf "$_dir"
+}
+
 main() {
     parse_args "$@"
     case "$ACTION" in
-        install)      do_install ;;
-        uninstall)    do_uninstall ;;
-        fix-port-53)  do_fix_port_53 ;;
+        install)       do_install ;;
+        uninstall)     do_uninstall ;;
+        fix-port-53)   do_fix_port_53 ;;
+        print-compose) do_print_compose ;;
     esac
 }
 

@@ -2,9 +2,9 @@
 
 ## Status
 
-Accepted. Revised when the workspace was cut down to the DNS-filtering core;
-the previous version of this record, and the crates it described, are on the
-`archive/full-featured` branch.
+Accepted. Revised when the workspace was cut down to the DNS-filtering core.
+The crates the previous version of this record described no longer exist, and
+the boundary below is the one a test enforces.
 
 ## Context
 

@@ -2,14 +2,15 @@ import React from "react";
 import { ChevronDownIcon, Trash2Icon } from "lucide-react";
 import { api } from "@/lib/api";
 import { formatBytes, formatCount, formatInterval, pluralize } from "@/lib/format";
+import { blockModeLabel } from "@/lib/derive";
 import { cn } from "@/lib/utils";
 import { useCogwheel } from "@/data/context";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { PageHeader, PageSections, PageShell } from "@/components/app/page";
 import { SectionCard } from "@/components/app/section-card";
 import { ConfirmDialog } from "@/components/app/confirm-dialog";
-import { ThemeToggle } from "@/components/layout/theme-toggle";
+import { StatusPill } from "@/components/app/status-indicator";
+import { NoticeBanner } from "@/components/app/states";
 
 /**
  * Read-only by design: configuration is environment-only, so every value here
@@ -23,6 +24,7 @@ export function SettingsScreen() {
   const [showProtected, setShowProtected] = React.useState(false);
 
   const logging = settings.retention.history_days > 0;
+  const cleartext = settings.upstreams.some((upstream) => !upstream.encrypted);
 
   return (
     <PageShell>
@@ -32,16 +34,33 @@ export function SettingsScreen() {
       />
 
       <PageSections>
-        <SectionCard
+        <ConfigCard
           footer={
+            // The file the reader actually has, named correctly. This said
+            // cogwheel.env for the installer, which is the file
+            // scripts/install.sh migrates AWAY from -- editing it would have
+            // been a silent no-op on every Docker install. cogwheel.env is the
+            // native systemd install's file and nothing else's.
             <p className="text-muted-foreground text-sm">
-              Set via <Mono>COGWHEEL_*</Mono> in <Mono>/etc/cogwheel/cogwheel.env</Mono> (installer) or{" "}
-              <Mono>.env</Mono> (compose), then restart.
+              Set via <Mono>COGWHEEL_*</Mono> in <Mono>/etc/cogwheel/.env</Mono> — the installer and
+              Compose both read it — or <Mono>/etc/cogwheel/cogwheel.env</Mono> for a native systemd
+              install. Restart afterwards.
             </p>
           }
           title="Resolver"
         >
-          <dl className="divide-y divide-border">
+          {/* The one finding on this page a person should act on, at the top of
+              the card. It used to be 12px grey at the right-hand edge of one
+              row — styled as the least important thing on it. */}
+          {cleartext ? (
+            <NoticeBanner
+              className="mb-4"
+              detail="Anyone between this appliance and the upstream server — your ISP, a hotel network, whoever runs the Wi-Fi — can read every domain the household looks up. A DoT or DoH upstream encrypts them."
+              title="Upstream lookups leave here in cleartext"
+              tone="warn"
+            />
+          ) : null}
+          <dl className="max-w-[45rem] divide-y divide-border">
             <Row env="COGWHEEL_UPSTREAM__SERVERS" label="Upstream servers">
               {settings.upstreams.length === 0 ? (
                 <span className="text-muted-foreground">—</span>
@@ -49,22 +68,21 @@ export function SettingsScreen() {
                 <ul className="w-fit space-y-1 sm:ml-auto">
                   {settings.upstreams.map((upstream) => (
                     <li className="flex flex-wrap items-center gap-2" key={upstream.spec}>
-                      <span className="font-mono text-xs">{upstream.spec}</span>
-                      <Badge variant={upstream.encrypted ? "success" : "warning"}>
-                        {protocolLabel(upstream.protocol)}
-                      </Badge>
-                      {upstream.encrypted ? null : (
-                        <span className="text-muted-foreground text-xs">
-                          cleartext — anyone on the path can read these lookups
-                        </span>
-                      )}
+                      <span className="font-mono text-sm">{upstream.spec}</span>
+                      {/* One status grammar for the whole product. This was the
+                          only chromatic Badge left, saying the same kind of
+                          thing the neutral pill says on three other pages. */}
+                      <StatusPill
+                        label={protocolLabel(upstream.protocol)}
+                        tone={upstream.encrypted ? "good" : "warn"}
+                      />
                     </li>
                   ))}
                 </ul>
               )}
             </Row>
             <Row env="COGWHEEL_BLOCKING__MODE" label="Block response">
-              <Mono>{settings.block_mode || "—"}</Mono>
+              {blockModeLabel(settings.block_mode)}
             </Row>
             <Row env="COGWHEEL_SERVER__HTTP_BIND_ADDR" label="HTTP bind">
               <Mono>{settings.http_bind || "—"}</Mono>
@@ -81,13 +99,13 @@ export function SettingsScreen() {
             <Row env="COGWHEEL_SERVER__ADVERTISED_DNS_PORT" label="Advertised port">
               <Mono>{settings.advertised_port}</Mono>
             </Row>
-            <Row env="COGWHEEL_UPDATER__REFRESH_INTERVAL_SECS" label="List refresh interval">
-              <Mono>{formatInterval(settings.refresh_interval_secs)}</Mono>
+            <Row env="COGWHEEL_UPDATER__REFRESH_INTERVAL_SECS" label="List refresh">
+              {formatInterval(settings.refresh_interval_secs)}
             </Row>
           </dl>
-        </SectionCard>
+        </ConfigCard>
 
-        <SectionCard
+        <ConfigCard
           actions={
             <Button onClick={() => setClearing(true)} variant="destructive">
               <Trash2Icon aria-hidden />
@@ -96,15 +114,15 @@ export function SettingsScreen() {
           }
           title="Activity log"
         >
-          <dl className="divide-y divide-border">
+          <dl className="max-w-[45rem] divide-y divide-border">
             <Row env="COGWHEEL_RETENTION__HISTORY_DAYS" label="Logging">
               {logging ? `on · ${settings.retention.history_days} days` : "off (0)"}
             </Row>
             <Row env="COGWHEEL_RETENTION__QUERY_LOG_MAX_ROWS" label="Row cap">
               <span className="tabular">{formatCount(settings.retention.max_rows)}</span>
             </Row>
-            <Row env="COGWHEEL_RETENTION__PRUNE_INTERVAL_SECS" label="Prune every">
-              <Mono>{formatInterval(settings.retention.prune_interval_secs)}</Mono>
+            <Row env="COGWHEEL_RETENTION__PRUNE_INTERVAL_SECS" label="Pruned">
+              {formatInterval(settings.retention.prune_interval_secs)}
             </Row>
             <Row env="COGWHEEL_STORAGE__DATABASE_URL" label="Database">
               <span>
@@ -118,7 +136,7 @@ export function SettingsScreen() {
               <Mono>{settings.lists_dir || "—"}</Mono>
             </Row>
           </dl>
-        </SectionCard>
+        </ConfigCard>
 
         <SectionCard title="Protected domains">
           <p className="text-muted-foreground text-sm">
@@ -146,20 +164,16 @@ export function SettingsScreen() {
           ) : null}
         </SectionCard>
 
+        {/* The theme control used to be repeated here. The sidebar copy is
+            visible from every page, which is the whole argument for its
+            placement; a second one is a second place to change one setting. */}
         <SectionCard title="About">
-          <dl className="divide-y divide-border">
+          <dl className="max-w-[45rem] divide-y divide-border">
             <Row label="Version">
               <Mono>{settings.version || "—"}</Mono>
             </Row>
             <Row label="Database schema">
               <Mono>v{settings.schema_version}</Mono>
-            </Row>
-            <Row label="Theme">
-              {/* `sm:text-right` on the value only moves inline content, and the track is
-                  flexible rather than content-sized, so the control hugs and shifts itself. */}
-              <div className="w-fit sm:ml-auto">
-                <ThemeToggle />
-              </div>
             </Row>
           </dl>
         </SectionCard>
@@ -188,6 +202,48 @@ export function SettingsScreen() {
   );
 }
 
+/**
+ * Whether this card is currently showing the `COGWHEEL_*` name behind each row.
+ *
+ * Nineteen env names printed under nineteen human labels made the machine name
+ * the heavier of the two on every row — a long mono string against a short sans
+ * one — and turned the page a household owns into a reference card. They are
+ * still here, one disclosure per card, closed until asked for.
+ */
+const ShowEnvNames = React.createContext(false);
+
+function ConfigCard({
+  title,
+  actions,
+  footer,
+  children,
+}: {
+  title: string;
+  actions?: React.ReactNode;
+  footer?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  const [showEnv, setShowEnv] = React.useState(false);
+
+  return (
+    <SectionCard
+      actions={
+        <>
+          {actions}
+          <Button onClick={() => setShowEnv((current) => !current)} size="sm" variant="outline">
+            <ChevronDownIcon aria-hidden className={cn("transition-transform", showEnv && "rotate-180")} />
+            {showEnv ? "Hide the variable names" : "Show the variable names"}
+          </Button>
+        </>
+      }
+      footer={footer}
+      title={title}
+    >
+      <ShowEnvNames.Provider value={showEnv}>{children}</ShowEnvNames.Provider>
+    </SectionCard>
+  );
+}
+
 const Mono = ({ children }: { children: React.ReactNode }) => (
   <span className="font-mono text-foreground text-xs">{children}</span>
 );
@@ -205,6 +261,8 @@ function Row({
   note?: string;
   children: React.ReactNode;
 }) {
+  const showEnv = React.useContext(ShowEnvNames);
+
   return (
     // Only the value may break mid-token. A database path or a list of upstream
     // urls is one unbroken word wider than the card, so it needs `wrap-anywhere`;
@@ -217,7 +275,7 @@ function Row({
     <div className="grid gap-1 py-3 sm:grid-cols-[minmax(min-content,1fr)_minmax(0,2fr)] sm:gap-6">
       <dt className="min-w-0">
         <span className="block font-medium text-foreground text-sm">{label}</span>
-        {env ? (
+        {env && showEnv ? (
           <span className="block wrap-break-word font-mono text-muted-foreground text-xs">
             {env}
           </span>

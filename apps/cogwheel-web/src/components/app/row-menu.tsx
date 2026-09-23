@@ -22,7 +22,7 @@ export function RowMenu({
   return (
     <Menu onSelect={(details) => onSelect(details.value)}>
       <MenuTrigger asChild>
-        <Button aria-label={label} size="icon-sm" variant="ghost">
+        <Button aria-label={label} size="icon-md" variant="ghost">
           <MoreHorizontalIcon aria-hidden />
         </Button>
       </MenuTrigger>

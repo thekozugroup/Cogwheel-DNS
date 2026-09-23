@@ -52,7 +52,10 @@ export function reasonLabel(reason: Reason, list: string | null): string {
     case "list":
       return list ?? "list";
     case "cname":
-      return list ? `CNAME → ${list}` : "CNAME";
+      // The record type is the mechanism, not the reason. A household reads
+      // "redirected to a blocked domain"; "CNAME → oisd small" is the same
+      // fact written for someone holding a packet capture.
+      return list ? `redirected to a domain on ${list}` : "redirected to a blocked domain";
     case "paused":
       return "paused";
     case "unfiltered":
@@ -81,33 +84,77 @@ export function checkSentence(result: CheckResult): string {
   return `${result.domain} — ${verdict}${scope}${reason ? ` — ${reason}` : ""}.`;
 }
 
-const QTYPES: Record<number, string> = {
-  1: "A",
-  2: "NS",
-  5: "CNAME",
-  6: "SOA",
-  12: "PTR",
-  15: "MX",
-  16: "TXT",
-  28: "AAAA",
-  33: "SRV",
-  43: "DS",
-  48: "DNSKEY",
-  64: "SVCB",
-  65: "HTTPS",
-  255: "ANY",
-  257: "CAA",
-};
+/**
+ * Named by where the file comes from rather than by its syntax: someone
+ * subscribing to oisd knows the publisher, not the grammar. The syntax is the
+ * field's hint, for the person who has the file open in another tab.
+ */
+export const LIST_KINDS: { value: ListKind; label: string }[] = [
+  { value: "adblock", label: "Adblock-style (oisd, HaGeZi)" },
+  { value: "hosts", label: "Hosts file (StevenBlack)" },
+  { value: "domains", label: "Plain domains, one per line" },
+];
 
-export function qtypeLabel(qtype: number): string {
-  return QTYPES[qtype] ?? `TYPE${qtype}`;
+/** The badge in the Lists table. The wire value is `adblock` / `hosts` / `domains`. */
+export function listKindLabel(kind: string): string {
+  if (kind === "adblock") return "Adblock";
+  if (kind === "hosts") return "Hosts";
+  if (kind === "domains") return "Domains";
+  return kind;
 }
 
-export const LIST_KINDS: { value: ListKind; label: string }[] = [
-  { value: "adblock", label: "adblock (||domain^)" },
-  { value: "hosts", label: "hosts (0.0.0.0 domain)" },
-  { value: "domains", label: "domains (one per line)" },
-];
+export const LIST_KIND_HINT = "Adblock: ||domain^ · Hosts: 0.0.0.0 domain · Plain: domain";
+
+/**
+ * A list's fetch failure, as a sentence rather than as the HTTP client's
+ * `Display` output.
+ *
+ * The raw string is the most developer-tool-looking thing a household owner
+ * meets — "HTTP status client error (404 File not found) for url
+ * (http://…/does-not-exist.txt)" — and it repeats a URL that is already printed
+ * under the list's name two lines above. The raw text stays in the server log,
+ * where the person who wants it is looking.
+ */
+export function listErrorSentence(raw: string): string {
+  const text = raw.trim();
+  if (text === "") return "The download failed.";
+
+  // Only a 4xx/5xx, and only where the text says it is a status. A bare
+  // three-digit match would read the `127` out of a localhost URL as a code.
+  const status = /(?:status|code)\D{0,16}([1-5]\d{2})\b/i.exec(text) ?? /\b([45]\d{2})\b/.exec(text);
+  const code = status ? Number(status[1]) : null;
+
+  if (/timed?\s*out|timeout|deadline/i.test(text)) return "The download timed out.";
+  if (/dns error|resolve|no such host|name or service not known/i.test(text)) {
+    return "Could not look up that address.";
+  }
+  if (/connect|connection (refused|reset)|unreachable|tcp|sending request/i.test(text)) {
+    return "Could not reach that address.";
+  }
+  if (/certificate|tls|ssl/i.test(text)) return "The server's certificate could not be verified.";
+  if (code === 404) return "That address returned 404 — the list may have moved.";
+  if (code === 403 || code === 401) return "That address refused the download.";
+  if (code !== null && code >= 500) return `That address returned ${code} — try again later.`;
+  if (code !== null && code >= 400) return `That address returned ${code}.`;
+  if (/parse|invalid|malformed|utf-?8/i.test(text)) return "The file downloaded but could not be read.";
+  return "The download failed.";
+}
+
+/** `null_ip`, `nx_domain` and friends as the thing the device actually gets. */
+export function blockModeLabel(mode: string): string {
+  switch (mode) {
+    case "null_ip":
+      return "Unroutable address (0.0.0.0)";
+    case "nx_domain":
+      return "No such domain (NXDOMAIN)";
+    case "no_data":
+      return "No records (NODATA)";
+    case "refused":
+      return "Refused";
+    default:
+      return mode || "—";
+  }
+}
 
 /** Lower-cases, trims and drops the `*.` a wildcard-minded user might type. */
 export function normalizeDomain(value: string): string {

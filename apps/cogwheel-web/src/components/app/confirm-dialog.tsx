@@ -63,12 +63,18 @@ export function ConfirmDialog({
         </AlertDialogHeader>
         {consequence ? (
           <AlertDialogBody>
-            {/* The one place red belongs on this screen: it is describing what
-                the appliance will be in after the click, not colouring a control. */}
+            {/* The §3.3 tint, not free-floating red prose. Sixty words of
+                untinted red-700 was the largest chromatic mass in the product
+                and the only place red appeared as text rather than as a dot;
+                inside a tinted aside the same sentence reads as marked out
+                rather than as an alarm. The description above stays plain, and
+                this line carries only what the description does not. */}
             <p
               className={cn(
-                "text-sm",
-                destructive ? "text-destructive-foreground" : "text-muted-foreground",
+                "rounded-xl border px-3 py-3 text-sm",
+                destructive
+                  ? "border-destructive/24 bg-destructive/8 text-destructive-foreground"
+                  : "border-border bg-muted text-foreground",
               )}
             >
               {consequence}

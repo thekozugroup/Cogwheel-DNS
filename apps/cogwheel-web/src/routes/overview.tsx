@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { ActivityIcon, CheckIcon, CopyIcon, PlayIcon, RotateCwIcon, ShieldOffIcon } from "lucide-react";
 import { api, type DomainCount } from "@/lib/api";
 import { checkSentence, looksIpv6, protectionState } from "@/lib/derive";
-import { formatCompact, formatCount, formatDuration, formatShare, pluralize } from "@/lib/format";
+import { formatCount, formatDuration, formatShare, pluralize } from "@/lib/format";
 import { notify } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { useCogwheel } from "@/data/context";
@@ -24,7 +24,7 @@ const PLATFORMS = [
 ];
 
 export function OverviewScreen() {
-  const { data, phase, busy, mutate, reload } = useCogwheel();
+  const { data, phase, busy, mutate } = useCogwheel();
   const { resume } = useProtectionActions();
   const remaining = usePauseCountdown();
   const overview = data.overview;
@@ -54,16 +54,21 @@ export function OverviewScreen() {
   return (
     <PageShell>
       <PageHeader
+        /* One action, and it is the expensive one, so it says so. A second
+           button reading "Reload" used to sit beside it: it re-read this page's
+           own numbers, which the page already polls for, and "reload" a couple
+           of centimetres under the browser's own reload button is a coin flip.
+           A poll outage is the StaleBanner's job and it has its own Retry. */
         actions={
-          <>
-            <Button isLoading={busy === "refresh-lists"} onClick={() => void refreshLists()} variant="outline">
-              <RotateCwIcon aria-hidden />
-              Refresh lists
-            </Button>
-            <Button onClick={() => void reload()} variant="outline">
-              Reload
-            </Button>
-          </>
+          <Button
+            isLoading={busy === "refresh-lists"}
+            onClick={() => void refreshLists()}
+            title="Re-download every subscribed blocklist now. Takes up to a minute."
+            variant="outline"
+          >
+            <RotateCwIcon aria-hidden />
+            Refresh lists
+          </Button>
         }
         description="What the appliance is doing right now, and how to point devices at it."
         title="Overview"
@@ -73,7 +78,9 @@ export function OverviewScreen() {
         {loading ? (
           <LoadingSkeleton rows={4} variant="cards" />
         ) : (
-          <div className="grid gap-6 sm:grid-cols-2 xl:grid-cols-4">
+          /* Two up from the smallest width. Four short numbers fit side by side
+             at 375px, and stacking them cost 470px of scroll to read four. */
+          <div className="grid grid-cols-2 gap-6 xl:grid-cols-4">
             <StatTile
               footer={
                 state.paused ? (
@@ -90,8 +97,10 @@ export function OverviewScreen() {
                 ) : null
               }
               hint={
-                overview.lists.downloaded ? undefined : (
-                  <span className="flex items-center gap-1.5 text-warning-foreground">
+                overview.lists.downloaded ? (
+                  state.detail
+                ) : (
+                  <span className="flex items-center gap-2 text-warning-foreground">
                     <Status size="sm" variant="warning" />
                     Lists not downloaded yet
                   </span>
@@ -100,23 +109,26 @@ export function OverviewScreen() {
               label="Protection"
               tone={state.tone === "idle" ? "neutral" : state.tone}
               value={state.paused ? `Paused ${formatDuration(remaining)}` : "Protected"}
+              variant="state"
             />
             <StatTile
-              // Suppressed at zero: "2,946 / since last restart: 0" is true, and
-              // reads as a contradiction to anyone who has not been told that the
-              // 24-hour figure outlives the process.
+              // Suppressed when it says nothing new: at zero, because "2,946 /
+              // since last restart: 0" reads as a contradiction to anyone who
+              // has not been told the 24-hour figure outlives the process; and
+              // when it equals the 24-hour count, because then it is the same
+              // number printed twice.
               hint={
-                overview.runtime.queries_total > 0
+                overview.runtime.queries_total > 0 && overview.runtime.queries_total !== day.queries
                   ? `${formatCount(overview.runtime.queries_total)} since this process started`
                   : undefined
               }
               label="Queries (24 h)"
-              value={formatCompact(day.queries)}
+              value={formatCount(day.queries)}
             />
             <StatTile
               delta={`${formatShare(day.blocked, day.queries)} of queries`}
               label="Blocked (24 h)"
-              value={formatCompact(day.blocked)}
+              value={formatCount(day.blocked)}
             />
             <StatTile
               delta={
@@ -130,10 +142,10 @@ export function OverviewScreen() {
           </div>
         )}
 
-        <SectionCard
-          description={`${pluralize(day.queries, "query", "queries")}, ${formatCount(day.blocked)} blocked.`}
-          title="Last 24 hours"
-        >
+        {/* The description says what the chart is, not what the two tiles
+            directly above it already say. "23,320 queries, 4,424 blocked" was
+            the third printing of the same pair on one screen. */}
+        <SectionCard description="Answered and blocked, by hour." title="Last 24 hours">
           <HourStrip buckets={day.per_hour} />
         </SectionCard>
 
@@ -170,8 +182,8 @@ export function OverviewScreen() {
 /* -------------------------------------------------------------------------- */
 
 /**
- * Twenty-four plain divs. A chart library is three hundred kilobytes to draw
- * stacked bars with no axes, no tooltip and no interaction.
+ * Twenty-four plain divs, a baseline, an hour axis and a peak figure. A chart
+ * library is three hundred kilobytes to draw that.
  */
 function HourStrip({ buckets }: { buckets: { hour: number; queries: number; blocked: number }[] }) {
   const busiest = Math.max(0, ...buckets.map((bucket) => bucket.queries));
@@ -190,27 +202,41 @@ function HourStrip({ buckets }: { buckets: { hour: number; queries: number; bloc
   }
 
   const peak = Math.max(1, busiest);
+  // An install younger than a day has one or two hours of traffic and drew a
+  // 390px rectangle with a sliver at one edge — the first card of the first
+  // screen, for the whole of a new owner's first day. The card grows into its
+  // full height once there is a shape worth showing.
+  const active = buckets.filter((bucket) => bucket.queries > 0).length;
+  const tall = active >= 4;
 
   return (
     <div>
-      <div className="flex h-32 items-end gap-1">
+      <div className="mb-2 flex items-baseline justify-between gap-4">
+        <p className="text-muted-foreground text-xs">Queries per hour</p>
+        <p className="tabular text-muted-foreground text-xs">peak {formatCount(busiest)}/h</p>
+      </div>
+
+      <div className={cn("relative flex items-end gap-1", tall ? "h-32" : "h-16")}>
+        {/* The baseline. Without it an hour with no traffic is indistinguishable
+            from a chart that failed to render. */}
+        <span aria-hidden className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-border" />
         {buckets.map((bucket) => {
           const total = Math.round((bucket.queries / peak) * 100);
           const blocked = bucket.queries === 0 ? 0 : Math.round((bucket.blocked / bucket.queries) * 100);
 
           return (
             <div
-              className="flex h-full flex-1 flex-col justify-end"
+              className="relative flex h-full flex-1 flex-col justify-end"
               key={bucket.hour}
-              title={`${pluralize(bucket.queries, "query", "queries")}, ${formatCount(bucket.blocked)} blocked`}
+              title={`${hourLabel(bucket.hour)} — ${pluralize(bucket.queries, "query", "queries")}, ${formatCount(bucket.blocked)} blocked`}
             >
               {/* Blocked is stacked at the foot of the hour's own bar, so the
                   dark portion reads as a share of that hour, not of the day. */}
               <div
-                className="flex w-full flex-col justify-end overflow-hidden rounded-sm bg-neutral-200 dark:bg-neutral-700"
-                // An hour with no traffic draws nothing at all; the row of
-                // labels below is the axis. A one-percent sliver reads as a
-                // little traffic, which is the one thing it is not.
+                className="flex w-full flex-col justify-end overflow-hidden rounded-sm bg-neutral-300 dark:bg-neutral-600"
+                // An hour with no traffic draws nothing but the baseline. A
+                // one-percent sliver reads as a little traffic, which is the
+                // one thing it is not.
                 style={{ height: `${bucket.queries === 0 ? 0 : Math.max(total, 2)}%` }}
               >
                 <div
@@ -226,23 +252,28 @@ function HourStrip({ buckets }: { buckets: { hour: number; queries: number; bloc
       <div className="mt-2 flex gap-1">
         {buckets.map((bucket, index) => (
           <span className="tabular flex-1 text-center text-muted-foreground text-xs" key={bucket.hour}>
-            {index % 6 === 0 ? new Date(bucket.hour * 1000).getHours() : ""}
+            {index % 6 === 0 ? hourLabel(bucket.hour) : ""}
           </span>
         ))}
       </div>
 
       <p className="mt-3 flex flex-wrap items-center gap-4 text-muted-foreground text-xs">
-        <span className="flex items-center gap-1.5">
+        <span className="flex items-center gap-2">
           <span className="size-2.5 rounded-sm bg-neutral-900 dark:bg-neutral-100" />
           Blocked
         </span>
-        <span className="flex items-center gap-1.5">
-          <span className="size-2.5 rounded-sm bg-neutral-200 dark:bg-neutral-700" />
+        <span className="flex items-center gap-2">
+          <span className="size-2.5 rounded-sm bg-neutral-300 dark:bg-neutral-600" />
           Answered
         </span>
       </p>
     </div>
   );
+}
+
+/** `17:00`, in the browser's own timezone. A bare "17" is not a time. */
+function hourLabel(unixSeconds: number): string {
+  return `${String(new Date(unixSeconds * 1000).getHours()).padStart(2, "0")}:00`;
 }
 
 function DomainCard({
@@ -280,9 +311,9 @@ function DomainCard({
       ) : (
         <ul className="divide-y divide-border">
           {rows.map((row) => (
-            <li className="py-1.5" key={row.domain}>
+            <li className="py-2" key={row.domain}>
               <div className="flex items-center gap-3">
-                <span className="min-w-0 flex-1 truncate font-mono text-xs" title={row.domain}>
+                <span className="min-w-0 flex-1 truncate font-mono text-sm" title={row.domain}>
                   {row.domain}
                 </span>
                 <span className="tabular shrink-0 text-sm">{formatCount(row.count)}</span>
@@ -361,7 +392,7 @@ function Targets({ targets, port }: { targets: string[]; port: number }) {
               aria-label={`Copy ${target}`}
               className={cn("shrink-0")}
               onClick={() => void copy(target)}
-              size="icon-sm"
+              size="icon-md"
               variant="ghost"
             >
               {copied === target ? <CheckIcon aria-hidden /> : <CopyIcon aria-hidden />}

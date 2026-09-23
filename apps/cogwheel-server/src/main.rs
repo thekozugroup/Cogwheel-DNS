@@ -41,8 +41,8 @@ Usage:
 There are no other flags. Everything is configured by environment variable:
 COGWHEEL_PROFILE, COGWHEEL_SERVER__*, COGWHEEL_STORAGE__*, COGWHEEL_UPSTREAM__*,
 COGWHEEL_BLOCKING__*, COGWHEEL_UPDATER__*, COGWHEEL_RETENTION__*. On an installed
-appliance those live in /etc/cogwheel/cogwheel.env. See DEPLOYMENT.md for the
-full list.
+appliance those live in /etc/cogwheel/.env, or /etc/cogwheel/cogwheel.env for a
+native systemd install. See docs/DEPLOYMENT.md for the full list.
 ";
 
 /// What the command line asked for.
@@ -209,9 +209,19 @@ async fn run(descriptors: usize) -> Result<()> {
     tokio::spawn(prune::task(state.clone()));
     let refresh_handle = tokio::spawn(refresh::scheduler(state.clone()));
 
+    // Named, with the fix, for the same reason the DNS listeners are: the operator reading this
+    // line is reading it out of `docker logs` after a container that would not start.
     let listener = tokio::net::TcpListener::bind(config.http_bind_addr)
         .await
-        .context("bind http listener")?;
+        .with_context(|| {
+            format!(
+                "could not bind the control plane on {addr}. Something else on this host already \
+                 has that port. `sudo ss -lnptu '( sport = :{port} )'` names it. Stop that, or \
+                 move Cogwheel's web UI and API with COGWHEEL_SERVER__HTTP_BIND_ADDR.",
+                addr = config.http_bind_addr,
+                port = config.http_bind_addr.port(),
+            )
+        })?;
     tracing::info!(addr = %config.http_bind_addr, "control plane listening");
 
     // Fan the signal out the moment it arrives, so the DNS listeners and every open SSE stream

@@ -15,11 +15,13 @@ household rules → protected suffixes → list allow (`@@`) → list block → 
 re-check (list tier only) → allow. Explicit user rules outrank the 21 protected
 suffixes; protected outranks subscribed lists only.
 
-**Status.** Phase 1 (`980f86b`) and Phase 2 (`b71865c`) have landed on `main`;
-both are green in CI. Phase 3 and Phase 4 are outstanding. Line numbers in this
-document refer to commit 85ef5a6 (the pre-cut tree, preserved on branch
-`archive/full-featured`) and are stale for files Phases 1–2 rewrote — treat them
-as hints and grep.
+**This document is the contract.** Everything in §1–§10 is implemented and
+shipped. Where the code and this file disagree, one of them is a bug — decide
+which, and fix that one, in the same change. A behaviour change that does not
+amend this file has not finished.
+
+This document describes the tree after a substantial cut-down, so any line
+number here that does not match is a hint rather than an address — grep.
 
 ---
 
@@ -33,7 +35,7 @@ Path-dependency graph (enforced by the ADR test, moved to the server crate):
 dns-core → policy; lists → policy; storage → (none); server → policy, lists,
 dns-core, storage.
 
-### 1.1 cogwheel-policy (735 LOC measured, no I/O, deps: serde only) — DONE in Phase 2
+### 1.1 cogwheel-policy (735 LOC, no I/O, deps: serde only)
 - `pub const PROTECTED_SUFFIXES: [&str; 21]`.
 - `pub enum BlockMode { NullIp, NxDomain, NoData, Refused }` — `Copy`.
 - `pub enum Action { Allow, Block }` (Copy).
@@ -58,7 +60,7 @@ dns-core, storage.
   tiers only (CNAME re-check and `GET /check`).
 - `normalize_domain`, `normalize_rule_domain` (also strips a leading `*.`).
 
-### 1.2 cogwheel-lists (443 LOC measured) — DONE in Phase 2
+### 1.2 cogwheel-lists (443 LOC)
 - `fetch_source_body(client, url, etag, last_modified) -> Result<FetchOutcome, FetchError>`
   where `FetchOutcome::{NotModified, Body{ text, etag, last_modified }}`; 32 MiB
   streaming cap; `data:` URLs kept.
@@ -75,7 +77,7 @@ dns-core, storage.
 - `protected_hits(index) -> Vec<&'static str>`: surfaced as a per-list `note`,
   never a rejection (protection is enforced at evaluation).
 
-### 1.3 cogwheel-dns-core (1,651 LOC measured) — DONE in Phase 2
+### 1.3 cogwheel-dns-core (1,651 LOC)
 - `upstream.rs` (moved from cogwheel-api) plus `build_resolver(servers)` with
   `ResolverOpts { timeout: 2 s, attempts: 2, cache_size: 0, try_tcp_on_error:
   true, preserve_intermediates: true }`.
@@ -83,7 +85,7 @@ dns-core, storage.
 - TTL clamp (5 s floor, 1 h ceiling, 60 s negative), `error_response_for_payload`,
   `servfail`, `build_base_response`, `build_blocked_response`.
 
-### 1.4 cogwheel-storage (1,760 LOC measured, deps: rusqlite(bundled), serde, serde_json, thiserror, tokio, tracing)
+### 1.4 cogwheel-storage (1,760 LOC, deps: rusqlite(bundled), serde, serde_json, thiserror, tokio, tracing)
 - One `Arc<Mutex<Connection>>`; PRAGMAs journal_mode=WAL, synchronous=NORMAL,
   wal_autocheckpoint=1000, foreign_keys=ON, busy_timeout=5000, cache_size=-1024
   (the page cache is 1 MiB of the process's stated memory budget rather than
@@ -92,8 +94,8 @@ dns-core, storage.
   `tokio::task::spawn_blocking` (the DNS task and axum handlers never run
   rusqlite on a runtime worker).
 - `schema_v1.sql` (fresh) + `migrate.rs` (legacy v0 → v1), versioned by
-  `PRAGMA user_version` (§2). `migrations/0001..0011` move to
-  `tests/fixtures/legacy/`.
+  `PRAGMA user_version` (§2). The eleven legacy migration files live in
+  `tests/fixtures/legacy/` and are used to build the upgrade fixture.
 - Ids stay TEXT UUIDs for `sources`/`devices`; the crate stores them as `String`
   (no uuid dep); the server validates at the API edge.
 - Repos: sources (list/insert/update/delete/update_fetch_status), devices
@@ -107,7 +109,7 @@ dns-core, storage.
   by row cap; rollup upsert arithmetic; HISTORY_DAYS=0 writes rollups but no log
   rows.
 
-### 1.5 apps/cogwheel-server (3,680 LOC measured, across modules)
+### 1.5 apps/cogwheel-server (4,019 LOC across modules, 3,680 excluding tests)
 `main.rs` (CLI `--version/--help`, init_tracing, startup order, background
 tasks, graceful shutdown), `config.rs` (AppConfig from env), `http.rs` (router,
 `/health/live`, `/health/ready` + `Readiness`, `ApiEnvelope`, `ApiError`, SPA
@@ -118,7 +120,7 @@ Tests: ADR path-dependency test, CLI tests, block-mode tests,
 `encrypted_upstreams_have_trust_anchors_compiled_in`, EventBus tests (Query
 frames only), source-due test, handler tests against an in-memory Storage.
 
-### 1.6 apps/cogwheel-web (~8,000 LOC; React 19 + Vite + Tailwind 4 + Shark UI (Ark) + Inter)
+### 1.6 apps/cogwheel-web (8,227 LOC; React 19 + Vite + Tailwind 4 + Shark UI (Ark) + Inter)
 Five routes, one provider, one `api.ts` of 22 calls; approved shell reused (§4).
 
 ---
@@ -170,9 +172,8 @@ CREATE TABLE query_log (
 -- deciding: with query_log_ts and query_log_client_id present, EXPLAIN QUERY PLAN
 -- on the client-filtered page still reports SCAN q -- `(?2 IS NULL OR q.client =
 -- ?2)` is not sargable -- and the page took 0.6 ms either way on a 250,000-row
--- log, for 42 B/row of index (10 MB at the cap). Revisit with a Pi 5 measurement
--- in Phase 4, which is where every figure below is to be re-taken on the real
--- hardware.
+-- log, for 42 B/row of index (10 MB at the cap). Revisit when a Pi 5 measurement
+-- exists; every figure in this file was taken on x86_64.
 
 CREATE TABLE query_stats_hourly (
   hour INTEGER NOT NULL, client TEXT NOT NULL,            -- client '' = all devices
@@ -220,7 +221,7 @@ After open: `seed_if_empty` (§2.4).
    allowlists are NOT imported (would silently unblock).
 7. If the baseline source row was present: seed `ads.example.com` and
    `tracker.example.com` as household block rules so an upgraded install keeps
-   answering `0.0.0.0` for the names DEPLOYMENT.md §7 uses.
+   answering `0.0.0.0` for the names docs/DEPLOYMENT.md §7 uses.
 8. Drop the three legacy indexes first (`idx_notification_deliveries_created_at`,
    `idx_security_events_created_at`, `idx_audit_events_created_at` — `DROP
    TABLE` would take them anyway, but naming them is easier to audit against
@@ -240,7 +241,7 @@ If `sources` is empty: insert one enabled list — **oisd small**
 (`https://small.oisd.nl`, kind `adblock`, name "oisd small"). Nothing else is
 seeded; no hidden built-in rules.
 
-### 2.5 Preset catalogue (client-side `lib/presets.ts`; also returned by `GET /api/v1/lists` as `presets`)
+### 2.5 Preset catalogue (`apps/cogwheel-server/src/api/lists.rs`, `const PRESETS`; returned by `GET /api/v1/lists` as `presets`)
 HaGeZi Light/Multi/Pro/Pro++/Ultimate
 (`https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/{light,multi,pro,pro.plus,ultimate}.txt`,
 adblock), StevenBlack unified
@@ -320,9 +321,13 @@ device marker.
 
 Shell: reuse the approved Shark UI shell exactly — `AppLayout` with `AppSidebar`
 (Navigation group of five entries; the "Appliance" group, `SidebarSeparator` and
-`SECONDARY_NAV` removed; footer keeps the status line, `PauseControl` — one verb
-for the thing the tile, the toast and route 4 all call pausing — and
-`ThemeToggle`), `PageShell/PageHeader/PageSections`, `SectionCard` (24 px
+`SECONDARY_NAV` removed; a "Right now" group directly beneath Navigation holding
+the protection status line and the enabled-list count — the protection row is
+suppressed on `/`, where the Protection tile says the same word behind the same
+dot and says more besides, unless the appliance is unreachable, which the tile
+cannot know; footer keeps `PauseControl` — one verb for the thing the tile, the
+toast and route 4 all call pausing — and `ThemeToggle`),
+`PageShell/PageHeader/PageSections`, `SectionCard` (24 px
 gutters, no accent strips), `StatTile`, `DataTable` (with the container-query
 `hideBelow`/`stackBelow`), `ConfirmDialog`, `TextField/SelectField/FieldRow`,
 `StatusPill`, `EmptyState/ErrorState/LoadingSkeleton/NoticeBanner`,
@@ -337,20 +342,28 @@ Data provider: snapshot = `{overview, settings, lists, devices, rules}`;
 localStorage cache keys kept; `mutate()` unchanged.
 
 ### `/` Overview
+- Counts render in one format everywhere in the product: grouped digits from
+  `formatCount`, never abbreviated. A tile does not shorten what a sentence
+  spells out.
 - StatTile row (4): **Protection** (Protected / Paused hh:mm, Resume in the
   footer when paused; hint "Lists not downloaded yet" in yellow-400 when
   `lists.downloaded=false`), **Queries (24 h)** with hint "since last restart:
   N", **Blocked (24 h)** with `%` delta, **Devices** value = `active_clients`,
   delta "N named · M unnamed" (link to /devices).
-- SectionCard "Last 24 hours": 24 bars of plain `div`s from `per_hour` (blocked
-  stacked in neutral-900 over queries in neutral-200; no library), hour labels
-  every 6 h.
+- SectionCard "Last 24 hours": 24 bars of plain `div`s from `per_hour` — blocked
+  stacked in neutral-900 / dark neutral-100 over answered in neutral-300 / dark
+  neutral-600; no library — hour labels every 6 h. Its description says what the
+  chart is, not the two totals the tiles above it already carry.
 - SectionCard "Top blocked" / "Top queried" side by side, 10 rows, mono domain +
   count; row action menu: "Allow for everyone" / "Block for everyone" → POST
   /rules; "Why?" → GET /check shown inline in a `NoticeBanner`.
 - SectionCard "Connect your devices": one row per `connect.targets` (IPv6
   labelled) + port, Copy button; the three platform hints kept.
-- Header actions: "Refresh lists" and "Reload".
+- Header action: "Refresh lists", with a `title` naming its cost, because it
+  re-downloads every subscribed list over the internet. There is no second
+  "Reload" button: the provider already polls `overview` on a 5 s tick and
+  `StaleBanner` owns the retry when a poll fails. Lists carries the same action
+  as "Refresh all", with the same `title`.
 
 ### `/activity` Activity
 - Filter bar: **Live** switch (SSE; rows prepend), Device select (All / each
@@ -362,8 +375,14 @@ localStorage cache keys kept; `mutate()` unchanged.
   "protected", "CNAME → x", "paused", "unfiltered"). Row menu: Allow/Block for
   everyone, Allow/Block on <device>, Name this device… (unnamed → Devices with
   `?ip=`), Why?.
-- Footer: "Load older" (keyset `before`), "Clear log" (ConfirmDialog → DELETE
-  /queries). When `logging=false`: NoticeBanner "Query logging is off
+- Footer: "Load older than <clock time of the keyset cursor>" (keyset
+  `before`; plain "Load older" when there is no cursor), "Show N more" while
+  the buffer holds more than is drawn, and the held count stated once — here,
+  not also in the card's description. "Clear log" sits in the card header
+  (ConfirmDialog → DELETE /queries).
+- Below the table's stacking breakpoint each row is two lines rather than a
+  label/value card: domain and clock time, then the verdict **as a word** with
+  its reason and the device. The verdict is never a bare dot. When `logging=false`: NoticeBanner "Query logging is off
   (COGWHEEL_RETENTION__HISTORY_DAYS=0); only the live stream is shown."
 - History loads from GET /queries on mount and after Clear; live frames
   deduplicated by (ts, client, domain) against the top 50 rows.
@@ -375,7 +394,8 @@ localStorage cache keys kept; `mutate()` unchanged.
   checkbox per enabled list (unchecking every list = lists off, household/device
   rules still apply — stated inline), **Rules for this device**: domain +
   Allow/Block add row and a list with delete; Delete device (ConfirmDialog).
-- **Devices table**: Name, IP, Filtering (StatusPill), Lists ("All" / "n of m"),
+- **Devices table**: Name, IP, Filtering (a `Status` dot plus the word On or
+  Off — one shape for both states, the tone carrying which), Lists ("All" / "n of m"),
   Rules (count), Queries / Blocked (24 h), Last seen. It sheds columns on its own
   container width, not the viewport's — it sits in the narrower half of the grid,
   so a wider window can mean a narrower table — in this order: Rules, then Lists
@@ -383,7 +403,10 @@ localStorage cache keys kept; `mutate()` unchanged.
   every field. Name, IP, Filtering and Queries / Blocked never go. Rules goes
   first because that count is also on the form beside the table; a last-seen is
   nowhere else on the page, so a column order that hid it from every desktop
-  width would show a 1440px browser strictly less than a phone.
+  width would show a 1440px browser strictly less than a phone. The stacked form
+  is a purpose-built two-line row, not the generic label/value card: name and IP,
+  then filtering state, list selection and the 24-hour counts — no card border
+  inside the section card's own.
 - **Unnamed clients** SectionCard: IP, queries/blocked 24 h, last seen, "Name
   this device" → prefills the form (`?ip=` also honoured).
 
@@ -402,7 +425,10 @@ localStorage cache keys kept; `mutate()` unchanged.
 - "Resolver": upstream rows with badge UDP (plus "cleartext" warning) / DoT /
   DoH, block response mode, bind addresses, advertised targets + port; each
   value shows its env var name in mono; footnote "Set via COGWHEEL_* in
-  /etc/cogwheel/cogwheel.env (installer) or .env (compose), then restart."
+  /etc/cogwheel/.env — the installer and Compose both read it — or
+  /etc/cogwheel/cogwheel.env for a native systemd install. Restart afterwards."
+  (`.env` is the Compose deployment's file and the one scripts/install.sh
+  writes; `cogwheel.env` belongs to scripts/install-native.sh alone.)
 - "Activity log": logging on/off, retention days, max rows, database size, lists
   dir; "Clear log" button.
 - "Protected domains": collapsible list of the 21 suffixes with one sentence
@@ -411,7 +437,7 @@ localStorage cache keys kept; `mutate()` unchanged.
 
 ---
 
-## 5 Hot path — DONE in Phase 2
+## 5 Hot path
 
 ### 5.1 Data structures (`cogwheel-dns-core`)
 ```rust
@@ -584,31 +610,38 @@ untouched.
 
 ---
 
-## 9 Deletions
+## 9 Out of scope
 
-Phases 1 and 2 executed §9.1–§9.9 except the module split and the schema.
-Remaining for Phase 3: absorb and delete `crates/cogwheel-api`; split
-`apps/cogwheel-server/src/main.rs` into the modules of §1.5; move
-`crates/cogwheel-storage/migrations/*` to `tests/fixtures/legacy/`; delete the
-web's remaining unused `components/ui/*` primitives (combobox, popover,
-progress, hint, item, input-group, number-input, avatar, select, alert,
-textarea, tooltip and friends — keep kbd, menu, sheet, switch, badge,
-segment-group and anything with an importer), `routes/protection.tsx` (→
-`lists.tsx`), and rewrite `routes/settings.tsx`. Phase 4 covers docs (§9.11):
-`docs/architecture/05-classifier.md`, `docs/reliability-budgets.md`, `ROADMAP.md`
-(→ a 20-line scope statement); rewrite `docs/hot-path-guardrails.md`,
-`docs/adr/0001-crate-boundaries.md`, `docs/crate-boundary-guardrails.md`,
-`README.md`, `DEPLOYMENT.md`, `docs/release-policy.md` and the three
-pre-Phase-3 architecture documents, which moved to `docs/archive/` in Phase 3 so
-that `docs/architecture/` stops promising a current map. The two quickstarts and
-`scripts/verify-install.sh` were rewritten in Phase 3: they are what a household
-member and an operator read first, and a stale one of those is worse than none.
+These are refusals, not omissions. Each was considered and declined, and a
+pull request that adds one needs to argue with this list first —
+[ARCHITECTURE §1](ARCHITECTURE.md#1-scope-boundary--what-cogwheel-is-not) has the
+reasoning at length.
+
+- Machine-learning classification of domains, and threat-intelligence feeds. A
+  name is blocked because a list you subscribed to names it, or because you
+  wrote a rule. That is the whole decision procedure, and it is why
+  `GET /api/v1/check` can name the step that fired.
+- Multi-node sync, VPN and exit-node integration.
+- Notifications, a backup API, soak-testing tooling, a metrics exporter.
+  `GET /api/v1/overview` and `/health/*` are the operational surface; the data
+  directory is the backup.
+- Telemetry of any kind, including an update check. The appliance's only
+  outbound connections are to the configured upstream resolver and to the
+  blocklist URLs you subscribed to.
+- Intercepting HTTPS in order to defeat anti-adblock detection.
+
+Classifier, reliability-budget and multi-node code all existed at one point and
+were cut. They are not coming back under a different name: §9 is the boundary,
+not a backlog.
 
 ---
 
-## 10 Perf fixes (all landed in Phase 2)
+## 10 Performance decisions on the request path
 
-| Audit finding | Fix |
+Each row is a decision the request path is held to, and the finding it came
+from. Undoing one needs a measurement, not an opinion.
+
+| Finding | What the code does instead |
 |---|---|
 | HIGH serial UDP loop | ≤4 receive loops on `Arc<UdpSocket>`; hits inline; misses under a 512-permit semaphore |
 | HIGH cache key omits qtype | `CacheKey{scope,qtype,domain}`; test AAAA-after-A |
@@ -620,86 +653,129 @@ member and an operator read first, and a stale one of those is worse than none.
 | MED activity bookkeeping with zero subscribers | `LogEntry{IpAddr, Arc<str>}` via `try_send`; publish only when `receiver_count() > 0` |
 | LOW two stacked caches | one cache with `fresh_until` + 24 h stale ceiling; hickory `cache_size: 0` |
 | LOW device edit flushes the cache | scope interning |
-| MED query log never persisted | Phase 3: `query_log` + `query_stats_hourly` batched every 5 s |
+| MED query log never persisted | `query_log` + `query_stats_hourly`, batched every 5 s |
 | NEW correctness | TC truncation for non-EDNS UDP clients; A-label keying |
 
 ---
 
-## 11 Phased execution plan
+## 11 Gates
 
-Common gate G: `cargo fmt --all -- --check` · `cargo clippy --workspace
---all-targets --all-features -- -D warnings` · `cargo test --workspace` ·
-`cargo build --release --locked -p cogwheel-server` · `cargo audit` ·
-`cargo deny check` · `cd apps/cogwheel-web && npm ci && npm run lint && npx tsc
---noEmit && npm run build` · `for f in scripts/*.sh; do sh -n $f; done &&
-shellcheck scripts/*.sh` · `actionlint .github/workflows/*.yml` ·
-`docker buildx build --check .` · the ci.yml image smoke, which includes the
-v0→v1 upgrade of a real file by the shipped image · `sh
-scripts/verify-install.sh`.
+Everything in §1–§10 is implemented and shipped. Two gates keep it that way.
 
-Benchmark gate B: release binary on 127.0.0.1:35353 / :38080 with a real list
-(oisd small, ~55,850 ABP lines) served from a local `python3 -m http.server`, a
-loopback stub upstream, then the dnsbench/mpbench drivers; record hit/blocked
-p50/p99, first-time blocked miss, throughput, RSS, startup→ready, binary size.
+**The check gate** is `.github/workflows/ci.yml`, and the command list lives in
+[CONTRIBUTING § The checks](../CONTRIBUTING.md#the-checks) rather than being
+restated here. In summary: format, clippy with `-D warnings`, the workspace
+tests, a locked release build, `cargo audit`, `cargo deny`, the web lint and
+build, `shellcheck`, the Dockerfile check, an aarch64 cross-compile, and an
+image job that proves the container refuses to start without
+`CAP_NET_BIND_SERVICE`, serves DNS and the web UI, upgrades a v0 database in
+place, and refuses a database from a newer Cogwheel with a message naming both
+versions.
 
-**Phase 1 — delete in place.** LANDED as `980f86b`.
-**Phase 2 — engine and hot path.** LANDED as `b71865c`.
-**Phase 3 — storage v1, control plane, API, five pages.** Storage schema v1 +
-`migrate.rs` + `seed_if_empty` + fixture test; server split into modules,
-cogwheel-api absorbed and deleted, ADR test moved; refresh pipeline with
-conditional GET and body cache (§2.7); `policy_build.rs` with scope interning
-(§6); querylog writer + rollups + prune (§7); the 22 routes (§3); pause
-persisted; `hostname -I` connect targets; web: `api.ts` (22 calls), provider (5
-fields), `nav.ts` (5 entries), the five pages (§4), `presets.ts`; scripts and CI
-updated.
-Gate: G + benchmark gate B. The v0→v1 upgrade was a manual step, which is to
-say nothing that runs; it is now a step of the ci.yml image job, which seeds a v0
-file from the same eleven fixtures the Rust test uses, starts the shipped image
-on a volume holding it, and asserts ready, the `.pre-v1` backup and a device
-carried across with its original id.
-**Phase 4 — docs, ADR, Pi numbers.** Rewrite the docs of §9; fill §12's "after"
-column; measure on a Pi 5 when one is available.
+**The benchmark gate** is `scripts/bench/run.py`: the release binary on
+`127.0.0.1:35353` / `:38080` with a real list (oisd small, ~56,000 Adblock
+lines) served from a local `python3 -m http.server`, a loopback stub upstream,
+then the query drivers. It records hit and blocked p50/p99, first-time blocked
+miss, throughput, RSS, startup-to-ready and binary size. Any change to the DNS
+request path is expected to come with its output — and with
+[§12.3](#123-reading-the-first-time-blocked-miss-figure) read first, because the
+harness's own floor is most of that number.
 
 ---
 
-## 12 Before / after
+## 12 What it measures
 
-| Metric | Before (85ef5a6) | After Phase 2 (measured) | Target |
+Two tables. The first is the shape of the tree, and every figure in it was
+re-counted against the working tree; the commands are given so anyone can
+disagree with a number rather than take it. The second is performance, which
+needs a harness and a host named beside it to mean anything at all.
+
+### Shape
+
+`Before` is commit `85ef5a6`, the tree this was cut down from.
+
+| Metric | Before | Now | Target |
 |---|---|---|---|
-| Rust LOC (excl. tests) | 19,512 in 10 members | 8,730 in 6 | ≤ 8,600 in 5 — 8,269 measured, see §12.1 |
-| Web LOC (src) | 17,222 | 10,496 | ≤ 8,000 |
-| HTTP routes | 44 + 4 | 16 + 2 | 20 + 2 |
-| Sidebar pages | 8 | 5 (Phase 3) | 5 |
-| Crates | 10 | 6 | 5 (+ web) |
-| Cargo.lock packages | 326 | 298 | ≤ 245 |
-| SQLite tables | 12 | 12 (Phase 3) | 7 |
-| Binary (x86_64, stripped) | 15,707,800 B | 12,679,416 B | ≤ 14 MB |
-| Threads | 6 | 5 | 5 |
-| RSS with oisd small loaded (method: §12.2) | 52.62 MB (HWM 62.11) | 26.31 MB (HWM 27.99) | ≤ 45 MB |
-| Cache hit, server-internal | 4.651 µs | 2.270 µs | ≤ 4.65 µs |
+| Rust LOC (excl. tests) | 19,512 in 10 members | **8,269 in 5** | ≤ 8,600 in 5 — see [§12.1](#121-how-the-rust-loc-figure-is-counted) |
+| Web LOC (`apps/cogwheel-web/src`) | 17,222 | **8,227** (7,927 TS/TSX + 300 CSS) | ≤ 8,000 — over by 227, see below |
+| HTTP routes | 44 + 4 | **20 + 2** | 20 + 2 |
+| Sidebar pages | 8 | **5** | 5 |
+| Library crates + binary | 10 | **5** | 5 (+ web) |
+| `Cargo.lock` packages | 326 | **222** | ≤ 245 |
+| SQLite tables | 12 | **7** | 7 |
+| Binary (x86_64, stripped) | 15,707,800 B | **11,083,000 B** | ≤ 14 MB |
+| Threads, steady state | 6 | **5** | 5 |
+
+```sh
+find apps/cogwheel-web/src -type f | xargs wc -l | tail -1   # web LOC
+grep -n '\.route(' apps/cogwheel-server/src/http.rs         # 16 calls, 22 routes
+ls apps/cogwheel-web/src/routes/ | wc -l                    # sidebar pages
+grep -c '^\[\[package\]\]' Cargo.lock                      # lock packages
+grep -c 'CREATE TABLE' crates/cogwheel-storage/src/schema_v1.sql
+stat -c %s target/release/cogwheel-server                   # binary bytes
+ls /proc/<pid>/task | wc -l                                 # threads, once ready
+```
+
+Rust LOC needs the counting rule in [§12.1](#121-how-the-rust-loc-figure-is-counted)
+rather than a `wc -l`: a plain count of the same files is 9,321, because it
+includes the `#[cfg(test)]` modules the rule excludes.
+
+Two of those want a word rather than a number.
+
+**Web LOC is 227 over its target**, counting everything under `src/`
+(8,227 lines across 59 files); counting only TypeScript it is 7,927 and under.
+The target was set against the whole directory, so the honest reading is that it
+is over. It is recorded here rather than quietly recounted, because a target
+that moves to wherever the tree happens to be is a row that can never fail.
+
+**Threads is five in the steady state** — the main thread plus four Tokio
+workers on a four-CPU host. A sixth appears transiently while a list is being
+compiled on the blocking pool and goes away again, so a reading taken during
+startup says six.
+
+### Performance
+
+Taken with `scripts/bench/run.py` on a **4-vCPU x86_64 sandbox**, not a Pi 5,
+against oisd small (~56,000 Adblock lines). Treat them as relative reference
+points between two versions of this code on the same host, which is what the
+harness is for. **No Raspberry Pi 5 measurement exists yet**, and the `Before`
+column was taken on a different day on the same class of machine.
+
+| Metric | Before | Now | Target |
+|---|---|---|---|
+| Cache hit, server-internal | 4.651 µs | **1.4 – 2.3 µs** | ≤ 4.65 µs |
 | Cache hit, client p50 / p99 | 0.055 / 0.107 ms | 0.048 / 0.100 ms | no regression |
 | Blocked p50 / p99 | 0.054 / 0.106 ms | 0.050 / 0.104 ms | no regression |
-| First-time blocked miss (55,852 rules, §12.3) | 1,151.8 µs | 27.05 µs p50 | ≤ 50 µs |
+| First-time blocked miss, marginal cost over a cached block | 1,151.8 µs | **3.3 – 5.9 µs** | ≤ 50 µs — read [§12.3](#123-reading-the-first-time-blocked-miss-figure) |
 | Throughput (4×25,000) | 25,234 QPS | 64,088 QPS | ≥ 25.2k |
 | Server CPU per query | 44.3 µs | 19.9 µs | — |
 | List activation | 489 ms | 30 ms | — |
+| RSS with oisd small loaded ([§12.2](#122-what-the-rss-row-is-a-measurement-of)) | 52.62 MB (HWM 62.11) | **30.4 MB** | ≤ 45 MB |
 | `blocked_total` accuracy | 4 counted vs 5,005 served | exact | exact |
 | Upstream RTTs per new name | 2 | 1 | 1 |
-| Query log | 4,096-entry ring, no client IP, not persisted | same (Phase 3) | SQLite, 250k rows / 7 days, device-attributed |
-| Boot without network | 2-name placeholder, never ready | same (Phase 3) | filters from cached bodies; ready immediately |
+| Query log | 4,096-entry ring, no client IP, not persisted | SQLite, 250k rows / 7 days, device-attributed | as now |
+| Boot without network | 2-name placeholder, never ready | filters from cached bodies; ready immediately | as now |
 
-Benchmarks were taken on a 4-vCPU x86_64 sandbox, not a Pi 5; treat them as
-relative reference points. No Raspberry Pi 5 measurement exists yet.
+The cache-hit row is a band rather than a figure because two sets of runs,
+months apart on the same class of host, read 2.270 µs and 1.4–1.7 µs. Neither
+is wrong; the host's load moved and the number moved with it. Quote the top of
+the band — a measurement reported at its best reading is how a front page ends
+up overstating itself.
 
-### 12.1 The Rust LOC target is derived from a measurement, not guessed
+The other two bolded rows are the ones most often misread; §12.2 and §12.3 are
+their method, and quoting either without it invites a conclusion neither
+supports.
 
-The `≤ 4,600` that stood in this row was written before any of this code
-existed. It was a guess, it was never derived from the work the product has to
-do, and the tree has now been read line by line against it. The figure below is
-what the five crates actually are, counted as: every `.rs` file under a crate's
-`src/`, minus the files that exist only for tests (`src/tests.rs`, `src/tests/`,
-`alloc_guard.rs`) and minus every `#[cfg(test)]` module inside the rest. The
-`tests/` directories and those excluded files are 5,908 further lines.
+### 12.1 How the Rust LOC figure is counted
+
+**The rule:** every `.rs` file under a crate's `src/`, minus the files that
+exist only for tests (`src/tests.rs`, `src/tests/`, `alloc_guard.rs`) and minus
+every `#[cfg(test)]` module inside the rest. Those exclusions, plus the `tests/`
+directories, are 5,908 further lines.
+
+The target this row is measured against — `≤ 4,600` — was written before any of
+this code existed. It was a guess, it was never derived from the work the
+product has to do, and the tree was then read line by line against it.
 
 | Crate | Lines | Of which comment | What needs them |
 |---|---|---|---|
@@ -727,11 +803,10 @@ snapshot instead of copying it field by field into a near-identical struct).
 That is what was there. The remaining 8,269 is the product: 4,600 was never
 reachable without deleting features this spec requires.
 
-The target in the table is therefore `≤ 8,600`, not the reading: the measurement
-plus roughly one phase of headroom. A target set to whatever the tree happens to
-be is a row that can never fail, and every other row in §12 is a bound met with
-room to spare. Phase 4 has 331 lines of room; needing more than that means
-coming back here and arguing the ceiling up, which is the point of having one.
+The target is therefore `≤ 8,600`, not the reading: the measurement plus a
+little headroom. A target set to whatever the tree happens to be is a row that
+can never fail. There are 331 lines of room; needing more than that means coming
+back here and arguing the ceiling up, which is the point of having one.
 
 ### 12.2 What the RSS row is a measurement of
 
@@ -741,8 +816,8 @@ binary (11,083,000 B) against the same 55,951-line `oisd-small.txt`, each taken
 the way `scripts/bench/run.py` takes it — `VmHWM` from `/proc/<pid>/status`,
 after `/health/ready` and after the list has finished compiling, before a single
 query is answered and before the list-toggle timing that follows — were 30.47,
-30.36, 30.41 and 30.32 MB: a 0.15 MB spread. 30.4 MB is the figure Phase 4
-should put in the column, and this paragraph is what has to travel with it.
+30.36, 30.41 and 30.32 MB: a 0.15 MB spread. **30.4 MB** is the figure in the
+column above, and this paragraph is what has to travel with it.
 
 Readings taken any other way are lower, and what differs is transient allocation
 the allocator has not handed back, not anything live:
@@ -755,20 +830,20 @@ the allocator has not handed back, not anything live:
 
 The household's steady state is the first row; the harness deliberately measures
 the third, because that is the peak an appliance has to survive. Quoting one of
-them without saying which invites exactly the "it regressed against Phase 2"
-reading that the Phase 2 number cannot support either. If Phase 4 wants it lower
-rather than merely stated, the lever is glibc arena retention — `malloc_trim(0)`
+them without saying which invites exactly the "it regressed" reading that the
+`Before` number cannot support either. If a future change wants it lower rather
+than merely stated, the lever is glibc arena retention — `malloc_trim(0)`
 on the blocking pool once `compile_index` returns, or `M_ARENA_MAX=2` — and it
 should be measured on a Pi 5 first, because it buys an `unsafe` call and a
 glibc-only path to move a number already 14 MB under target.
 
-### 12.3 The Phase 2 first-time-blocked-miss figure is not comparable
+### 12.3 Reading the first-time-blocked-miss figure
 
-Read straight, that row says a first-time blocked miss went from 27.05 µs to
-about 45 µs: a 65% regression on the metric the product exists for. It did not.
-The 27.05 µs predates `scripts/bench`, which first appears in the Phase 3
-commit, and it was not taken through the UDP client path — nothing in this tree
-can reproduce it.
+An earlier version of this table recorded a first-time blocked miss at 27.05 µs
+and a later run at about 45 µs, which reads as a 65% regression on the metric
+the product exists for. It is not one. The 27.05 µs predates `scripts/bench` and
+was not taken through the UDP client path — nothing in this tree can reproduce
+it, which is why the row above reports a *marginal* cost instead.
 
 What the harness measures is a client-side round trip: build a query, send it on
 a UDP socket, wait for the datagram back. That path has a floor; the floor is
@@ -776,13 +851,12 @@ most of the number, and it moves with the machine. Over the same four runs as
 §12.2, a *cached* blocked answer — strictly less work than a first-time block —
 took 41.46, 42.39, 40.86 and 45.91 µs p50, while a first-time blocked miss
 against 55,951 rules took 44.96, 45.67, 46.78 and 49.53 µs. The floor moved 5 µs
-between runs; the difference between the two did not. The comparable Phase 3
-figure is therefore that difference — the marginal cost of a first block over a
-cached one: 3.3 to 5.9 µs, call it 4 — and it is why the row reads within a
-hair of its 50 µs target on a loaded sandbox while the work being measured is
-under a tenth of that. The server-internal cache-hit row above (1.4–1.7 µs on
-these runs) is the one taken without the socket.
+between runs; the difference between the two did not. The comparable figure is therefore that
+difference — the marginal cost of a first block over a cached one: 3.3 to 5.9 µs,
+call it 4 — and it is why a raw client-side reading sits within a hair of its
+50 µs target on a loaded sandbox while the work being measured is under a tenth
+of that. The server-internal cache-hit row above (1.4–1.7 µs on these runs) is
+the one taken without the socket.
 
-Phase 4 fills this column on a Pi 5. It should record the harness's own floor
-beside the figure, and it should not chase 27.05 µs, which no run of this
-harness can reach.
+When this is re-taken on a Pi 5, record the harness's own floor beside the
+figure, and do not chase 27.05 µs: no run of this harness can reach it.

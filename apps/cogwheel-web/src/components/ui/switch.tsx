@@ -16,11 +16,25 @@ export const Switch = (props: React.ComponentProps<typeof ArkSwitch.Root>) => {
         "p-px",
         "inline-flex shrink-0 items-center",
         "rounded-full border border-transparent",
-        "transition-all",
-        "[[data-focus-visible],[data-invalid]]:ring-[3px]",
-        "data-focus-visible:border-primary data-focus-visible:ring-ring/32",
-        "data-invalid:border-destructive data-invalid:ring-destructive/24",
-        "dark:data-invalid:border-destructive-foreground dark:data-invalid:ring-destructive-foreground/20",
+        // Named, not `all`: `transition-all` eased the focus outline in over
+        // 150ms, and a focus ring a fast keyboard user does not see is the
+        // thing index.css says not to build.
+        "transition-[background-color,border-color]",
+        /*
+         * The same outline every other control gets, drawn on the root.
+         *
+         * This used to be `ring-[3px]` plus `ring-ring/32`, which painted
+         * nothing: tailwind-merge reads `ring-ring/32` as a ring *width* and
+         * drops the width utility beside it, leaving a coloured ring zero
+         * pixels wide. The global `:focus-visible` rule in index.css could not
+         * cover for it either, because the element that takes focus here is
+         * `ArkSwitch.HiddenInput` — a 1x1 sr-only input — so the outline landed
+         * on a box nobody can see. Ark mirrors that input's state onto the root
+         * as `data-focus-visible`, which is the element with the track on it.
+         */
+        "data-focus-visible:outline-2 data-focus-visible:outline-ring data-focus-visible:outline-offset-2",
+        "data-invalid:border-destructive",
+        "dark:data-invalid:border-destructive-foreground",
         "data-[state=checked]:bg-primary",
         "data-[state=unchecked]:bg-input dark:data-[state=unchecked]:bg-input",
         "data-disabled:pointer-events-none data-disabled:opacity-64",

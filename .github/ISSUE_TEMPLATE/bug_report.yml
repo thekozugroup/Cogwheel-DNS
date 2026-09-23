@@ -1,0 +1,110 @@
+name: Bug report
+description: Something in Cogwheel does not do what it says it does.
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. The fields below are the ones that decide whether a bug
+        gets reproduced in ten minutes or sits open for a fortnight while we ask questions.
+
+        **Please do not report a security vulnerability here.** Issues are public. See
+        [SECURITY.md](https://github.com/thekozugroup/Cogwheel-DNS/blob/main/SECURITY.md)
+        instead.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you got instead.
+      placeholder: |
+        I allowed cdn.example.com for one device from the Activity row menu. The rule shows
+        up on the Devices page, but that device is still getting 0.0.0.0 for the name.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Number them. If a step depends on a particular list or device, name it.
+      placeholder: |
+        1. Devices, name 192.168.1.40 "Kids' tablet"
+        2. Activity, filter to that device, find a blocked row for cdn.example.com
+        3. Row menu, "Allow on Kids' tablet"
+        4. From that device: dig cdn.example.com — still 0.0.0.0
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Cogwheel version
+      description: |
+        The Settings page, or `curl -s localhost:8080/api/v1/settings`. If you are running
+        from a clone, the commit is more useful than the version.
+      placeholder: 0.1.0 (or commit a1b2c3d)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: How is it installed
+      options:
+        - scripts/install.sh
+        - docker compose from a clone
+        - docker run against a local build
+        - Unraid, custom br0
+        - Unraid, host networking
+        - Native, systemd
+        - Other (say so below)
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Host, Docker and architecture
+      description: |
+        Your OS, `docker version --format '{{.Server.Version}}'`, and `uname -m`.
+
+        **arm64 versus x86_64 decides a surprising number of answers here.** The reference
+        target is a Raspberry Pi 5 and the aarch64 build is a separate CI job, so say which
+        one you are on even when it seems irrelevant.
+      render: text
+      placeholder: |
+        Raspberry Pi OS 12 (bookworm), aarch64
+        Docker 27.3.1
+    validations:
+      required: true
+
+  - type: textarea
+    id: domain-and-list
+    attributes:
+      label: Which domain, and which list
+      description: |
+        For anything shaped like "this site is broken" or "this should have been blocked",
+        this is the field that makes it reproducible: the exact name, what the Activity row's
+        verdict column says decided it, and whether a household or device rule exists for it.
+      placeholder: |
+        cdn.example.com — Activity says "Blocked · HaGeZi Pro"
+        Device rule: allow, on Kids' tablet. No household rule.
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: |
+        `docker compose logs --tail 200 cogwheel`, from `/etc/cogwheel` on an installed box.
+
+        **Read it before you paste it.** A Cogwheel log line can contain a client's IP
+        address and the name a device in your house looked up. That is more revealing than
+        the equivalent output from most software — redact whatever is not part of the bug.
+      render: shell
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Screenshots, your `.env` with the secrets removed, the list's URL — whatever you have.

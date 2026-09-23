@@ -44,7 +44,7 @@ use std::path::{Path, PathBuf};
 /// keeps that true by re-creating them as household block rules.
 const BASELINE_SOURCE_ID: &str = "00000000-0000-0000-0000-000000000001";
 
-/// The two names the baseline list blocked, kept as household rules so `DEPLOYMENT.md` §7's
+/// The two names the baseline list blocked, kept as household rules so `docs/DEPLOYMENT.md` §7's
 /// verification step still passes after an upgrade.
 const BASELINE_RULE_DOMAINS: [&str; 2] = ["ads.example.com", "tracker.example.com"];
 

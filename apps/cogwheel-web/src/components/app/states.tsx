@@ -90,7 +90,7 @@ export function LoadingSkeleton({
     return (
       <div
         aria-busy="true"
-        className={cn("grid gap-6 sm:grid-cols-2 xl:grid-cols-4", className)}
+        className={cn("grid grid-cols-2 gap-6 xl:grid-cols-4", className)}
         aria-label="Loading"
       >
         {keys.map((key) => (

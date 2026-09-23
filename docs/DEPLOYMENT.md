@@ -1,19 +1,39 @@
-# Cogwheel Deployment Guide
+# Deploying Cogwheel
 
-The single source of truth for installing, operating, upgrading and removing
-Cogwheel. If a command here does not work, that is a bug — please report it.
+The operator's manual: installing, networking, upgrading, rolling back, backing
+up and removing Cogwheel. If a command here does not work, that is a bug —
+please [open an issue](https://github.com/thekozugroup/Cogwheel-DNS/issues).
+
+If you just want a filtered household and not the detail, start with
+**[the quick start](QUICKSTART.md)** instead; it is five minutes and four
+platforms. This file is what you read when something here has to be decided
+rather than accepted.
 
 Cogwheel is a DNS filtering appliance. It binds port 53, answers queries for
 every device on your network, and serves a web control plane on port 8080. The
 reference target is a **Raspberry Pi 5 running 64-bit Raspberry Pi OS**, but any
 64-bit Linux host (`x86_64` or `aarch64`) works.
 
+> ### Before the first release
+>
+> Nothing has been tagged and no image has been pushed to
+> `ghcr.io/thekozugroup/cogwheel-dns`. Four paths in this file depend on
+> published artifacts and will fail until `v0.1.0` exists: the one-line
+> installer ([§2](#2-the-one-line-installer)), `docker compose
+> pull` ([§3](#3-docker-compose)), the release tarball
+> ([§4](#4-native-install-with-systemd)) and pinning a version
+> ([§10](#10-upgrades-and-rollback)). Building the image yourself works today —
+> [§3](#3-docker-compose).
+>
+> *Delete this block in the commit that tags `v0.1.0` — it is one of five, listed
+> in [RELEASING.md](RELEASING.md#before-the-first-tag-v010-only).*
+
 ---
 
 ## Contents
 
 1. [Choosing an install method](#1-choosing-an-install-method)
-2. [Quick start — the one-line installer](#2-quick-start--the-one-line-installer)
+2. [The one-line installer](#2-the-one-line-installer)
 3. [Docker Compose](#3-docker-compose)
 4. [Native install with systemd](#4-native-install-with-systemd)
 5. [Networking: host vs bridge, and why it decides a feature](#5-networking-host-vs-bridge-and-why-it-decides-a-feature)
@@ -21,7 +41,7 @@ reference target is a **Raspberry Pi 5 running 64-bit Raspberry Pi OS**, but any
 7. [Post-install verification checklist](#7-post-install-verification-checklist)
 8. [Troubleshooting](#8-troubleshooting)
 9. [Configuration reference](#9-configuration-reference)
-10. [Upgrades](#10-upgrades)
+10. [Upgrades and rollback](#10-upgrades-and-rollback)
 11. [Backup and restore](#11-backup-and-restore)
 12. [Uninstall](#12-uninstall)
 13. [Local development](#13-local-development)
@@ -34,12 +54,27 @@ reference target is a **Raspberry Pi 5 running 64-bit Raspberry Pi OS**, but any
 |---|---|---|---|
 | Best for | Most people | You already run a Compose stack | You do not want Docker |
 | Needs Docker | yes | yes | no |
-| Config lives in | `/etc/cogwheel/cogwheel.env` (generated) | `.env` (yours to edit) | `/etc/cogwheel/cogwheel.env` (yours to edit) |
+| Config lives in | `/etc/cogwheel/.env` (generated, then yours) | `.env` (yours to edit) | `/etc/cogwheel/cogwheel.env` (yours to edit) |
 | Handles the port-53 conflict | automatically | you run one command | automatically |
-| Upgrade | re-run the installer | `docker compose pull && up -d` | rebuild and re-run |
+| Upgrade | `docker compose pull && up -d` | `docker compose pull && up -d` | rebuild and re-run |
+
+The first two rows differ only in who wrote the Compose project. The installer
+writes one to `/etc/cogwheel` and then steps out of the update path entirely, so
+**every Docker install upgrades with the same two commands** —
+[§10](#10-upgrades-and-rollback).
 
 All three end up in the same place: a non-root process with
 `CAP_NET_BIND_SERVICE`, a persistent data directory, and bounded logs.
+
+**Unraid** is a fourth, and it is a Compose install with the Docker tab doing
+the writing: paste `deploy/unraid/cogwheel.xml` into the *Template* field and
+Unraid fills in the ports, the volume and the capability. The five steps are in
+[QUICKSTART §Unraid](QUICKSTART.md#unraid) rather than here, because there is
+nothing operator-specific about them — everything in this file from
+[§5](#5-networking-host-vs-bridge-and-why-it-decides-a-feature) onwards applies
+to an Unraid host unchanged, with the one exception noted in
+[§10](#10-upgrades-and-rollback): the upgrade is the Docker tab's own *check for
+updates*.
 
 **Requirements**
 
@@ -51,7 +86,7 @@ All three end up in the same place: a non-root process with
 
 ---
 
-## 2. Quick start — the one-line installer
+## 2. The one-line installer
 
 On the machine that will run Cogwheel:
 
@@ -82,6 +117,21 @@ and a fresh install removes the container and undoes the resolver changes, so
 the host is left exactly as it was found. Your data volume is never deleted
 automatically.
 
+What it leaves on the host, all of it under `/etc/cogwheel`:
+
+| Path | What it is |
+|---|---|
+| `docker-compose.yml` | the deployment. Written by the installer — do not hand-edit it; a re-run overwrites it. |
+| `.env` | **yours.** A re-run fills in missing keys and never rewrites one you have set, so your upstreams, block mode and profile survive. `--force-env` regenerates it deliberately. |
+| `install.sh` | a local copy, so `sudo /etc/cogwheel/install.sh --uninstall` works on a host with no checkout |
+| `verify-install.sh` | the post-install and post-upgrade check ([§7](#7-post-install-verification-checklist)) |
+| `check-update.sh` | the opt-in "is there anything newer?" check ([§10](#10-upgrades-and-rollback)) |
+| `install-state` | exactly which host changes were made, so `--uninstall` reverses those and nothing else |
+
+The data volume is `cogwheel-data`, named explicitly in both compose files so a
+host installed before the Compose rewrite keeps its database rather than
+silently starting empty beside an orphaned volume.
+
 Useful flags:
 
 ```sh
@@ -105,6 +155,7 @@ $EDITOR .env
 # Resolve the port-53 conflict first — Compose cannot do this for you.
 sudo ./scripts/install.sh --fix-port-53
 
+docker compose pull        # fails until v0.1.0 is published; build instead, below
 docker compose up -d
 docker compose ps          # wait for STATUS = healthy
 ```
@@ -112,12 +163,18 @@ docker compose ps          # wait for STATUS = healthy
 `.env.example` documents every variable. The defaults are sized for a
 Raspberry Pi 5: two CPUs, 1 GiB memory, three rotated 10 MB log files.
 
-To build locally instead of pulling a published image:
+To build locally instead of pulling a published image — which is the only
+option until `v0.1.0` is tagged:
 
 ```sh
-docker compose build
-docker compose up -d
+docker build -t cogwheel-dns:dev .
+COGWHEEL_IMAGE=cogwheel-dns:dev docker compose up -d
 ```
+
+There is deliberately no `build:` block in `docker-compose.yml`. Compose builds
+a missing image when a service declares both `image:` and `build:`, and on a
+Raspberry Pi that turns an innocent `docker compose up -d` into an unannounced
+half-hour compile. Building is a thing you ask for.
 
 `docker-compose.yml` defaults to **host networking**. Read
 [§5](#5-networking-host-vs-bridge-and-why-it-decides-a-feature) before changing
@@ -138,7 +195,7 @@ sudo ./scripts/install-native.sh
 This builds the server and the web app from source (slow on a Pi — expect
 20-40 minutes for a cold Rust build), creates a `cogwheel` system user, resolves
 the port-53 conflict, and installs
-[`deploy/cogwheel.service`](deploy/cogwheel.service).
+[`deploy/cogwheel.service`](../deploy/cogwheel.service).
 
 To skip the build and use a published release artifact instead — this is the
 whole thing, copy-pasteable, and it works out the current version for you:
@@ -146,10 +203,18 @@ whole thing, copy-pasteable, and it works out the current version for you:
 ```sh
 VERSION=$(curl -fsSL https://api.github.com/repos/thekozugroup/Cogwheel-DNS/releases/latest |
           sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')
+[ -n "$VERSION" ] || { echo 'No published release yet — build from source above.'; exit 1; }
+
 TARBALL="cogwheel-${VERSION}-$(uname -m)-unknown-linux-gnu.tar.gz"
 curl -fsSLO "https://github.com/thekozugroup/Cogwheel-DNS/releases/download/v${VERSION}/${TARBALL}"
 sudo ./scripts/install-native.sh --tarball "${TARBALL}"
 ```
+
+The guard on the second line is not decoration. With no release published, the
+API returns 404, `VERSION` comes out empty, and the line after it cheerfully
+builds `cogwheel--x86_64-unknown-linux-gnu.tar.gz` — a filename with a hole in
+it, which `curl` then fails to download for a reason that has nothing to do with
+the real problem. One sentence beats one 404.
 
 `uname -m` reports `aarch64` on 64-bit Raspberry Pi OS and `x86_64` on a PC,
 which are exactly the two names used in the asset filenames. If it prints
@@ -278,10 +343,12 @@ the router hand out Cogwheel's address as the gateway's DNS forwarder.
 
 ## 7. Post-install verification checklist
 
-Run the scripted version:
+Run the scripted version. The installer leaves a copy on the host, so this works
+on a machine that has never had a checkout:
 
 ```sh
-sh scripts/verify-install.sh                       # local
+sudo /etc/cogwheel/verify-install.sh               # installed hosts
+sh scripts/verify-install.sh                       # from a checkout
 sh scripts/verify-install.sh --host 10.0.0.2       # remote
 sh scripts/verify-install.sh --skip-restart        # no restart test
 ```
@@ -326,7 +393,7 @@ The operationally interesting counters live under `runtime` in
 ```sh
 # An allowed domain must resolve normally.
 dig @<host> example.com A +short
-#   -> a real address, e.g. 93.184.216.34
+#   -> a real address, and specifically not 0.0.0.0
 
 # A stock install ships no active rules of its own -- the seeded default list
 # has to download first, which has not necessarily happened yet. A household
@@ -381,6 +448,22 @@ Then open `http://<host>:8080` and confirm the Overview page shows the query.
 ---
 
 ## 8. Troubleshooting
+
+Organised by what you are looking at, not by what is wrong — the cause is the
+answer, not the index.
+
+| What you see | |
+|---|---|
+| The container restarts in a loop; `Address already in use` | [8.1](#81-port-53-is-already-in-use) |
+| The container is healthy but no lookup is answered | [8.2](#82-the-container-starts-but-dns-does-not-answer) |
+| Every device in the house shows as one client | [8.3](#83-every-device-shows-up-as-one-client) |
+| `EROFS` / read-only filesystem in the logs | [8.4](#84-the-container-exits-with-a-read-only-filesystem-error) |
+| A list's Status column says it last failed | [8.5](#85-blocklists-will-not-update) |
+| The web UI answers 404 | [8.6](#86-web-ui-returns-404) |
+| DNS works, but nothing is ever blocked | [8.7](#87-nothing-is-filtered-even-though-dns-works) |
+| Nothing resolves at all since switching to DNS-over-TLS | [8.8](#88-nothing-resolves-since-i-switched-to-dns-over-tls-or-dns-over-https) |
+| The web UI will not open from another machine | [8.9](#89-i-cannot-open-the-web-ui-from-another-machine) |
+| The upgrade came up healthy and then made things worse | [8.10](#810-the-upgrade-made-it-worse) |
 
 ### 8.1 Port 53 is already in use
 
@@ -508,6 +591,107 @@ Clients are reaching a different resolver. Most often: the router hands out its
 own address for DNS, or IPv6 DNS is still pointing elsewhere
 ([§6](#6-pointing-your-router-at-cogwheel) step 4). Check what a client
 actually uses with `resolvectl status` or `nslookup example.com`.
+
+### 8.8 Nothing resolves since I switched to DNS-over-TLS or DNS-over-HTTPS
+
+Every lookup fails, all at once, right after changing `COGWHEEL_UPSTREAM__SERVERS`
+to a `tls://` or `https://` form. Nothing is partially broken — the house has no
+DNS.
+
+**This is the design working, not failing.** An encrypted upstream is registered
+with *only* its encrypted transport, and there is no cleartext fallback: if TLS
+cannot be established, resolution stops visibly instead of quietly continuing in
+the clear. A fallback would defeat the entire reason you configured it
+([§9.1](#91-encrypting-queries-to-the-upstream-resolver)).
+
+So the question is why the TLS handshake fails. In order of how often it is the
+answer:
+
+```sh
+# 1. The clock. A Pi with no RTC that booted without network has the wrong date,
+#    and every certificate on earth is then either not-yet-valid or expired.
+timedatectl status
+
+# 2. Port 853 outbound, and whether TLS completes on it. Some networks allow
+#    443 and nothing else. curl is in the image for exactly this.
+#    A certificate printed back = reachable. A timeout = blocked.
+docker exec cogwheel curl -sv --max-time 5 -o /dev/null https://1.1.1.1:853/ 2>&1 | head -20
+
+# 3. The certificate name. The text after `#` is what the certificate must
+#    match, and it is not optional. `tls://1.1.1.1#cloudflare-dns.com` is right;
+#    `tls://1.1.1.1` alone will not validate against anything.
+docker compose logs | grep -i 'tls\|certificate\|upstream'
+```
+
+A captive portal or a TLS-inspecting middlebox will also fail this, correctly,
+and so will an internal resolver using a private CA — Cogwheel validates against
+the Mozilla root set compiled into the binary and deliberately does not read the
+host's certificate store.
+
+To get the house resolving again while you work it out, put a cleartext upstream
+back:
+
+```sh
+cd /etc/cogwheel
+sudo sed -i 's|^COGWHEEL_UPSTREAM__SERVERS=.*|COGWHEEL_UPSTREAM__SERVERS=1.1.1.1:53,1.0.0.1:53|' .env
+sudo docker compose up -d
+```
+
+### 8.9 I cannot open the web UI from another machine
+
+Distinct from [8.6](#86-web-ui-returns-404): there, the server answers and the
+answer is a 404. Here nothing answers at all — the browser hangs or refuses the
+connection.
+
+Work outwards from the process:
+
+```sh
+# 1. Does it answer on the host itself? If this works, the server is fine and
+#    the problem is between the host and you.
+curl -fsS http://127.0.0.1:8080/health/live
+
+# 2. What is it bound to? 127.0.0.1 answers only the host itself; a remote
+#    machine needs 0.0.0.0. The `dev` profile binds loopback on purpose.
+docker exec cogwheel sh -c 'echo $COGWHEEL_SERVER__HTTP_BIND_ADDR'
+sudo ss -lntp '( sport = :8080 )'
+
+# 3. A host firewall.
+sudo ufw status && sudo ufw allow 8080/tcp
+```
+
+The most common cause on a working install is the first one inverted: the host
+runs the `dev` profile, which binds `127.0.0.1:30080` deliberately, so the UI is
+reachable from the host and from nowhere else. `home` is the profile for an
+appliance ([§9](#9-configuration-reference)).
+
+There is **no authentication on the control plane**. Anything that can reach
+port 8080 can change what the household resolves. Keep it on the LAN; if you
+need it from outside, put it behind something that authenticates, and never
+forward 8080 from a router.
+
+### 8.10 The upgrade made it worse
+
+It pulled, it came up healthy, the checks passed — and something is behaving
+worse than before. A health check answers whether the process is up, not whether
+you like what it is doing, and nothing rolls back an upgrade that succeeded.
+
+1. **Find out whether the schema moved**, because it decides which rollback you
+   need:
+
+   ```sh
+   docker image inspect ghcr.io/thekozugroup/cogwheel-dns:latest \
+     --format '{{ index .Config.Labels "io.cogwheel.schema-version" }}'
+   ```
+
+   Compare it against the Settings page. Same number: the plain rollback. Higher
+   than what you were on: the snapshot has to go back first.
+
+2. **Roll back** — [§10 Rolling back](#rolling-back) has both procedures.
+
+3. **Then say what happened.** A release that comes up healthy and behaves worse
+   is the failure mode CI cannot catch, so the issue report is the only way it
+   gets fixed: the two version numbers, what changed in behaviour, and the output
+   of `sudo /etc/cogwheel/verify-install.sh`.
 
 ---
 
@@ -680,33 +864,42 @@ surprise.
 
 ---
 
-## 10. Upgrades
+## 10. Upgrades and rollback
 
-**Installer:** re-run it. It is idempotent, keeps the data volume, and rolls
-back to the previous image if the new one fails to become healthy. Finding
-Cogwheel already bound to port 53 is expected on a re-run — the running
-container is replaced, not treated as a conflict.
+Cogwheel is upgraded the way any Compose deployment is: pull a newer image,
+recreate the container. There is no self-updater, nothing in the product checks
+for new versions, and the installer is not in this path at all.
+
+### The two commands
+
+**Installed with the one-line installer** — the Compose project is in
+`/etc/cogwheel`:
 
 ```sh
-sudo ./scripts/install.sh
+cd /etc/cogwheel
+sudo docker compose pull
+sudo docker compose up -d
 ```
 
-Run the *matching* installer: `install.sh` refuses to drop a container on top
-of a native systemd install and points you at `install-native.sh` instead.
+`cd` first rather than passing `-f`. That makes the working directory the
+project directory, which is how every version of Compose finds the `.env`
+beside the compose file; some versions do not resolve it from `-f` alone, and
+the failure mode is a container started with none of your settings.
 
-**Compose:** pin a version in `.env` rather than tracking `latest`, so an
-upgrade is a reviewed change.
+**Installed from a clone, or any directory holding `docker-compose.yml`:**
 
 ```sh
-$EDITOR .env                    # COGWHEEL_IMAGE=ghcr.io/thekozugroup/cogwheel-dns:1.2.3
 docker compose pull
 docker compose up -d
-docker compose ps               # wait for healthy
-sh scripts/verify-install.sh
 ```
 
-To roll back, put the old tag in `.env` and repeat. The volume is untouched, so
-state carries over.
+**Unraid:** Docker tab → Cogwheel-DNS → *check for updates* → **Apply Update**.
+That works because `deploy/unraid/cogwheel.xml` tracks the moving `:latest` tag
+and Unraid compares digests; a pinned tag has a digest that never moves, so the
+Docker tab would report "up-to-date" forever, through a security release
+included. Pinning is a real choice — see
+[Which tag should I track?](RELEASING.md#which-tag-should-i-track) — but
+make it knowingly.
 
 **Native:**
 
@@ -717,6 +910,136 @@ sudo ./scripts/install-native.sh
 
 `/etc/cogwheel/cogwheel.env` is preserved unless you pass `--force-env`.
 
+Re-running `install.sh` on a Docker host is still safe and idempotent — it never
+rewrites your `.env` — but it is not how you upgrade, and there is no reason to
+reach for it.
+
+### Then verify
+
+```sh
+sudo /etc/cogwheel/verify-install.sh
+```
+
+From a checkout, `sh scripts/verify-install.sh`. The installer leaves a copy on
+the host precisely so the post-upgrade check works somewhere that has never had
+one. It exits non-zero on failure — see
+[§7](#7-post-install-verification-checklist) for what it covers.
+
+### Is there anything newer?
+
+Nothing tells you. That is deliberate: the first thing a privacy appliance
+should not do is open an unannounced connection on first boot, even a harmless
+one, and even to answer a useful question. **Cogwheel makes no update check and
+no outbound request of its own.**
+
+So the check is a script you run:
+
+```sh
+sudo /etc/cogwheel/check-update.sh
+```
+
+It speaks only to `ghcr.io`, the registry this host already pulls from — the
+same conversation `docker pull` has, minus the download. No credentials, no
+identifiers, nothing about DNS. It changes nothing, and prints the two commands
+to apply an update if there is one.
+
+| Exit | Meaning |
+|---|---|
+| `0` | up to date, or pinned by digest — which can never move, so there is nothing to check |
+| `10` | a newer image exists for the tag this host follows |
+| `1` | could not find out |
+
+Which makes it usable from cron, where the exit status is the whole message:
+
+```sh
+# Weekly, Sunday 09:00. --quiet prints nothing when there is nothing to say,
+# so cron mails you only on exit 10.
+0 9 * * 0 /etc/cogwheel/check-update.sh --quiet
+```
+
+Without `--quiet` it prints on every run and cron mails you every Sunday
+regardless, which trains you to ignore it. Do not append `|| true` either: the
+exit status is the message, and discarding it is the same as not running the
+check.
+
+It also reports the one fact that decides how much care an upgrade needs:
+whether the new image changes the database schema. That comes off the image's
+own `io.cogwheel.schema-version` label, and you can read it yourself before
+pulling anything:
+
+```sh
+docker buildx imagetools inspect ghcr.io/thekozugroup/cogwheel-dns:latest \
+  --format '{{ json .Image.Config.Labels }}'
+```
+
+Compare `io.cogwheel.schema-version` against what the Settings page reports.
+Today both are `1`.
+
+### Unattended updates
+
+The image and both compose files carry
+`com.centurylinklabs.watchtower.monitor-only=true`. If you run Watchtower it
+will **report** a new Cogwheel image and not apply it.
+
+That is the right default for this particular container, and the reasoning is
+narrower than "auto-updates are scary". An upgrade that does not migrate the
+schema is genuinely safe to apply unattended: the schema rewrite is a single
+`TransactionBehavior::Immediate` transaction in `cogwheel-storage`, so a
+`SIGKILL` part-way through rolls it back, and the `VACUUM INTO` snapshot that
+runs outside that transaction is deleted and re-taken on the next boot if it was
+left half-written. **A kill mid-migration costs a restart, not data.**
+
+What it does not survive is the other half: a new build that fails to *start*
+for some reason the migration had nothing to do with. Then the household has no
+DNS, at 04:00, with nobody watching. That is the case auto-update cannot fix,
+and it is why the label says monitor-only.
+
+### Rolling back
+
+**No schema change — the normal case.** Put the tag you want back in
+`/etc/cogwheel/.env` and run the two upgrade commands:
+
+```sh
+cd /etc/cogwheel
+sudo sed -i 's|^COGWHEEL_IMAGE=.*|COGWHEEL_IMAGE=ghcr.io/thekozugroup/cogwheel-dns:0.1.0|' .env
+sudo docker compose pull
+sudo docker compose up -d
+```
+
+The volume is untouched, so everything carries over.
+
+**Across a schema change** — only when `io.cogwheel.schema-version` went up.
+Here the tag alone is not enough. The migration happened **in place**: the old
+build refuses to open the new database, and `restart: unless-stopped` turns that
+refusal into a crash loop. The snapshot has to go back first, and the
+write-ahead log has to go with it, or the new database's `-wal` is replayed on
+top of the restored old file and you are back where you started.
+
+```sh
+cd /etc/cogwheel
+sudo docker compose down
+
+sudo docker run --rm -v cogwheel-data:/data \
+  --entrypoint /bin/sh ghcr.io/thekozugroup/cogwheel-dns:latest \
+  -c 'rm -f /data/cogwheel.db-wal /data/cogwheel.db-shm && cp /data/cogwheel.db.pre-vN /data/cogwheel.db'
+
+sudo sed -i 's|^COGWHEEL_IMAGE=.*|COGWHEEL_IMAGE=ghcr.io/thekozugroup/cogwheel-dns:PREVIOUS|' .env
+sudo docker compose up -d
+```
+
+Substitute `N` (the schema version that was migrated *to*, which is the suffix
+on the file already sitting in the volume) and `PREVIOUS` (the tag you were on).
+
+**Use the Cogwheel image for the restore and not a general-purpose one.** It
+runs as uid 10001, so the restored file comes out owned by the user that has to
+open it. A `debian:bookworm-slim` running as root leaves a root-owned database
+and a container that will not start, with an error about permissions rather
+than about what you just did.
+
+What it costs: everything logged since the upgrade — query history, and any
+device, rule or list change you made in between. Verify afterwards with
+`sudo /etc/cogwheel/verify-install.sh`.
+
 Always take a backup before an upgrade ([§11](#11-backup-and-restore)) and run
 the verification checklist afterwards ([§7](#7-post-install-verification-checklist)).
 
@@ -724,21 +1047,36 @@ the verification checklist afterwards ([§7](#7-post-install-verification-checkl
 
 ## 11. Backup and restore
 
-The data directory holds exactly one thing worth backing up: the SQLite
-database file. There is no separate config store to also capture — config is
-env-only ([§9](#9-configuration-reference)) and lives in `.env` or
-`/etc/cogwheel/cogwheel.env`, which you already have under your own version
-control or backup. Copying the DB file in the volume is the whole job.
+### What is actually in there
 
-Separately, and automatically: the first time a pre-v1 database is opened by a
-version of Cogwheel that speaks schema v1, the upgrade takes its own snapshot
-— `<database file>.pre-v1`, alongside it in the same volume — before touching
-anything. That guards one upgrade, not the ongoing backups below; it is not a
-substitute for them.
+Four things, and a backup that captures only the first is not a backup:
+
+| | |
+|---|---|
+| `cogwheel.db` | the database — settings, lists, devices, rules, query log |
+| `cogwheel.db-wal`, `cogwheel.db-shm` | the write-ahead log and its index. SQLite runs in WAL mode, so **everything since the last checkpoint lives here and nowhere else** |
+| `lists/` | the cached body of every subscribed blocklist, one file per list |
+| `cogwheel.db.pre-vN` | a pre-upgrade snapshot, if a schema migration has ever run |
+
+Two consequences follow, and they are why the procedure below stops the
+container and archives the whole directory rather than copying one file:
+
+- **Copying `cogwheel.db` out of a running container loses data silently.** The
+  WAL is not in it. You get a file that opens cleanly and is missing whatever
+  happened since the last checkpoint, with nothing to tell you.
+- **Skipping `lists/` means a restored appliance comes up not filtering**, and
+  stays that way until its first successful refresh — which on the default
+  cadence is up to 24 hours away.
+
+Config is not in here at all. It is environment-only
+([§9](#9-configuration-reference)) and lives in `/etc/cogwheel/.env` or
+`/etc/cogwheel/cogwheel.env`, which you should keep in whatever you already use
+for machine configuration.
 
 ### Recommended: back up the data directory
 
-This captures everything — the one SQLite database file, not a subset.
+This captures everything: the database, its write-ahead log, and the list
+bodies.
 
 **Docker (named volume):**
 
@@ -769,6 +1107,45 @@ sudo systemctl start cogwheel
 
 Verify a restore with [§7](#7-post-install-verification-checklist) — a backup
 you have never restored is a hypothesis, not a backup.
+
+### Restoring the pre-upgrade snapshot
+
+When a release migrates the database, the upgrade takes its own copy first —
+`cogwheel.db.pre-vN`, beside the database in the same volume, where `N` is the
+schema version being migrated *to*. It is written with `VACUUM INTO`, so it is a
+consistent file rather than a copy of a moving one, and it is taken before
+anything is touched.
+
+It guards exactly one upgrade. It is not a substitute for the backups above, and
+it is overwritten by the next migration.
+
+To go back to it — this is the second half of
+[rolling back across a schema change](#rolling-back), repeated here because this
+is where people look:
+
+```sh
+cd /etc/cogwheel
+sudo docker compose down
+
+# Remove the -wal and -shm as well as replacing the database. They belong to the
+# NEW file; left in place they are replayed on top of the restored old one.
+sudo docker run --rm -v cogwheel-data:/data \
+  --entrypoint /bin/sh ghcr.io/thekozugroup/cogwheel-dns:latest \
+  -c 'rm -f /data/cogwheel.db-wal /data/cogwheel.db-shm && cp /data/cogwheel.db.pre-vN /data/cogwheel.db'
+
+# Put the older tag back, or the new build migrates it again on the next start.
+sudo sed -i 's|^COGWHEEL_IMAGE=.*|COGWHEEL_IMAGE=ghcr.io/thekozugroup/cogwheel-dns:PREVIOUS|' .env
+sudo docker compose up -d
+
+sudo /etc/cogwheel/verify-install.sh
+```
+
+Run it with the **Cogwheel image**, not a general-purpose one: it runs as uid
+10001, so the restored file comes out owned by the user that has to open it.
+
+**What it costs:** everything since the upgrade. The query log, and any device,
+rule or list change made in between. If that matters more than getting the old
+version back, take a copy of the current `cogwheel.db` first.
 
 ---
 
@@ -819,43 +1196,47 @@ getent hosts example.com
 
 ## 13. Local development
 
+**[CONTRIBUTING.md](../CONTRIBUTING.md) is the full guide** — the pinned toolchain,
+the repository layout, what `scripts/verify.sh` runs and why it matches CI. This
+section is the two commands an operator wants when reproducing something
+locally.
+
 No Docker, no privileged ports, loopback only:
 
 ```sh
 COGWHEEL_PROFILE=dev cargo run -p cogwheel-server
 ```
 
-That binds `127.0.0.1:30080` for HTTP and `127.0.0.1:30053` for DNS. Test it:
+That binds `127.0.0.1:30080` for HTTP and `127.0.0.1:30053` for DNS:
 
 ```sh
 curl -s http://127.0.0.1:30080/health/live
 dig @127.0.0.1 -p 30053 example.com +short
 ```
 
-Run the web app against it with hot reload:
+The web app with hot reload, which is a **separate server on `:5174`**:
 
 ```sh
 cd apps/cogwheel-web
 npm ci
-npm run dev
+npm run dev                      # http://localhost:5174
 ```
 
-Before opening a pull request:
+Vite proxies `/api` to `http://127.0.0.1:30080`, so the dev UI is same-origin
+and there is no CORS to configure. To point it at a real appliance instead:
 
 ```sh
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace
-cargo audit
-cargo deny check
-
-npm --prefix apps/cogwheel-web ci
-npm --prefix apps/cogwheel-web run lint
-npm --prefix apps/cogwheel-web run build
-
-shellcheck scripts/*.sh
-docker buildx build --check .
+VITE_COGWHEEL_API_TARGET=http://cogwheel.local:8080 npm run dev
 ```
 
-CI runs all of these. See [docs/release-policy.md](docs/release-policy.md) for
-how releases are cut.
+`http://localhost:30080` serves the *built* bundle from the Rust server, which
+is what an installed appliance does; `:5174` is the dev server. Both are useful;
+they are not the same thing.
+
+Before opening a pull request, run the same gate CI runs. That list lives in
+one place — [CONTRIBUTING.md § The checks](../CONTRIBUTING.md#the-checks) — rather
+than being restated here, because four copies of it is how they end up
+disagreeing with each other and with CI.
+
+[docs/RELEASING.md](RELEASING.md) covers how a release is cut and which
+image tag to track.

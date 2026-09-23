@@ -1,0 +1,22 @@
+# `false` removes the "Open a blank issue" escape hatch. Some reports genuinely do not fit
+# either form, and forcing them into one produces a worse report, not a better-filed one — but
+# the four links below cover the four things that arrive here and are not bugs, and a question
+# answered in Discussions is findable by the next person to ask it.
+blank_issues_enabled: false
+
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/thekozugroup/Cogwheel-DNS/security/advisories/new
+    about: Report privately through a GitHub security advisory. Never in a public issue — Cogwheel sees every name your household resolves, and its control plane has no authentication.
+
+  - name: A site is broken
+    url: https://github.com/thekozugroup/Cogwheel-DNS/blob/main/README.md#troubleshooting
+    about: Activity's row menu allows the name for everyone or for just that device, and a rule you write outranks every list. Open an issue only if that does not take effect.
+
+  - name: Question or setup help
+    url: https://github.com/thekozugroup/Cogwheel-DNS/discussions
+    about: '"How do I…" and "is this supposed to…" belong in Discussions, where other operators can find the answer later.'
+
+  - name: Deployment and configuration
+    url: https://github.com/thekozugroup/Cogwheel-DNS/blob/main/docs/DEPLOYMENT.md
+    about: Port 53 conflicts, router setup, host versus bridge networking, Unraid, upgrades and backups are covered here first.

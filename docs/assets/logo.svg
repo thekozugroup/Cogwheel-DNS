@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" role="img" aria-label="Cogwheel">
+  <!--
+    Cogwheel's mark.
+
+    A cog, because the product is called Cogwheel — but drawn here rather than borrowed. The
+    favicon this replaces was a stroked glyph lifted from an icon set, and a 2px stroke is the
+    first thing to break when a mark is scaled down or set on a dark surface. This is filled
+    geometry instead: ten rectangles, no strokes, nothing to thin out.
+
+    Every edge lands on an even coordinate of the 24px grid, so the thinnest feature in the mark
+    — a tooth, a chamfer step — is two units, a twelfth of the whole. That is what survives the
+    scale to 16px. The opening is eight units square rather than round for the same reason: a
+    circle inside a 16px tile is four dark pixels pretending to be a curve.
+
+    The mark is symmetric about both axes and its bounding box is x 2..22, y 2..22 — square,
+    centred on the viewBox, with a two-unit margin. A tile can centre it on the viewBox directly.
+
+    `fill="currentColor"` is load-bearing. The design contract has no brand hue: the mark is
+    black on paper and white on ink, and it gets there by inheriting the colour of the text
+    beside it rather than by being told.
+
+    Six files carry this path and have to move together. This master and its `logo-ink.svg` /
+    `logo-paper.svg` pair, which fix the fill for the README's <picture>; the in-product
+    component at `apps/cogwheel-web/src/components/layout/mark.tsx`, which is what
+    `currentColor` was written for; the `<link rel="icon">` data URI in
+    `apps/cogwheel-web/index.html`; and `deploy/unraid/cogwheel.svg`, which sets it on a dark
+    tile for Unraid's Docker tab.
+  -->
+  <path d="M10 2h4v2h-4zM6 4h12v2H6zM4 6h16v2H4zM4 8h4v8H4zM16 8h4v8h-4zM2 10h2v4H2zM20 10h2v4h-2zM4 16h16v2H4zM6 18h12v2H6zM10 20h4v2h-4z"/>
+</svg>

@@ -84,6 +84,14 @@ export const ACTIVITY_BUFFER_LIMIT = 500;
 export const ACTIVITY_PAGE_SIZE = 200;
 
 /**
+ * Rows the Activity table draws before offering "Show 50 more". The fetch stays
+ * at 200; this is how many of them are put on screen at once. At 375px a log
+ * row is about 56px, so 50 rows is roughly three and a half screens — where 200
+ * was forty-nine.
+ */
+export const ACTIVITY_VISIBLE_STEP = 50;
+
+/**
  * How often the live stream reports itself to a screen reader. A household
  * resolver answers several queries a second; anything finer than this reads as
  * one uninterrupted sentence and makes the rest of the page unreachable.

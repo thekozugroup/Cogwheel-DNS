@@ -1,12 +1,22 @@
 import React from "react";
-import { ListIcon, RotateCwIcon, ScaleIcon, Trash2Icon } from "lucide-react";
+import { ListIcon, PlusIcon, RotateCwIcon, ScaleIcon, Trash2Icon, XIcon } from "lucide-react";
 import { api, type ListKind, type ListSource, type RuleAction } from "@/lib/api";
-import { LIST_KINDS, checkSentence, isRuleDomain, normalizeDomain } from "@/lib/derive";
-import { formatCount, formatRelative, pluralize, truncateMiddle } from "@/lib/format";
+import {
+  LIST_KINDS,
+  LIST_KIND_HINT,
+  checkSentence,
+  isRuleDomain,
+  listErrorSentence,
+  listKindLabel,
+  normalizeDomain,
+} from "@/lib/derive";
+import { formatCount, formatRelative, pluralize, truncateUrl } from "@/lib/format";
 import { notify } from "@/lib/toast";
+import { cn } from "@/lib/utils";
 import { useCogwheel } from "@/data/context";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Status } from "@/components/ui/status";
 import { Switch } from "@/components/ui/switch";
 import { PageHeader, PageSections, PageShell } from "@/components/app/page";
 import { SectionCard } from "@/components/app/section-card";
@@ -14,6 +24,7 @@ import { DataTable, type Column } from "@/components/app/data-table";
 import { SelectField } from "@/components/app/select-field";
 import { TextField } from "@/components/app/text-field";
 import { FieldRow } from "@/components/app/form-field";
+import { RowMenu } from "@/components/app/row-menu";
 import { StatusPill } from "@/components/app/status-indicator";
 import { ConfirmDialog } from "@/components/app/confirm-dialog";
 import { EmptyState, NoticeBanner } from "@/components/app/states";
@@ -22,7 +33,22 @@ export function ListsScreen() {
   const { data, phase, error, busy, mutate, reload } = useCogwheel();
   const [pendingDelete, setPendingDelete] = React.useState<ListSource | null>(null);
 
-  const lists = data.lists.lists;
+  const [adding, setAdding] = React.useState(false);
+
+  // Ordered by name, case-insensitively, with anything broken first. The
+  // server returns them in `sources.id` order, which is a UUID: arbitrary, and
+  // it reshuffles every time a list is added, so nobody can learn where a list
+  // lives. A list that failed to download is the one row on this page that
+  // wants acting on, so it sorts to the top whatever it is called.
+  const lists = React.useMemo(
+    () =>
+      [...data.lists.lists].sort((left, right) => {
+        const broken = Number(Boolean(right.last_error)) - Number(Boolean(left.last_error));
+        if (broken !== 0) return broken;
+        return left.name.localeCompare(right.name, undefined, { sensitivity: "base" });
+      }),
+    [data.lists.lists],
+  );
   // The catalogue comes from `GET /api/v1/lists` and nowhere else. A second copy
   // in the bundle would be the same eleven entries maintained twice, and the
   // provider's cached snapshot already covers the window before the first
@@ -65,24 +91,45 @@ export function ListsScreen() {
     });
   };
 
+  const refreshingAll = busy === "list-refresh-all";
+  const isRefreshing = (row: ListSource) => refreshingAll || busy === `list-refresh-${row.id}`;
+
   const columns: Column<ListSource>[] = [
     {
       key: "name",
       header: "Name",
+      wrap: true,
+      // Name, address, and — only when there is one — what went wrong, as two
+      // plain lines under the address. A pill is for a word or two; a sentence
+      // inside a 24px rounded-full box overflowed it and printed across the row
+      // above at 375px, because the stacked card forces `overflow: visible`.
       render: (row) => (
         <div className="min-w-0">
           <span className="block truncate text-foreground">{row.name}</span>
           <span className="block truncate font-mono text-muted-foreground text-xs" title={row.url}>
-            {truncateMiddle(row.url, 44)}
+            {truncateUrl(row.url, 60)}
           </span>
+          {row.last_error ? (
+            <span className="mt-2 block">
+              <span className="flex items-center gap-2 font-medium text-foreground text-sm">
+                <Status size="sm" variant="destructive" />
+                Download failed
+              </span>
+              <span className="block text-muted-foreground text-sm">
+                {listErrorSentence(row.last_error)}
+              </span>
+            </span>
+          ) : row.note ? (
+            <span className="mt-1 block text-muted-foreground text-sm">{row.note}</span>
+          ) : null}
         </div>
       ),
     },
     {
       key: "kind",
       header: "Format",
-      hideBelow: "xl",
-      render: (row) => <Badge variant="outline">{row.kind}</Badge>,
+      hideBelow: "2xl",
+      render: (row) => <Badge variant="outline">{listKindLabel(row.kind)}</Badge>,
     },
     {
       key: "enabled",
@@ -100,55 +147,52 @@ export function ListsScreen() {
       key: "rules",
       header: "Rules loaded",
       align: "end",
-      render: (row) => <span className="tabular">{formatCount(row.rule_count)}</span>,
+      // Dimmed while a fetch is in flight, because the figure beside it is the
+      // count from the *last* fetch and is about to change.
+      render: (row) => (
+        <span className={cn("tabular", isRefreshing(row) && "text-muted-foreground opacity-64")}>
+          {formatCount(row.rule_count)}
+        </span>
+      ),
     },
     {
       key: "updated",
       header: "Last updated",
       align: "end",
-      hideBelow: "2xl",
+      // When a list was last refreshed is the second most useful fact in this
+      // table; it should not be the first column the layout sheds.
+      hideBelow: "lg",
       render: (row) => (
-        <span className="text-muted-foreground text-xs">{formatRelative(row.last_ok_at)}</span>
+        <span className="text-muted-foreground text-xs">
+          {isRefreshing(row) ? "Refreshing…" : formatRelative(row.last_ok_at)}
+        </span>
       ),
-    },
-    {
-      key: "status",
-      header: "Status",
-      wrap: true,
-      // Section 4 gives this column two things to carry: a fetch error, or the
-      // advisory note. Working is the ordinary case and says nothing worth a
-      // pill — a column of green would only make the one yellow row harder to
-      // find.
-      render: (row) => {
-        if (row.last_error) return <StatusPill label={row.last_error} tone="warn" />;
-        if (row.note) return <span className="text-muted-foreground text-xs">{row.note}</span>;
-        return null;
-      },
     },
     {
       key: "actions",
       header: "",
       align: "end",
       stackHeader: true,
+      // Refresh stays a button — it is the verb this row exists for, and it
+      // carries the spinner. Delete moves behind the same "⋯" menu Activity and
+      // Overview use, so the irreversible action takes a deliberate second step
+      // instead of sitting 4px from the one people press every week.
       render: (row) => (
-        <span className="flex items-center justify-end gap-1">
+        <span className="flex items-center justify-end gap-2">
           <Button
             aria-label={`Refresh ${row.name}`}
             isLoading={busy === `list-refresh-${row.id}`}
             onClick={() => void refresh(row)}
-            size="icon-sm"
+            size="icon-md"
             variant="ghost"
           >
             <RotateCwIcon aria-hidden />
           </Button>
-          <Button
-            aria-label={`Delete ${row.name}`}
-            onClick={() => setPendingDelete(row)}
-            size="icon-sm"
-            variant="ghost"
-          >
-            <Trash2Icon aria-hidden />
-          </Button>
+          <RowMenu
+            actions={[{ value: "delete", label: "Delete list…", destructive: true }]}
+            label={`Actions for ${row.name}`}
+            onSelect={() => setPendingDelete(row)}
+          />
         </span>
       ),
     },
@@ -161,6 +205,7 @@ export function ListsScreen() {
           <Button
             isLoading={busy === "list-refresh-all"}
             onClick={() => void refresh()}
+            title="Re-download every subscribed blocklist now. Takes up to a minute."
             variant="outline"
           >
             <RotateCwIcon aria-hidden />
@@ -172,12 +217,24 @@ export function ListsScreen() {
       />
 
       <PageSections>
-        <AddList presets={presets} />
-
+        {/* The page leads with the lists, not with a blank form to add one.
+            Subscribing happens once or twice a year; looking at what is
+            subscribed happens every time this page is opened. */}
         <SectionCard
-          description={`${formatCount(lists.filter((list) => list.enabled).length)} of ${formatCount(
-            lists.length,
-          )} enabled · ${pluralize(data.overview.lists.rules_loaded, "rule")} loaded.`}
+          actions={
+            <Button onClick={() => setAdding((current) => !current)} variant="outline">
+              {adding ? <XIcon aria-hidden /> : <PlusIcon aria-hidden />}
+              {adding ? "Cancel" : "Add a list"}
+            </Button>
+          }
+          busy={refreshingAll}
+          description={
+            refreshingAll
+              ? `Checking ${pluralize(lists.length, "list")}…`
+              : `${formatCount(lists.filter((list) => list.enabled).length)} of ${formatCount(
+                  lists.length,
+                )} enabled · ${pluralize(data.overview.lists.rules_loaded, "rule")} loaded.`
+          }
           title="Lists"
         >
           <DataTable
@@ -195,6 +252,8 @@ export function ListsScreen() {
             stackBelow="xl"
           />
         </SectionCard>
+
+        {adding ? <AddList onDone={() => setAdding(false)} presets={presets} /> : null}
 
         <HouseholdRules />
 
@@ -221,7 +280,13 @@ export function ListsScreen() {
 
 /* -------------------------------------------------------------------------- */
 
-function AddList({ presets }: { presets: { name: string; url: string; kind: ListKind }[] }) {
+function AddList({
+  presets,
+  onDone,
+}: {
+  presets: { name: string; url: string; kind: ListKind }[];
+  onDone: () => void;
+}) {
   const { busy, mutate } = useCogwheel();
   const [preset, setPreset] = React.useState("");
   const [name, setName] = React.useState("");
@@ -255,16 +320,22 @@ function AddList({ presets }: { presets: { name: string; url: string; kind: List
       setPreset("");
       setName("");
       setUrl("");
+      onDone();
     }
   };
 
   return (
     <SectionCard
-      description="Subscribe to a public blocklist. Presets are the ones DNSNet ships with."
+      description="Subscribe to a public blocklist. Presets are the lists Cogwheel ships with."
       footer={
-        <Button isLoading={busy === "list-add"} onClick={() => void add()}>
-          Add list
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button isLoading={busy === "list-add"} onClick={() => void add()}>
+            Add list
+          </Button>
+          <Button onClick={onDone} variant="ghost">
+            Cancel
+          </Button>
+        </div>
       }
       title="Add a list"
     >
@@ -285,7 +356,7 @@ function AddList({ presets }: { presets: { name: string; url: string; kind: List
 
         <FieldRow>
           <SelectField
-            hint="How the file is written. Guessing wrong loads zero rules."
+            hint={`How the file is written — guessing wrong loads zero rules. ${LIST_KIND_HINT}`}
             label="Format"
             onChange={(value) => setKind(value as ListKind)}
             options={LIST_KINDS}
@@ -339,9 +410,9 @@ function HouseholdRules() {
       title="Household rules"
     >
       <div className="space-y-4">
-        <div className="flex flex-wrap items-end gap-2">
+        <div className="flex flex-wrap items-end gap-3">
           <TextField
-            className="min-w-48 flex-1"
+            className="max-w-md flex-1 basis-64"
             label="Domain"
             onChange={setDomain}
             placeholder="ads.example.com"
@@ -376,8 +447,8 @@ function HouseholdRules() {
         ) : (
           <ul className="divide-y divide-border">
             {rules.map((rule) => (
-              <li className="flex items-center gap-3 py-1.5" key={rule.id}>
-                <span className="min-w-0 flex-1 truncate font-mono text-xs">{rule.domain}</span>
+              <li className="flex items-center gap-3 py-2" key={rule.id}>
+                <span className="min-w-0 flex-1 truncate font-mono text-sm">{rule.domain}</span>
                 <StatusPill
                   label={rule.action === "allow" ? "Allow" : "Block"}
                   tone={rule.action === "allow" ? "good" : "bad"}
@@ -393,7 +464,7 @@ function HouseholdRules() {
                       failureTitle: "Could not remove the rule",
                     })
                   }
-                  size="icon-sm"
+                  size="icon-md"
                   variant="ghost"
                 >
                   <Trash2Icon aria-hidden />
@@ -438,9 +509,9 @@ function CheckDomain() {
       title="Check a domain"
     >
       <div className="space-y-4">
-        <div className="flex flex-wrap items-end gap-2">
+        <div className="flex flex-wrap items-end gap-3">
           <TextField
-            className="min-w-48 flex-1"
+            className="max-w-md flex-1 basis-64"
             hint={domain.trim() && !checkable ? "That is not a domain name." : undefined}
             label="Domain"
             onChange={setDomain}

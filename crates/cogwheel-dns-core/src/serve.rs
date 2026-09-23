@@ -19,6 +19,54 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::watch;
 
+/// What an operator reads when a DNS listener will not bind.
+///
+/// This is the single failure a household install actually meets: on a stock Linux host
+/// `systemd-resolved` holds port 53 before Cogwheel ever starts, and the container then restarts
+/// in a loop. Three documents exist to translate that, and until now the string they were
+/// translating was `bind udp socket` / `Address already in use` -- which names neither the port,
+/// nor the process that has it, nor the fix, all three of which are in scope right here.
+fn bind_failure(err: std::io::Error, listener: &str, addr: SocketAddr) -> anyhow::Error {
+    let port = addr.port();
+    let guidance = match err.kind() {
+        // The systemd-resolved advice is only true of port 53, and an operator who has already
+        // moved Cogwheel off 53 is the one person guaranteed not to be looking at the stub
+        // resolver. Naming it anyway would send them to fix something that is not their problem.
+        std::io::ErrorKind::AddrInUse if port == 53 => {
+            "Something else on this host already has port 53, and on a stock Linux host that is \
+             systemd-resolved's stub listener. Free it with `sudo /etc/cogwheel/install.sh \
+             --fix-port-53`, or `sudo sh scripts/install.sh --fix-port-53` from a checkout. \
+             `sudo ss -lnptu '( sport = :53 )'` names whatever holds it. To leave it where it is \
+             and move Cogwheel instead, set COGWHEEL_SERVER__DNS_UDP_BIND_ADDR and \
+             COGWHEEL_SERVER__DNS_TCP_BIND_ADDR to an unprivileged port such as 0.0.0.0:5353."
+                .to_string()
+        }
+        std::io::ErrorKind::AddrInUse => format!(
+            "Something else on this host already has that port. \
+             `sudo ss -lnptu '( sport = :{port} )'` names it. Stop that, or set \
+             COGWHEEL_SERVER__DNS_UDP_BIND_ADDR and COGWHEEL_SERVER__DNS_TCP_BIND_ADDR to a port \
+             nothing else wants."
+        ),
+        std::io::ErrorKind::PermissionDenied => format!(
+            "Binding port {port} needs CAP_NET_BIND_SERVICE, and this process does not have it. \
+             The shipped docker-compose.yml grants that capability and the systemd unit from \
+             scripts/install-native.sh sets it in the bounding set; a hand-rolled deployment has \
+             to do the same. To bind an unprivileged port (1024 or above) instead, set \
+             COGWHEEL_SERVER__DNS_UDP_BIND_ADDR and COGWHEEL_SERVER__DNS_TCP_BIND_ADDR."
+        ),
+        std::io::ErrorKind::AddrNotAvailable => "No interface on this host has that address. Set \
+             COGWHEEL_SERVER__DNS_UDP_BIND_ADDR and COGWHEEL_SERVER__DNS_TCP_BIND_ADDR to an \
+             address this host holds, or to 0.0.0.0 for all of them."
+            .to_string(),
+        _ => "Set COGWHEEL_SERVER__DNS_UDP_BIND_ADDR and COGWHEEL_SERVER__DNS_TCP_BIND_ADDR to \
+             bind somewhere else."
+            .to_string(),
+    };
+    anyhow::Error::new(err).context(format!(
+        "could not bind the {listener} on {addr}. {guidance}"
+    ))
+}
+
 impl DnsRuntime {
     pub async fn serve(self: Arc<Self>, config: DnsRuntimeConfig) -> Result<()> {
         let (_tx, never) = watch::channel(false);
@@ -43,11 +91,11 @@ impl DnsRuntime {
         let udp_socket = Arc::new(
             UdpSocket::bind(config.udp_bind_addr)
                 .await
-                .context("bind udp socket")?,
+                .map_err(|err| bind_failure(err, "DNS UDP listener", config.udp_bind_addr))?,
         );
         let tcp_listener = TcpListener::bind(config.tcp_bind_addr)
             .await
-            .context("bind tcp listener")?;
+            .map_err(|err| bind_failure(err, "DNS TCP listener", config.tcp_bind_addr))?;
         on_ready();
 
         // Several loops share the one socket so a hit on one core is answered while another is

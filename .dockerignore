@@ -40,10 +40,20 @@ data
 *.md
 docs
 deploy
-scripts
 docker-compose*.yml
 Dockerfile
 .dockerignore
+
+# --- scripts ----------------------------------------------------------------
+# All but one, and the exception is deliberate: the runtime image carries
+# verify-install.sh so a container-only host (Unraid, a plain `docker run`)
+# can check its own install with `docker exec`. The COPY for it sits after the
+# expensive layers, so editing the script rebuilds only image metadata.
+#
+# `scripts/*` rather than `scripts`: a negation cannot re-include a file from a
+# directory that was excluded whole.
+scripts/*
+!scripts/verify-install.sh
 
 # --- Editor / OS noise ------------------------------------------------------
 .idea

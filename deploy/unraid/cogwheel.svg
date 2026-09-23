@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Cogwheel DNS">
+  <!-- The Unraid Docker tab renders this at 48px on a dark chrome, so the mark
+       sits on its own tile rather than relying on the page behind it. The glyph
+       is the same path as docs/assets/logo.svg and the web app's favicon: filled
+       rectangles, no strokes, because a 2px stroke is the first thing to break
+       at 48px. The path is drawn on a 24-unit grid with a bounding box of
+       x 2..22, y 2..22, so scale 12 then translate 112 lands it at 136..376 --
+       centred, 240 units of a 512 tile. -->
+  <rect width="512" height="512" rx="112" fill="#0a0a0a"/>
+  <g transform="translate(112 112) scale(12)" fill="#fafafa">
+    <path d="M10 2h4v2h-4zM6 4h12v2H6zM4 6h16v2H4zM4 8h4v8H4zM16 8h4v8h-4zM2 10h2v4H2zM20 10h2v4h-2zM4 16h16v2H4zM6 18h12v2H6zM10 20h4v2h-4z"/>
+  </g>
+</svg>

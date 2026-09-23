@@ -1,8 +1,23 @@
-# Cogwheel DNS — production Compose deployment.
+# Cogwheel DNS — the whole deployment.
 #
-#   cp .env.example .env      # edit it, then:
+#   cp .env.example .env      # optional; every value below has a default
 #   docker compose up -d
 #   docker compose ps         # wait for STATUS = healthy
+#
+# Upgrading is two commands, from this directory, and it is the same two on
+# every host however Cogwheel was installed:
+#
+#   docker compose pull
+#   docker compose up -d
+#
+# There is no `build:` block here on purpose. Compose builds a missing image
+# when a service declares both `image:` and `build:`, and on a Raspberry Pi
+# that turns a thirty-second update into a multi-hour Rust compile — silently,
+# because building is the default policy rather than something you asked for.
+# To run your own build instead of the published one:
+#
+#   docker build -t cogwheel-dns:dev .
+#   COGWHEEL_IMAGE=cogwheel-dns:dev docker compose up -d
 #
 # Every tunable lives in .env. Nothing here should need editing except the
 # network mode block below, which is a deliberate, documented choice.
@@ -11,14 +26,22 @@ name: cogwheel
 
 services:
   cogwheel:
-    # Pull a published multi-arch image by default. `docker compose build` still
-    # works and will use the local Dockerfile; `COGWHEEL_IMAGE` in .env pins the
-    # version you actually want in production (never leave it at `latest` on a
-    # box you care about — see docs/release-policy.md).
+    # `latest` on purpose, and it is the recommendation rather than a shortcut.
+    # A moving tag is what makes `docker compose pull` an upgrade and what makes
+    # Unraid's Docker-tab update button able to say anything at all — it compares
+    # the digest you have against the registry's for the same tag, so a pinned
+    # tag can only ever report "up to date".
+    #
+    # Pinning is the informed opt-out, for someone who wants to read the
+    # changelog before every upgrade:
+    #
+    #   COGWHEEL_IMAGE=ghcr.io/thekozugroup/cogwheel-dns:0.1.0
+    #
+    # A release publishes `:latest`, `:MAJOR.MINOR` and the exact version;
+    # a bare `:MAJOR` joins them once Cogwheel reaches 1.0, because a `:0`
+    # tag would promise a stable major line that 0.x does not have. So
+    # v0.1.0 publishes three tags, not four — see docs/RELEASING.md.
     image: ${COGWHEEL_IMAGE:-ghcr.io/thekozugroup/cogwheel-dns:latest}
-    build:
-      context: .
-      dockerfile: Dockerfile
     container_name: ${COGWHEEL_CONTAINER_NAME:-cogwheel}
     restart: unless-stopped
 
@@ -83,8 +106,15 @@ services:
     #   - "${COGWHEEL_DNS_HOST_PORT:-53}:5353/tcp"
     #   - "${COGWHEEL_HTTP_HOST_PORT:-8080}:8080/tcp"
 
+    # Optional. The image's own defaults (Dockerfile ENV) are the household
+    # ones, so `docker compose up -d` in a fresh clone works with no .env at
+    # all. `required: false` is what makes that true for every compose verb,
+    # not just `up`: without it a missing .env makes `pull`, `down`, `logs` and
+    # even `config` fail outright, which leaves an operator who deleted a bad
+    # .env with a project they cannot stop.
     env_file:
-      - .env
+      - path: .env
+        required: false
 
     volumes:
       # Named volume, not a bind mount: the image creates /app/data owned by
@@ -93,7 +123,7 @@ services:
       # process could not open the SQLite database.
       # The database is one file in this volume, so a backup is a copy of the
       # volume: `docker run --rm -v cogwheel-data:/data ...` — see
-      # DEPLOYMENT.md § Backup and restore.
+      # docs/DEPLOYMENT.md § Backup and restore.
       - cogwheel-data:/app/data
 
     # =====================================================================
@@ -147,7 +177,15 @@ services:
     # down` waits out the full grace period before SIGKILL. With init: true the
     # signal is delivered normally and shutdown is prompt.
     init: true
-    stop_grace_period: ${COGWHEEL_STOP_GRACE_PERIOD:-20s}
+
+    # 60s, not the 20s a normal shutdown needs. A schema migration takes a
+    # `VACUUM INTO` copy of the database before it touches anything, and that
+    # copy runs before the server installs its shutdown handler. On a household
+    # database it is well under a second; on a large one with a slow SD card it
+    # is not, and being SIGKILLed partway through it is the one stop that has
+    # to be waited out rather than cut short. Ordinary stops are unaffected —
+    # this is a ceiling, not a delay.
+    stop_grace_period: ${COGWHEEL_STOP_GRACE_PERIOD:-60s}
 
     # =====================================================================
     # RESOURCES — defaults sized for a Raspberry Pi 5 (4 cores, 4–16 GB).
@@ -173,9 +211,43 @@ services:
         max-size: ${COGWHEEL_LOG_MAX_SIZE:-10m}
         max-file: "${COGWHEEL_LOG_MAX_FILE:-3}"
 
+    # =====================================================================
+    # UNATTENDED UPDATES
+    # =====================================================================
+    # Restated here rather than left as an image label, because the effective
+    # behaviour should be visible in the file you edit.
+    #
+    # Watchtower is stop -> pull -> start on a timer, with no health gate: a
+    # container that starts, migrates the database, fails and enters a restart
+    # loop is reported as a successful update. `monitor-only` keeps the half
+    # that helps -- it still tells you a new image exists -- and drops the half
+    # that can leave a household with no DNS at 04:00.
+    #
+    # Not because the migration is fragile. It is one
+    # TransactionBehavior::Immediate transaction (cogwheel-storage's
+    # upgrade_in_transaction), so a SIGKILL partway through rolls it back and
+    # the database is exactly as it was; the `VACUUM INTO` copy taken before it
+    # runs outside that transaction, and a partial one is deleted and re-taken
+    # on the next boot. A kill mid-migration costs a restart, not data.
+    #
+    # The risk being guarded is the other one: a release that migrates fine and
+    # then will not serve. Going back across a schema change needs the .pre-vN
+    # copy restored first, and that is a decision rather than something to find
+    # out from a crash loop the next morning.
+    #
+    # Set this to "false" to opt in to automatic updates. Check the new tag's
+    # io.cogwheel.schema-version label first -- if it is higher than what you
+    # are running, that release migrates.
+    labels:
+      com.centurylinklabs.watchtower.monitor-only: "true"
+
     # healthcheck is inherited from the image (HEALTHCHECK in the Dockerfile
     # probes GET /health/live). Overriding it here would only duplicate it.
 
 volumes:
   cogwheel-data:
+    # Named explicitly rather than left to Compose's `<project>_<volume>`
+    # convention, so the volume a `docker run` install created is the same one
+    # this project adopts. Moving an existing install onto Compose keeps its
+    # database; it does not start an empty Cogwheel beside it.
     name: ${COGWHEEL_VOLUME_NAME:-cogwheel-data}

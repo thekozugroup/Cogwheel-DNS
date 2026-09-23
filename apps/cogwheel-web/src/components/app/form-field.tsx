@@ -41,3 +41,18 @@ export function FormField({
 export function FieldRow({ children, className }: { children: React.ReactNode; className?: string }) {
   return <div className={cn("grid gap-6 sm:grid-cols-2", className)}>{children}</div>;
 }
+
+/**
+ * The Field label's exact typography for a group of controls Ark's Field cannot
+ * own — a segment group is a radio group, not a labelled input, so it takes an
+ * `aria-labelledby` rather than a `<label for>`. Hand-rolling the span instead
+ * is how one filter on Activity ended up with 19.25px leading beside two
+ * fields at 20px.
+ */
+export function GroupLabel({ children, id }: { children: React.ReactNode; id: string }) {
+  return (
+    <span className="select-none font-medium text-foreground text-sm leading-snug" id={id}>
+      {children}
+    </span>
+  );
+}
