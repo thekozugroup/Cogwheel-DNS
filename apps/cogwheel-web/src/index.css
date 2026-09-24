@@ -289,7 +289,11 @@
   [data-slot="native-select"],
   [data-slot="textarea"],
   [data-slot="tabs-trigger"],
-  [data-slot="segment-group-item"] {
+  [data-slot="segment-group-item"],
+  /* An icon button is a square target. `data-size` is the one marker that
+     survives an asChild merge, so without this a close button wrapped by
+     SheetClose came out 44 wide and 28 tall. */
+  [data-size^="icon"] {
     min-height: 44px;
   }
 

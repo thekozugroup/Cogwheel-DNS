@@ -14,6 +14,7 @@ import { SectionCard } from "@/components/app/section-card";
 import { StatTile } from "@/components/app/stat-tile";
 import { LoadingSkeleton } from "@/components/app/states";
 import { emptyOverview } from "@/lib/constants";
+import { usesNoLists } from "@/lib/derive";
 import { useProtectionSummary } from "@/components/layout/protection-state";
 import { useProtectionActions } from "@/hooks/use-protection";
 import { ConnectCard } from "./overview/connect";
@@ -174,6 +175,13 @@ type AnswerParts = { tone: Tone; headline: React.ReactNode; support: React.React
 function Answer() {
   const overview = useSnapshot("overview");
   const { devices } = useSnapshot("devices");
+  const catalogue = useSnapshot("lists");
+  // Built exactly as the Devices page builds it, so both pages agree on which
+  // devices have a list behind them.
+  const enabledLists = React.useMemo(
+    () => new Set(catalogue.lists.filter((list) => list.enabled).map((list) => list.id)),
+    [catalogue.lists],
+  );
   const { phase, busy, upstreamFailing } = useCogwheelStatus();
   const { mutate, reload } = useCogwheelActions();
   const { resume } = useProtectionActions();
@@ -293,7 +301,12 @@ function Answer() {
                       </span>
                     </>
                   ),
-                  support: filteredSentence(devices.filter((device) => !device.filtering).map((device) => device.name)),
+                  support: filteredSentence(
+                    devices.filter((device) => !device.filtering).map((device) => device.name),
+                    devices
+                      .filter((device) => device.filtering && usesNoLists(device, enabledLists))
+                      .map((device) => device.name),
+                  ),
                 };
 
   // Warning and problem states take the §2 tint, as the sidebar's paused
@@ -330,11 +343,26 @@ function Answer() {
   );
 }
 
-/** "Every device using Cogwheel is filtered except Work Laptop." Only a claim the device list backs. */
-function filteredSentence(unfiltered: string[]): string {
-  if (unfiltered.length === 0) return "Every device using Cogwheel is filtered.";
-  if (unfiltered.length <= 2) return `Every device using Cogwheel is filtered except ${names.format(unfiltered)}.`;
-  return `Every device using Cogwheel is filtered except the ${unfiltered.length} set to resolve unfiltered.`;
+/**
+ * "Every device using Cogwheel is filtered except Work Laptop (filtering off)."
+ * Only a claim the device list backs. A device with filtering on but no list
+ * behind it blocks by rules alone, and the Devices page already calls that a
+ * warning — so it is an exception here too, named in the Devices page's words.
+ * Counting only the filtering-off devices had this line call such a device
+ * filtered directly under a headline that promises the household is protected.
+ */
+function filteredSentence(off: string[], noLists: string[]): string {
+  const total = off.length + noLists.length;
+  if (total === 0) return "Every device using Cogwheel is filtered.";
+  if (total <= 3) {
+    const named = [...off.map((name) => `${name} (filtering off)`), ...noLists.map((name) => `${name} (no lists)`)];
+    return `Every device using Cogwheel is filtered except ${names.format(named)}.`;
+  }
+  const counts = [
+    off.length > 0 ? `${formatCount(off.length)} with filtering off` : null,
+    noLists.length > 0 ? `${formatCount(noLists.length)} with no lists` : null,
+  ].filter((part): part is string => part !== null);
+  return `Every device using Cogwheel is filtered except ${names.format(counts)}.`;
 }
 
 /* -------------------------------------------------------------------------- */
