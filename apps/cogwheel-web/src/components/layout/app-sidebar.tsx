@@ -1,16 +1,11 @@
 import { NavLink, useLocation } from "react-router-dom";
-import { ListIcon } from "lucide-react";
-import { PRIMARY_NAV, type NavItem } from "@/lib/nav";
-import { pluralize } from "@/lib/format";
-import { protectionState } from "@/lib/derive";
-import { useCogwheel } from "@/data/context";
+import { PRIMARY_NAV, shortcutHint, type NavItem } from "@/lib/nav";
+import { cn } from "@/lib/utils";
 import {
   Sidebar,
   SidebarContent,
   SidebarFooter,
   SidebarGroup,
-  SidebarGroupContent,
-  SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
   SidebarMenuButton,
@@ -18,29 +13,40 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import { Kbd } from "@/components/ui/kbd";
-import { Status } from "@/components/ui/status";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Mark } from "@/components/layout/mark";
 import { ThemeToggle } from "@/components/layout/theme-toggle";
-import { PauseControl } from "@/components/layout/pause-control";
+import {
+  ProtectionDot,
+  ProtectionPanel,
+  ProtectionRailButton,
+} from "@/components/layout/protection";
+import { useProtectionSummary } from "@/components/layout/protection-state";
 
 function NavRow({ item, onNavigate }: { item: NavItem; onNavigate: () => void }) {
   const location = useLocation();
   const active = item.to === "/" ? location.pathname === "/" : location.pathname.startsWith(item.to);
+  const hint = shortcutHint(item);
 
   return (
     <SidebarMenuItem>
       <SidebarMenuButton
         asChild
         isActive={active}
-        tooltip={item.shortcut ? `${item.label} (${item.shortcut})` : item.label}
+        tooltip={hint ? `${item.label} (${hint})` : item.label}
       >
         <NavLink onClick={onNavigate} to={item.to}>
           {/* The active row is marked by its surface and text colour, plus the
               aria-current NavLink sets. No accent rule down the edge. */}
           <item.icon aria-hidden />
           <span className="flex-1 truncate">{item.label}</span>
-          {item.shortcut ? (
-            <Kbd className="group-data-[collapsible=icon]:hidden">{item.shortcut}</Kbd>
+          {/* aria-hidden: the link's name is "Activity", not "Activity ⌘2".
+              Printed only where it is bound (a Mac) and only for a pointer
+              that has a keyboard beside it — not on a touch screen. */}
+          {hint ? (
+            <Kbd aria-hidden className="pointer-coarse:hidden group-data-[collapsible=icon]:hidden">
+              {hint}
+            </Kbd>
           ) : null}
         </NavLink>
       </SidebarMenuButton>
@@ -48,96 +54,84 @@ function NavRow({ item, onNavigate }: { item: NavItem; onNavigate: () => void })
   );
 }
 
+/**
+ * The mark, the product's name and — on the icon rail, where the name is gone —
+ * a status dot on the tile, so a collapsed sidebar still says whether the
+ * household is protected. The dot's word is in the link's name and tooltip.
+ */
+function Brand({ onNavigate }: { onNavigate: () => void }) {
+  const { state: sidebar, isMobile } = useSidebar();
+  const { state } = useProtectionSummary();
+  const rail = sidebar === "collapsed" && !isMobile;
+
+  const link = (
+    // In the phone drawer the sheet's Close sits at the header's far end, so
+    // the link stops short of it instead of running underneath.
+    <NavLink
+      className={cn(
+        "flex items-center gap-2 rounded-lg px-2 py-2 hover:bg-sidebar-accent group-data-[collapsible=icon]:px-0.5",
+        isMobile && "me-12",
+      )}
+      onClick={onNavigate}
+      to="/"
+    >
+      <span className="relative flex size-7 shrink-0 items-center justify-center rounded-md border border-sidebar-border bg-sidebar-primary text-sidebar-primary-foreground">
+        <Mark className="size-4" />
+        {rail ? <ProtectionDot className="absolute -end-1 -top-1" /> : null}
+      </span>
+      <span className="display-tight truncate font-semibold text-base text-foreground group-data-[collapsible=icon]:hidden">
+        Cogwheel
+      </span>
+      {rail ? <span className="sr-only">Cogwheel, {state.label}</span> : null}
+    </NavLink>
+  );
+
+  return (
+    <Tooltip positioning={{ placement: "right" }}>
+      <TooltipTrigger asChild>{link}</TooltipTrigger>
+      <TooltipContent hidden={!rail}>Cogwheel · {state.label}</TooltipContent>
+    </Tooltip>
+  );
+}
+
 export function AppSidebar() {
-  const { data, error, lastUpdatedAt } = useCogwheel();
-  const { isMobile, setOpenMobile } = useSidebar();
-  const location = useLocation();
+  const { isMobile, setOpenMobile, state } = useSidebar();
+  const rail = state === "collapsed" && !isMobile;
 
   const closeOnMobile = () => {
     if (isMobile) setOpenMobile(false);
   };
 
-  // "Unreachable" means we have never had an answer, not that one poll missed;
-  // a single failed poll is the StaleBanner's job, not the status line's.
-  const offline = Boolean(error) && lastUpdatedAt === null;
-  const state = protectionState(data.overview.protection.paused_until, offline);
-
-  // Overview's Protection tile says the same word behind the same dot a hand's
-  // width away, and says more besides — the pause countdown, the Resume button,
-  // whether the lists have downloaded. One of the two has to go, and on the
-  // other four screens this row is the only protection readout there is. The
-  // exception is an outage: the tile is drawn from last-known data and cannot
-  // know, so the row comes back to say so.
-  const showProtection = location.pathname !== "/" || offline;
-
-  const statusVariant =
-    state.tone === "good"
-      ? "success"
-      : state.tone === "warn"
-        ? "warning"
-        : state.tone === "bad"
-          ? "destructive"
-          : "default";
-
   return (
     <Sidebar>
       <SidebarHeader>
-        <NavLink
-          className="flex items-center gap-2 rounded-lg px-2 py-2 hover:bg-sidebar-accent"
-          onClick={closeOnMobile}
-          to="/"
-        >
-          <span className="flex size-7 shrink-0 items-center justify-center rounded-md border border-sidebar-border bg-sidebar-primary text-sidebar-primary-foreground">
-            <Mark className="size-4" />
-          </span>
-          <span className="display-tight truncate font-semibold text-base text-foreground group-data-[collapsible=icon]:hidden">
-            Cogwheel
-          </span>
-        </NavLink>
+        <Brand onNavigate={closeOnMobile} />
       </SidebarHeader>
 
       <SidebarContent>
+        {/* No "Navigation" label: five links under a product name are
+            navigation, and the heading said so to nobody. The <nav> says it
+            to the people it is for. */}
         <SidebarGroup>
-          <SidebarGroupLabel>Navigation</SidebarGroupLabel>
-          <SidebarGroupContent>
+          <nav aria-label="Main">
             <SidebarMenu>
               {PRIMARY_NAV.map((item) => (
                 <NavRow item={item} key={item.to} onNavigate={closeOnMobile} />
               ))}
             </SidebarMenu>
-          </SidebarGroupContent>
+          </nav>
         </SidebarGroup>
-        {/* Directly under the five nav rows rather than pinned to the bottom.
-            On a 900px window that left roughly 600px of empty sidebar between
-            the two, and put the one thing worth glancing at — whether the
-            household is protected — as far from the eye as the chrome allows.
 
-            Two facts, both of which hold wherever you are in the product and
-            neither of which is a count. The 24-hour query and blocked totals
-            used to sit here too, and on Overview they restated the two tiles
-            eight inches to the right — the same numbers, a second time, in a
-            place that cannot act on them. They belong on the page that is
-            about them. */}
-        <SidebarGroup className="group-data-[collapsible=icon]:hidden">
-          <SidebarGroupLabel>Right now</SidebarGroupLabel>
-          <SidebarGroupContent className="space-y-2 px-2 py-1">
-            {showProtection ? (
-              <p className="flex items-center gap-2 text-foreground text-sm">
-                <Status size="sm" variant={statusVariant} />
-                <span className="font-medium">{state.label}</span>
-              </p>
-            ) : null}
-            <p className="tabular flex items-center gap-2 text-muted-foreground text-sm">
-              <ListIcon aria-hidden className="size-3.5 shrink-0" />
-              {pluralize(data.overview.lists.enabled, "enabled list")}
-            </p>
-          </SidebarGroupContent>
+        {/* Directly under the five rows rather than pinned to the bottom: on a
+            900px window the bottom is 600px from where the eye is, and whether
+            the household is protected is the one thing in here worth a glance.
+            The state and the control that changes it are one block now. */}
+        <SidebarGroup aria-label="Protection" role="group">
+          {rail ? <ProtectionRailButton /> : <ProtectionPanel />}
         </SidebarGroup>
       </SidebarContent>
 
-      <SidebarFooter className="gap-3 border-sidebar-border border-t group-data-[collapsible=icon]:hidden">
-        <PauseControl />
-
+      <SidebarFooter className="border-sidebar-border border-t group-data-[collapsible=icon]:hidden">
         <ThemeToggle />
       </SidebarFooter>
     </Sidebar>

@@ -1,49 +1,65 @@
 import React from "react";
 import { Link } from "react-router-dom";
-import { ActivityIcon, CheckIcon, CopyIcon, PlayIcon, RotateCwIcon, ShieldOffIcon } from "lucide-react";
-import { api, type DomainCount } from "@/lib/api";
-import { checkSentence, looksIpv6, protectionState } from "@/lib/derive";
-import { formatCount, formatDuration, formatShare, pluralize } from "@/lib/format";
-import { notify } from "@/lib/toast";
+import { PlayIcon, RotateCwIcon } from "lucide-react";
+import { api, type Overview } from "@/lib/api";
+import type { Tone } from "@/components/app/status-indicator";
+import { formatCount, formatDuration, formatRelative, formatShare, pluralize } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import { useCogwheel } from "@/data/context";
+import { useCogwheelActions, useCogwheelStatus, useSnapshot } from "@/data/context";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Status } from "@/components/ui/status";
 import { PageHeader, PageSections, PageShell } from "@/components/app/page";
 import { SectionCard } from "@/components/app/section-card";
 import { StatTile } from "@/components/app/stat-tile";
-import { RowMenu } from "@/components/app/row-menu";
-import { EmptyState, LoadingSkeleton, NoticeBanner } from "@/components/app/states";
-import { usePauseCountdown, useProtectionActions } from "@/hooks/use-protection";
+import { LoadingSkeleton } from "@/components/app/states";
+import { emptyOverview } from "@/lib/constants";
+import { useProtectionSummary } from "@/components/layout/protection-state";
+import { useProtectionActions } from "@/hooks/use-protection";
+import { ConnectCard } from "./overview/connect";
+import { DomainCard } from "./overview/domain-card";
+import { HourStrip } from "./overview/hour-strip";
 
-/** Three hints cover every platform in the house; more is a manual, not a page. */
-const PLATFORMS = [
-  { name: "Android", steps: "Wi-Fi settings → modify network → IP settings Static → DNS 1." },
-  { name: "iPhone, iPad and Mac", steps: "Wi-Fi → the info icon → Configure DNS → Manual." },
-  { name: "Windows", steps: "Network & Internet → Hardware properties → DNS server assignment → Edit." },
-];
-
+/**
+ * Overview answers one question first — is the household protected right
+ * now — and then shows the day behind the answer.
+ *
+ * The protection state used to be the smallest type in a row of four equal
+ * tiles, the same weight as a query count. Now it is the page's first line, in
+ * words, with the one action that changes it beside it; the tiles under it are
+ * the detail.
+ *
+ * There is no page-level "Refresh lists" any more. Re-downloading every list is
+ * list maintenance, and Lists has it ("Refresh all") beside the lists it
+ * refreshes, with the busy rule on the card that changes. Overview offers it in
+ * exactly one state: when the lists have never downloaded, where it is the
+ * remedy for the answer on the first line.
+ */
 export function OverviewScreen() {
-  const { data, phase, busy, mutate } = useCogwheel();
-  const { resume } = useProtectionActions();
-  const remaining = usePauseCountdown();
-  const overview = data.overview;
+  const overview = useSnapshot("overview");
+  const settings = useSnapshot("settings");
+  const { phase } = useCogwheelStatus();
+  const { mutate } = useCogwheelActions();
   const day = overview.last_24h;
-  const state = protectionState(overview.protection.paused_until, false);
   const loading = phase === "loading";
 
-  const refreshLists = () =>
-    mutate({
-      key: "refresh-lists",
-      action: () => api.refreshLists(),
-      successTitle: "Lists refreshed",
-      successDetail: (results) =>
-        results.length === 1 ? `Checked ${results[0].name}.` : `Checked ${results.length} lists.`,
-      failureTitle: "Could not refresh lists",
-    });
+  // Nothing has resolved through the appliance in a day: the chart and both
+  // top tables would each say "point a device at the address below", and the
+  // address was the last thing on the page. So the address comes first.
+  // Nothing has ever loaded — the appliance has not answered and there is no
+  // cached copy. The answer says so; the address card and the "nothing to
+  // show yet" line under it were claims about an appliance nobody had heard
+  // from ("No address to advertise").
+  const never = !loading && overview === emptyOverview;
+  const firstRun = !loading && !never && day.queries === 0;
+  // The counters come from hourly rollups and outlive Clear log; the top
+  // tables come from the log itself. Traffic with an empty log is a cleared
+  // log (or one that is switched off), not a household with no traffic.
+  const logEmpty = !loading && !firstRun && overview.top_queried.length === 0;
+  const loggingOff = settings.version !== "" && settings.retention.history_days === 0;
 
   const addRule = (domain: string, action: "allow" | "block") =>
-    mutate({
+    void mutate({
       key: `rule-${domain}`,
       action: () => api.createRule({ domain, action }),
       successTitle: action === "allow" ? "Allowed for everyone" : "Blocked for everyone",
@@ -51,129 +67,84 @@ export function OverviewScreen() {
       failureTitle: "Could not save the rule",
     });
 
+  const connect = <ConnectCard port={overview.connect.port} targets={overview.connect.targets} />;
+
   return (
     <PageShell>
-      <PageHeader
-        /* One action, and it is the expensive one, so it says so. A second
-           button reading "Reload" used to sit beside it: it re-read this page's
-           own numbers, which the page already polls for, and "reload" a couple
-           of centimetres under the browser's own reload button is a coin flip.
-           A poll outage is the StaleBanner's job and it has its own Retry. */
-        actions={
-          <Button
-            isLoading={busy === "refresh-lists"}
-            onClick={() => void refreshLists()}
-            title="Re-download every subscribed blocklist now. Takes up to a minute."
-            variant="outline"
-          >
-            <RotateCwIcon aria-hidden />
-            Refresh lists
-          </Button>
-        }
-        description="What the appliance is doing right now, and how to point devices at it."
-        title="Overview"
-      />
+      <PageHeader title="Overview" />
 
       <PageSections>
+        <Answer />
+
         {loading ? (
           <LoadingSkeleton rows={4} variant="cards" />
+        ) : never ? null : firstRun ? (
+          <>
+            {connect}
+            <Note title="Nothing to show yet.">
+              The hourly chart and the top blocked and queried names appear once a device resolves through
+              Cogwheel.
+            </Note>
+          </>
         ) : (
-          /* Two up from the smallest width. Four short numbers fit side by side
-             at 375px, and stacking them cost 470px of scroll to read four. */
-          <div className="grid grid-cols-2 gap-6 xl:grid-cols-4">
-            <StatTile
-              footer={
-                state.paused ? (
-                  <Button
-                    className="w-full"
-                    isLoading={busy === "resume-runtime"}
-                    onClick={() => void resume()}
-                    size="sm"
-                    variant="outline"
-                  >
-                    <PlayIcon aria-hidden />
-                    Resume
-                  </Button>
-                ) : null
-              }
-              hint={
-                overview.lists.downloaded ? (
-                  state.detail
-                ) : (
-                  <span className="flex items-center gap-2 text-warning-foreground">
-                    <Status size="sm" variant="warning" />
-                    Lists not downloaded yet
-                  </span>
-                )
-              }
-              label="Protection"
-              tone={state.tone === "idle" ? "neutral" : state.tone}
-              value={state.paused ? `Paused ${formatDuration(remaining)}` : "Protected"}
-              variant="state"
-            />
-            <StatTile
-              // Suppressed when it says nothing new: at zero, because "2,946 /
-              // since last restart: 0" reads as a contradiction to anyone who
-              // has not been told the 24-hour figure outlives the process; and
-              // when it equals the 24-hour count, because then it is the same
-              // number printed twice.
-              hint={
-                overview.runtime.queries_total > 0 && overview.runtime.queries_total !== day.queries
-                  ? `${formatCount(overview.runtime.queries_total)} since this process started`
-                  : undefined
-              }
-              label="Queries (24 h)"
-              value={formatCount(day.queries)}
-            />
-            <StatTile
-              delta={`${formatShare(day.blocked, day.queries)} of queries`}
-              label="Blocked (24 h)"
-              value={formatCount(day.blocked)}
-            />
-            <StatTile
-              delta={
-                <Link className="hover:underline" to="/devices">
-                  {formatCount(day.named_devices)} named · {formatCount(day.unnamed_clients)} unnamed
-                </Link>
-              }
-              label="Devices"
-              value={formatCount(day.active_clients)}
-            />
-          </div>
+          <>
+            <Tiles overview={overview} />
+
+            <SectionCard title="Queries by hour">
+              <HourStrip blocked={day.blocked} buckets={day.per_hour} queries={day.queries} />
+            </SectionCard>
+
+            {logEmpty ? (
+              loggingOff ? (
+                <Note title="Query logging is off.">
+                  Top blocked and top queried are read from the log. Set COGWHEEL_RETENTION__HISTORY_DAYS to a
+                  number of days and restart to keep one.
+                </Note>
+              ) : (
+                <Note title="Log cleared.">
+                  Top blocked and top queried fill again as queries arrive; the counts above still cover the whole
+                  24 hours.
+                </Note>
+              )
+            ) : (
+              <div className="@container">
+                <div className="grid grid-cols-1 gap-gutter @4xl:grid-cols-2">
+                  <DomainCard
+                    blocked
+                    empty={
+                      day.blocked === 0
+                        ? {
+                            title: "Nothing blocked in the last 24 hours",
+                            description: "Every name your devices asked for was allowed.",
+                          }
+                        : {
+                            title: "No blocks in the log since it was cleared",
+                            description: `The ${formatCount(day.blocked)} counted above came before that. New ones appear here as they happen.`,
+                          }
+                    }
+                    onAllow={(domain) => addRule(domain, "allow")}
+                    onBlock={(domain) => addRule(domain, "block")}
+                    rows={overview.top_blocked}
+                    title="Top blocked"
+                  />
+                  <DomainCard
+                    blocked={false}
+                    empty={{
+                      title: "No queries in the log yet",
+                      description: "Names appear here as devices resolve through Cogwheel.",
+                    }}
+                    onAllow={(domain) => addRule(domain, "allow")}
+                    onBlock={(domain) => addRule(domain, "block")}
+                    rows={overview.top_queried}
+                    title="Top queried"
+                  />
+                </div>
+              </div>
+            )}
+
+            {connect}
+          </>
         )}
-
-        {/* The description says what the chart is, not what the two tiles
-            directly above it already say. "23,320 queries, 4,424 blocked" was
-            the third printing of the same pair on one screen. */}
-        <SectionCard description="Answered and blocked, by hour." title="Last 24 hours">
-          <HourStrip buckets={day.per_hour} />
-        </SectionCard>
-
-        <div className="grid gap-6 xl:grid-cols-2">
-          <DomainCard
-            emptyTitle="Nothing blocked yet"
-            emptyDescription="Blocked destinations appear once devices resolve through Cogwheel."
-            onAllow={(domain) => void addRule(domain, "allow")}
-            onBlock={(domain) => void addRule(domain, "block")}
-            rows={overview.top_blocked}
-            title="Top blocked"
-          />
-          <DomainCard
-            emptyTitle="No queries yet"
-            emptyDescription="Point a device at the address below and its traffic shows up here."
-            onAllow={(domain) => void addRule(domain, "allow")}
-            onBlock={(domain) => void addRule(domain, "block")}
-            rows={overview.top_queried}
-            title="Top queried"
-          />
-        </div>
-
-        <SectionCard
-          description="Set this as the DNS server on a device, or hand it out over DHCP."
-          title="Connect your devices"
-        >
-          <Targets port={overview.connect.port} targets={overview.connect.targets} />
-        </SectionCard>
       </PageSections>
     </PageShell>
   );
@@ -181,234 +152,263 @@ export function OverviewScreen() {
 
 /* -------------------------------------------------------------------------- */
 
+const DOT: Record<Tone, "success" | "warning" | "destructive" | "default"> = {
+  good: "success",
+  warn: "warning",
+  bad: "destructive",
+  idle: "default",
+};
+
+const names = new Intl.ListFormat(undefined, { style: "long", type: "conjunction" });
+
+type AnswerParts = { tone: Tone; headline: React.ReactNode; support: React.ReactNode; action?: React.ReactNode };
+
 /**
- * Twenty-four plain divs, a baseline, an hour axis and a peak figure. A chart
- * library is three hundred kilobytes to draw that.
+ * The first line of the page. Its own component so the pause countdown, which
+ * ticks once a second, re-renders this card and nothing else.
+ *
+ * Every sentence here is one the code can verify. "Protected" is not said of
+ * an appliance no device is using, or one whose lists have not downloaded:
+ * those are true states with their own words.
  */
-function HourStrip({ buckets }: { buckets: { hour: number; queries: number; blocked: number }[] }) {
-  const busiest = Math.max(0, ...buckets.map((bucket) => bucket.queries));
+function Answer() {
+  const overview = useSnapshot("overview");
+  const { devices } = useSnapshot("devices");
+  const { phase, busy, upstreamFailing } = useCogwheelStatus();
+  const { mutate, reload } = useCogwheelActions();
+  const { resume } = useProtectionActions();
+  const { state, paused, remaining, offline } = useProtectionSummary();
+  const headingId = React.useId();
 
-  // Twenty-four flat columns and a legend read as a component that failed to
-  // load rather than as "nothing has happened yet", so a silent box gets the
-  // same empty state the two cards below it get.
-  if (buckets.length === 0 || busiest === 0) {
+  if (phase === "loading") {
     return (
-      <EmptyState
-        description="Point a device at the address below; its traffic appears here within the hour."
-        icon={ActivityIcon}
-        title="No traffic yet"
-      />
+      <div aria-busy="true" aria-label="Loading" className="rounded-xl border border-border bg-card p-gutter">
+        <Skeleton className="h-6 w-2/3 max-w-80" />
+        <Skeleton className="mt-3 h-4 w-full max-w-96" />
+      </div>
     );
   }
 
-  const peak = Math.max(1, busiest);
-  // An install younger than a day has one or two hours of traffic and drew a
-  // 390px rectangle with a sliver at one edge — the first card of the first
-  // screen, for the whole of a new owner's first day. The card grows into its
-  // full height once there is a shape worth showing.
-  const active = buckets.filter((bucket) => bucket.queries > 0).length;
-  const tall = active >= 4;
+  const { lists, last_24h: day } = overview;
 
-  return (
-    <div>
-      <div className="mb-2 flex items-baseline justify-between gap-4">
-        <p className="text-muted-foreground text-xs">Queries per hour</p>
-        <p className="tabular text-muted-foreground text-xs">peak {formatCount(busiest)}/h</p>
-      </div>
+  const refreshLists = () =>
+    void mutate({
+      // The Lists page's key, so its "Refresh all" shows the same run.
+      key: "list-refresh-all",
+      action: () => api.refreshLists(),
+      successTitle: "Lists refreshed",
+      successDetail: (results) =>
+        results.length === 1 ? `Checked ${results[0].name}.` : `Checked ${results.length} lists.`,
+      failureTitle: "Could not refresh lists",
+    });
 
-      <div className={cn("relative flex items-end gap-1", tall ? "h-32" : "h-16")}>
-        {/* The baseline. Without it an hour with no traffic is indistinguishable
-            from a chart that failed to render. */}
-        <span aria-hidden className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-border" />
-        {buckets.map((bucket) => {
-          const total = Math.round((bucket.queries / peak) * 100);
-          const blocked = bucket.queries === 0 ? 0 : Math.round((bucket.blocked / bucket.queries) * 100);
-
-          return (
-            <div
-              className="relative flex h-full flex-1 flex-col justify-end"
-              key={bucket.hour}
-              title={`${hourLabel(bucket.hour)} — ${pluralize(bucket.queries, "query", "queries")}, ${formatCount(bucket.blocked)} blocked`}
-            >
-              {/* Blocked is stacked at the foot of the hour's own bar, so the
-                  dark portion reads as a share of that hour, not of the day. */}
-              <div
-                className="flex w-full flex-col justify-end overflow-hidden rounded-sm bg-neutral-300 dark:bg-neutral-600"
-                // An hour with no traffic draws nothing but the baseline. A
-                // one-percent sliver reads as a little traffic, which is the
-                // one thing it is not.
-                style={{ height: `${bucket.queries === 0 ? 0 : Math.max(total, 2)}%` }}
-              >
-                <div
-                  className="w-full bg-neutral-900 dark:bg-neutral-100"
-                  style={{ height: `${blocked}%` }}
-                />
-              </div>
-            </div>
-          );
-        })}
-      </div>
-
-      <div className="mt-2 flex gap-1">
-        {buckets.map((bucket, index) => (
-          <span className="tabular flex-1 text-center text-muted-foreground text-xs" key={bucket.hour}>
-            {index % 6 === 0 ? hourLabel(bucket.hour) : ""}
-          </span>
-        ))}
-      </div>
-
-      <p className="mt-3 flex flex-wrap items-center gap-4 text-muted-foreground text-xs">
-        <span className="flex items-center gap-2">
-          <span className="size-2.5 rounded-sm bg-neutral-900 dark:bg-neutral-100" />
-          Blocked
-        </span>
-        <span className="flex items-center gap-2">
-          <span className="size-2.5 rounded-sm bg-neutral-300 dark:bg-neutral-600" />
-          Answered
-        </span>
-      </p>
-    </div>
+  const toLists = (
+    <Button asChild variant="outline">
+      <Link to="/lists">Go to Lists</Link>
+    </Button>
   );
-}
 
-/** `17:00`, in the browser's own timezone. A bare "17" is not a time. */
-function hourLabel(unixSeconds: number): string {
-  return `${String(new Date(unixSeconds * 1000).getHours()).padStart(2, "0")}:00`;
-}
-
-function DomainCard({
-  title,
-  rows,
-  emptyTitle,
-  emptyDescription,
-  onAllow,
-  onBlock,
-}: {
-  title: string;
-  rows: DomainCount[];
-  emptyTitle: string;
-  emptyDescription: string;
-  onAllow: (domain: string) => void;
-  onBlock: (domain: string) => void;
-}) {
-  // Held per card, not per page. A domain in both Top blocked and Top queried
-  // is one domain but two rows, and one shared answer printed itself under both
-  // of them.
-  const [why, setWhy] = React.useState<{ domain: string; sentence: string } | null>(null);
-
-  const explain = async (domain: string) => {
-    try {
-      setWhy({ domain, sentence: checkSentence(await api.check(domain)) });
-    } catch {
-      notify.error("Could not check that domain", "The control plane did not answer.");
-    }
-  };
-
-  return (
-    <SectionCard title={title}>
-      {rows.length === 0 ? (
-        <EmptyState description={emptyDescription} icon={ShieldOffIcon} title={emptyTitle} />
-      ) : (
-        <ul className="divide-y divide-border">
-          {rows.map((row) => (
-            <li className="py-2" key={row.domain}>
-              <div className="flex items-center gap-3">
-                <span className="min-w-0 flex-1 truncate font-mono text-sm" title={row.domain}>
-                  {row.domain}
-                </span>
-                <span className="tabular shrink-0 text-sm">{formatCount(row.count)}</span>
-                <RowMenu
-                  actions={[
-                    { value: "allow", label: "Allow for everyone" },
-                    { value: "block", label: "Block for everyone" },
-                    { value: "why", label: "Why?" },
-                  ]}
-                  label={`Actions for ${row.domain}`}
-                  onSelect={(value) => {
-                    if (value === "allow") onAllow(row.domain);
-                    else if (value === "block") onBlock(row.domain);
-                    else void explain(row.domain);
-                  }}
-                />
-              </div>
-              {why?.domain === row.domain ? (
-                <NoticeBanner
-                  actions={
-                    <Button onClick={() => setWhy(null)} size="sm" variant="outline">
-                      Dismiss
-                    </Button>
-                  }
-                  className="mt-2"
-                  title={why.sentence}
-                  tone="neutral"
-                />
-              ) : null}
-            </li>
-          ))}
-        </ul>
-      )}
-    </SectionCard>
-  );
-}
-
-function Targets({ targets, port }: { targets: string[]; port: number }) {
-  const [copied, setCopied] = React.useState<string | null>(null);
-
-  if (targets.length === 0) {
-    return (
-      <EmptyState
-        description="The appliance could not work out its own address. Set COGWHEEL_SERVER__ADVERTISED_DNS_TARGETS and restart."
-        icon={ShieldOffIcon}
-        title="No address to advertise"
-      />
-    );
-  }
-
-  const copy = async (target: string) => {
-    try {
-      await navigator.clipboard.writeText(target);
-      setCopied(target);
-      window.setTimeout(() => setCopied(null), 2_000);
-    } catch {
-      notify.error("Could not copy", "Select the address and copy it by hand.");
-    }
-  };
-
-  return (
-    <div className="space-y-6">
-      <ul className="grid gap-6 sm:grid-cols-2">
-        {targets.map((target) => (
-          <li
-            className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2"
-            key={target}
-          >
-            <div className="min-w-0">
-              <span className="block text-muted-foreground text-xs">
-                {looksIpv6(target) ? "IPv6" : "IPv4"} · port {port}
-              </span>
-              <span className="block truncate font-mono text-foreground text-sm">{target}</span>
-            </div>
-            <Button
-              aria-label={`Copy ${target}`}
-              className={cn("shrink-0")}
-              onClick={() => void copy(target)}
-              size="icon-md"
-              variant="ghost"
-            >
-              {copied === target ? <CheckIcon aria-hidden /> : <CopyIcon aria-hidden />}
+  const parts: AnswerParts = offline
+    ? {
+        tone: "bad",
+        headline: "Cogwheel is not answering",
+        support: state.detail,
+        action: (
+          <Button onClick={() => void reload()} variant="outline">
+            <RotateCwIcon aria-hidden />
+            Try again
+          </Button>
+        ),
+      }
+    : paused
+      ? {
+          tone: "warn",
+          headline: (
+            <>
+              Protection is paused · <span className="tabular">{formatDuration(remaining)}</span> left
+            </>
+          ),
+          support: "Every device resolves unfiltered until then.",
+          action: (
+            <Button isLoading={busy === "resume-runtime"} onClick={() => void resume()} variant="outline">
+              <PlayIcon aria-hidden />
+              Resume protection
             </Button>
-          </li>
-        ))}
-      </ul>
+          ),
+        }
+      : upstreamFailing
+        ? {
+            // Blocking still answers; everything else goes to the upstream,
+            // and the upstream is not answering. Said as what the household
+            // sees — pages that do not load — and where the upstream is set.
+            tone: "bad",
+            headline: "Lookups are failing",
+            support:
+              "The upstream server has not answered most of the lookups sent to it in the last minute, so names that are not blocked do not resolve. Blocking still works.",
+            action: (
+              <Button asChild variant="outline">
+                <Link to="/settings">See the upstream</Link>
+              </Button>
+            ),
+          }
+        : lists.enabled === 0
+          ? {
+              tone: "warn",
+              headline: lists.total === 0 ? "No blocklists yet" : "Every blocklist is switched off",
+              support: "Only your own rules are blocking anything.",
+              action: toLists,
+            }
+          : !lists.downloaded
+            ? {
+                tone: "warn",
+                headline: "Your blocklists have not downloaded yet",
+                support: "Until one does, only your own rules are blocking anything.",
+                action: (
+                  <Button isLoading={busy === "list-refresh-all"} onClick={refreshLists} variant="outline">
+                    <RotateCwIcon aria-hidden />
+                    Refresh lists
+                  </Button>
+                ),
+              }
+            : day.queries === 0
+              ? {
+                  tone: "idle",
+                  headline: (
+                    <>
+                      Cogwheel is ready
+                      <span className="font-normal text-muted-foreground"> · no device is using it yet</span>
+                    </>
+                  ),
+                  support: `Any device that uses the address below is filtered by ${pluralize(lists.enabled, "blocklist")}.`,
+                }
+              : {
+                  tone: "good",
+                  headline: (
+                    <>
+                      Your household is protected
+                      <span className="font-normal text-muted-foreground">
+                        {" · "}
+                        {day.blocked === 0 ? "nothing blocked" : `${formatCount(day.blocked)} blocked`} in the last
+                        24 hours
+                      </span>
+                    </>
+                  ),
+                  support: filteredSentence(devices.filter((device) => !device.filtering).map((device) => device.name)),
+                };
 
-      <ul className="grid gap-6 sm:grid-cols-3">
-        {PLATFORMS.map((platform) => (
-          <li className="rounded-lg border border-border p-3" key={platform.name}>
-            <p className="font-medium text-foreground text-sm">{platform.name}</p>
-            <p className="mt-1 text-muted-foreground text-sm">{platform.steps}</p>
-          </li>
-        ))}
-      </ul>
+  // Warning and problem states take the §2 tint, as the sidebar's paused
+  // block does: the one card on the page that must not be read past. On a
+  // tint, secondary text is the foreground at 80%, never grey.
+  const tinted = parts.tone === "warn" || parts.tone === "bad";
+
+  return (
+    <section
+      aria-labelledby={headingId}
+      className={cn(
+        "flex flex-wrap items-center justify-between gap-x-gutter gap-y-4 rounded-xl border p-gutter",
+        parts.tone === "warn"
+          ? "border-warning/40 bg-warning/10"
+          : parts.tone === "bad"
+            ? "border-destructive/24 bg-destructive/8"
+            : "border-border bg-card",
+      )}
+    >
+      <div className="min-w-0 flex-1 basis-80">
+        {/* The dot runs inline with the words rather than in a column of its
+            own: at 200% text that column cost a third of a phone's width and
+            set the answer eight lines tall. */}
+        <h2 className="font-semibold text-foreground text-xl" id={headingId}>
+          <Status className="me-3 inline-block align-middle ring-0" size="md" variant={DOT[parts.tone]} />
+          {parts.headline}
+        </h2>
+        <p className={cn("mt-1 text-sm", tinted ? "text-foreground/80" : "text-muted-foreground")}>
+          {parts.support}
+        </p>
+      </div>
+      {parts.action ? <div className="shrink-0">{parts.action}</div> : null}
+    </section>
+  );
+}
+
+/** "Every device using Cogwheel is filtered except Work Laptop." Only a claim the device list backs. */
+function filteredSentence(unfiltered: string[]): string {
+  if (unfiltered.length === 0) return "Every device using Cogwheel is filtered.";
+  if (unfiltered.length <= 2) return `Every device using Cogwheel is filtered except ${names.format(unfiltered)}.`;
+  return `Every device using Cogwheel is filtered except the ${unfiltered.length} set to resolve unfiltered.`;
+}
+
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The day in four numbers. Each label says what it counts: "Devices" printed
+ * 5 while the Devices page printed 3, because one counts every address seen in
+ * a day and the other the devices someone named.
+ *
+ * Laid out against the width they actually get, in rem, so large text is a
+ * narrower container: one column when a tile would be too tight for its own
+ * number, two, and four only when four fit.
+ */
+function Tiles({ overview }: { overview: Overview }) {
+  const { last_24h: day, lists, runtime } = overview;
+
+  return (
+    <div className="@container">
+      <div className="grid grid-cols-1 gap-gutter @2xs:grid-cols-2 @3xl:grid-cols-4">
+        <StatTile
+          // Suppressed when it says nothing new: at zero, because "2,946 /
+          // since last restart: 0" reads as a contradiction to anyone who has
+          // not been told the 24-hour figure outlives the process; and when it
+          // equals the 24-hour count, because then it is the same number twice.
+          hint={
+            runtime.queries_total > 0 && runtime.queries_total !== day.queries
+              ? `${formatCount(runtime.queries_total)} since this process started`
+              : undefined
+          }
+          label={"Queries (24\u00a0h)"}
+          value={formatCount(day.queries)}
+        />
+        <StatTile
+          delta={`${formatShare(day.blocked, day.queries)} of queries`}
+          label={"Blocked (24\u00a0h)"}
+          value={formatCount(day.blocked)}
+        />
+        <StatTile
+          delta={
+            // On a touch screen the link is as tall as a finger needs; it was
+            // a 17px line of text, the one link on the page under 44px.
+            <Link
+              className="underline decoration-border underline-offset-4 hover:decoration-current pointer-coarse:inline-flex pointer-coarse:min-h-11 pointer-coarse:items-center"
+              to="/devices"
+            >
+              {formatCount(day.named_devices)} named · {formatCount(day.unnamed_clients)} unnamed
+            </Link>
+          }
+          label={"Devices seen (24\u00a0h)"}
+          value={formatCount(day.active_clients)}
+        />
+        <StatTile
+          delta={`${pluralize(lists.rules_loaded, "rule")} loaded`}
+          hint={updatedLabel(lists.last_ok_at)}
+          label="Blocklists"
+          value={lists.total > lists.enabled ? `${lists.enabled} of ${lists.total} on` : formatCount(lists.enabled)}
+        />
+      </div>
     </div>
+  );
+}
+
+/** When a list last downloaded. "Updated now" is not a sentence anyone says. */
+function updatedLabel(lastOk: number | null): string {
+  if (lastOk === null) return "Not downloaded yet";
+  if (Date.now() / 1000 - lastOk < 60) return "Updated under a minute ago";
+  return `Updated ${formatRelative(lastOk)}`;
+}
+
+/** One line standing in for a section that has nothing to show, and saying why. */
+function Note({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <p className="rounded-xl border border-border bg-card px-gutter py-4 text-muted-foreground text-sm">
+      <span className="font-medium text-foreground">{title}</span> {children}
+    </p>
   );
 }

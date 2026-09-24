@@ -10,10 +10,14 @@ const inputVariants = tv({
     "peer",
     "w-full min-w-0",
     "px-3",
-    "bg-transparent dark:bg-input/30",
+    // The dark fill is --muted, not --input: --input is now the 3:1 edge
+    // colour, and a field filled with its own border colour loses the edge.
+    "bg-transparent dark:bg-muted/60",
     "text-base md:text-sm",
     "rounded-lg border border-input shadow-xs/5",
-    "placeholder:text-muted-foreground/64",
+    // Full --muted-foreground: 4.74:1 light, 6.6:1 dark. At /64 it was 2.43:1,
+    // a placeholder that is an example nobody can read.
+    "placeholder:text-muted-foreground",
     "file:inline-flex file:h-7 file:items-center file:border-0",
     "file:font-medium file:text-foreground file:text-sm",
     "transition-[color,box-shadow]",

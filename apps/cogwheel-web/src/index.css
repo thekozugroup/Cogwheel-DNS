@@ -22,6 +22,15 @@
   --radius-xl: 0.625rem;
   --radius-2xl: 0.875rem;
 
+  /* The one gutter (DESIGN.md §5): between cards, round a card's content,
+     between the fields of a form row. In pixels, not rem, on purpose. Text
+     that is set to 200% should be twice as big; the whitespace around it
+     should not. As rem it doubled with the text, and on a 375px phone the
+     page padding and the card padding together took 192px, leaving a card
+     181px of room for words twice their size. `gap-gutter`, `p-gutter`,
+     `px-gutter` and friends are generated from this. */
+  --spacing-gutter: 24px;
+
   --default-transition-duration: 150ms;
   --default-transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
 
@@ -100,15 +109,33 @@
   --accent: var(--color-neutral-100);
   --accent-foreground: var(--color-neutral-900);
 
+  /* `--border` is the hairline between surfaces: cards, dividers, table rows.
+     It separates, it does not identify anything, so it stays at 1.26:1.
+     `--input` is the edge of a *control* — a field, an outline button, an
+     unchecked switch track, a segment group — and is what tells a person
+     there is something there to operate. WCAG 1.4.11 puts that at 3:1 against
+     the surface; neutral-300 was 1.48:1 and neutral-400 is 2.59:1, so the
+     light value is the midpoint of 400 and 500: still the neutral ramp, and
+     3.47:1 on white, 3.32:1 on the sidebar, 3.18:1 on --muted.
+     `--ring` is the foreground itself. A focus ring in neutral-400 was 2.6:1,
+     the one indicator a keyboard user cannot do without, drawn in the palest
+     grey in the product. */
   --border: var(--color-neutral-200);
-  --input: var(--color-neutral-300);
-  --ring: var(--color-neutral-400);
+  --input: color-mix(in oklab, var(--color-neutral-400), var(--color-neutral-500));
+  --ring: var(--color-neutral-900);
 
-  --destructive: var(--color-red-400);
+  /* The three status hues, as the sRGB colours Tailwind 400 renders as.
+     Tailwind v4 defines them in oklch, and red-400 lies outside sRGB. Opaque,
+     a browser maps it into gamut; at the 8–40% alpha of a tint, Chromium
+     premultiplies the out-of-range channel and paints cyan specks on every
+     anti-aliased corner of a red tint — the error box, the unreachable answer,
+     the delete dialog's consequence. The values are Tailwind's own sRGB
+     equivalents, so a dot looks exactly as it did. */
+  --destructive: #ff6467;
   --destructive-foreground: var(--color-red-700);
-  --success: var(--color-green-400);
+  --success: #05df72;
   --success-foreground: var(--color-green-700);
-  --warning: var(--color-yellow-400);
+  --warning: #fdc700;
   --warning-foreground: var(--color-yellow-700);
   /* Shark ships --info as blue. Collapsed onto neutral: no fourth hue. */
   --info: var(--color-neutral-400);
@@ -121,7 +148,7 @@
   --sidebar-accent: var(--color-neutral-100);
   --sidebar-accent-foreground: var(--color-neutral-900);
   --sidebar-border: var(--color-neutral-200);
-  --sidebar-ring: var(--color-neutral-400);
+  --sidebar-ring: var(--color-neutral-900);
 }
 
 :root[data-theme="dark"] {
@@ -141,15 +168,17 @@
   --accent: var(--color-neutral-800);
   --accent-foreground: var(--color-neutral-50);
 
+  /* neutral-500 edges: 3.77:1 on the card, 4.17:1 on the page. The 400/500
+     midpoint used in light mode is 2.95:1 here, under the line. */
   --border: var(--color-neutral-800);
-  --input: var(--color-neutral-700);
-  --ring: var(--color-neutral-600);
+  --input: var(--color-neutral-500);
+  --ring: var(--color-neutral-50);
 
-  --destructive: var(--color-red-400);
+  --destructive: #ff6467;
   --destructive-foreground: var(--color-red-300);
-  --success: var(--color-green-400);
+  --success: #05df72;
   --success-foreground: var(--color-green-300);
-  --warning: var(--color-yellow-400);
+  --warning: #fdc700;
   --warning-foreground: var(--color-yellow-300);
   --info: var(--color-neutral-500);
   --info-foreground: var(--color-neutral-300);
@@ -161,7 +190,7 @@
   --sidebar-accent: var(--color-neutral-800);
   --sidebar-accent-foreground: var(--color-neutral-50);
   --sidebar-border: var(--color-neutral-800);
-  --sidebar-ring: var(--color-neutral-600);
+  --sidebar-ring: var(--color-neutral-50);
 }
 
 @layer base {
@@ -240,21 +269,59 @@
   }
 }
 
-/* Shark sizes its controls for the mouse. On a touch device that leaves a 28–32px
-   target, so every interactive slot is grown to the 44px minimum instead. */
+/*
+ * Shark sizes its controls for the mouse. On a touch device that leaves a
+ * 28–32px target, so every interactive slot is grown to the 44px minimum.
+ *
+ * The list is by slot *and* by size, because `asChild` rewrites the slot: a
+ * Button inside `MenuTrigger asChild` or `TooltipTrigger asChild` renders with
+ * that trigger's `data-slot`, and a rule keyed on `data-slot="button"` alone
+ * left every row menu at 32px and the sidebar trigger at 28px. `data-size`
+ * survives the merge, and only Button emits the `icon-*` sizes.
+ */
 @media (pointer: coarse) {
   [data-slot="button"],
+  [data-slot="menu-trigger"],
+  [data-slot="tooltip-trigger"][data-size],
+  [data-slot="sidebar-trigger"],
+  [data-slot="sidebar-menu-button"],
   [data-slot="input"],
   [data-slot="native-select"],
   [data-slot="textarea"],
   [data-slot="tabs-trigger"],
-  [data-slot="sidebar-menu-button"],
   [data-slot="segment-group-item"] {
     min-height: 44px;
   }
 
-  [data-slot="button"][data-size^="icon"] {
+  [data-size^="icon"],
+  [data-slot="sidebar-trigger"],
+  [data-slot="segment-group-item"] {
     min-width: 44px;
+  }
+
+  /* A label that wraps a checkbox or radio is the target, not the 16px box
+     inside it: the whole row toggles, so the whole row is 44px tall. The
+     switch is excluded by slot because its root is also a <label> around a
+     hidden checkbox, and a 44px-tall track is a different control. */
+  label:not([data-slot="switch"]):has(> input[type="checkbox"]),
+  label:not([data-slot="switch"]):has(> input[type="radio"]) {
+    min-height: 44px;
+  }
+
+  /* The switch keeps its drawn size — a 44px track would be a different
+     control — and grows an invisible hit area instead. The root is the
+     <label>, so a tap anywhere on the pseudo-element toggles it. */
+  [data-slot="switch"] {
+    position: relative;
+  }
+
+  [data-slot="switch"]::after {
+    content: "";
+    position: absolute;
+    inset: 50% auto auto 50%;
+    width: max(100%, 44px);
+    height: 44px;
+    translate: -50% -50%;
   }
 }
 
@@ -287,6 +354,30 @@
   }
 }
 
+/*
+ * SectionCard's busy rule: a 2px indeterminate bar under the card header.
+ *
+ * Under reduced motion the global rule below would stop the slide after one
+ * zero-length iteration and leave a quarter-width bar sitting at the start of
+ * the track -- which reads as "25% done", a determinate claim nobody made. The
+ * honest still form is the whole track, faintly pulsing: no spatial movement,
+ * and nothing that looks like a quantity.
+ */
+.busy-rule {
+  width: 25%;
+  animation: var(--animate-indeterminate);
+}
+
+@keyframes busy-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
 /* Honour the OS setting globally, not just per-component. */
 @media (prefers-reduced-motion: reduce) {
   *,
@@ -296,5 +387,12 @@
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
     scroll-behavior: auto !important;
+  }
+
+  /* Opacity only, which reduced motion keeps; the class outranks `*`. */
+  .busy-rule {
+    width: 100%;
+    transform: none;
+    animation: busy-pulse 2s ease-in-out infinite !important;
   }
 }

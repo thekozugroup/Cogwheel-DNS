@@ -142,7 +142,7 @@ whether there is anything newer, rollback and backup; its
 
 ## What it looks like
 
-<img alt="Cogwheel's Overview page: protection status, 23,349 queries and 4,426 blocked in the last 24 hours, a per-hour bar chart, and the top blocked and top queried domains" src="docs/assets/screenshot-overview.png" width="100%">
+<img alt="Cogwheel's Overview page: it leads with the answer, 'Your household is protected · 644 blocked in the last 24 hours' and every device filtered except Work Laptop, then 3,029 queries in the last 24 hours, a per-hour bar chart, and the top blocked and top queried domains" src="docs/assets/screenshot-overview.png" width="100%">
 
 What the appliance is doing right now, and the address to give your router. The 24-hour chart
 stacks blocked under answered rather than putting them side by side, because the question people

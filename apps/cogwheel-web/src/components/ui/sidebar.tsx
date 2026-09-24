@@ -5,9 +5,11 @@ import { PanelLeftIcon } from "lucide-react";
 import React from "react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { IconButton } from "@/components/ui/icon-button";
 import { Sheet, SheetContent, SheetHeader } from "@/components/ui/sheet";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useIsMobile } from "@/hooks/use-is-mobile";
+import { SCREEN_SHORTCUTS_BOUND } from "@/lib/nav";
 
 const SIDEBAR_COOKIE_NAME = "sidebar_state";
 const SIDEBAR_COOKIE_MAX_AGE = 60 * 60 * 24 * 7;
@@ -15,6 +17,8 @@ const SIDEBAR_WIDTH = "16rem";
 const SIDEBAR_WIDTH_MOBILE = "18rem";
 const SIDEBAR_WIDTH_ICON = "3rem";
 const SIDEBAR_KEYBOARD_SHORTCUT = "b";
+/** The id the trigger's aria-controls points at, in both forms. */
+export const SIDEBAR_ID = "app-sidebar";
 
 interface SidebarContextProps {
   isMobile: boolean;
@@ -83,11 +87,17 @@ export const SidebarProvider = (props: SidebarProviderProps) => {
     }
   }, [isMobile, setOpen]);
 
+  // ⌘B on a Mac only, for the reason lib/nav.ts binds ⌘1–⌘5 there only:
+  // elsewhere Ctrl+B is the browser's (Firefox's bookmarks sidebar), and a
+  // page that takes it takes away a way out of the page.
   React.useEffect(() => {
+    if (!SCREEN_SHORTCUTS_BOUND) return;
     const handleKeyDown = (event: KeyboardEvent) => {
       if (
         event.key === SIDEBAR_KEYBOARD_SHORTCUT &&
-        (event.metaKey || event.ctrlKey)
+        event.metaKey &&
+        !event.ctrlKey &&
+        !event.altKey
       ) {
         event.preventDefault();
         toggleSidebar();
@@ -114,6 +124,16 @@ export const SidebarProvider = (props: SidebarProviderProps) => {
     [state, open, setOpen, isMobile, openMobile, toggleSidebar]
   );
 
+  /*
+   * From md up the shell is a two-column grid and collapsing the sidebar is a
+   * change to the first column's track. That is the one thing that animates:
+   * `grid-template-columns`, 200ms, on the wrapper. It used to be `width` on
+   * two elements (a fixed panel and a spacer holding its place in the flex
+   * row), `margin` and `opacity` on the group labels and `width, height,
+   * padding` on every nav button — four layout transitions per toggle, each
+   * forcing its own reflow. The panel now sits in the grid cell at 100% of the
+   * track and follows it; nothing inside it transitions its geometry.
+   */
   return (
     <SidebarContext.Provider value={contextValue}>
       <ark.div
@@ -121,13 +141,19 @@ export const SidebarProvider = (props: SidebarProviderProps) => {
           "group/sidebar-wrapper",
           "flex",
           "min-h-svh w-full",
+          "md:grid md:h-svh md:min-h-0",
+          "md:grid-cols-[var(--sidebar-track)_minmax(0,1fr)]",
+          "md:transition-[grid-template-columns] md:duration-200",
+          "motion-reduce:transition-none!",
           className
         )}
         data-slot="sidebar-wrapper"
+        data-state={state}
         style={
           {
             "--sidebar-width": SIDEBAR_WIDTH,
             "--sidebar-width-icon": SIDEBAR_WIDTH_ICON,
+            "--sidebar-track": open ? "var(--sidebar-width)" : "var(--sidebar-width-icon)",
             ...style,
           } as React.CSSProperties
         }
@@ -158,6 +184,7 @@ export const Sidebar = (props: SidebarProps) => {
     return (
       <Sheet
         {...rest}
+        ids={{ content: SIDEBAR_ID }}
         onOpenChange={({ open }) => setOpenMobile(open)}
         open={openMobile}
       >
@@ -166,8 +193,7 @@ export const Sidebar = (props: SidebarProps) => {
             "w-(--sidebar-width)",
             "p-0",
             "bg-sidebar",
-            "text-sidebar-foreground",
-            "[&>button]:hidden"
+            "text-sidebar-foreground"
           )}
           data-mobile="true"
           data-sidebar="sidebar"
@@ -179,93 +205,99 @@ export const Sidebar = (props: SidebarProps) => {
             } as React.CSSProperties
           }
         >
-          <SheetHeader
-            className="sr-only"
-            description="Displays the mobile sidebar."
-            title="Sidebar"
-          />
+          {/* The sheet's own Close stays: it was hidden, which left a phone
+              drawer with no control that closes it — a tap on the dimmed page
+              works for a finger, but a screen reader has nothing to find.
+
+              The dialog's name is what a screen reader says when it opens.
+              Shark's "Sidebar" / "Displays the mobile sidebar." described the
+              widget to the person inside it; "Menu" is what it is to them. */}
+          <SheetHeader className="sr-only" title="Menu" />
           <ark.div className="flex size-full flex-col">{children}</ark.div>
         </SheetContent>
       </Sheet>
     );
   }
 
+  // <aside>, so the brand, the nav, the pause control and the theme toggle
+  // are inside a landmark; the five links carry their own <nav> within it.
   return (
-    <ark.div
-      className={cn("group peer", "hidden md:block", "text-sidebar-foreground")}
+    <ark.aside
+      aria-label="Sidebar"
+      className={cn("group peer", "hidden md:block", "min-w-0", "text-sidebar-foreground")}
       data-collapsible={state === "collapsed" ? "icon" : ""}
       data-slot="sidebar"
       data-state={state}
+      id={SIDEBAR_ID}
     >
-      {/* Holds the column's width in the flex row; the panel itself is fixed. */}
       <ark.div
         className={cn(
-          "relative",
-          "w-(--sidebar-width)",
-          "bg-transparent",
-          "transition-[width] duration-200 ease-linear",
-          "group-data-[collapsible=icon]:w-(--sidebar-width-icon)",
-          "motion-reduce:transition-none!"
-        )}
-        data-slot="sidebar-gap"
-      />
-      <ark.div
-        className={cn(
-          "fixed inset-y-0 z-10",
-          "inset-s-0 w-(--sidebar-width)",
-          "hidden md:flex",
-          "h-svh",
+          "sticky top-0",
+          "h-svh w-full",
+          "flex",
+          "overflow-hidden",
           "border-e",
-          "transition-[width] duration-200 ease-linear",
-          "group-data-[collapsible=icon]:w-(--sidebar-width-icon)",
-          "motion-reduce:transition-none!",
           className
         )}
         data-slot="sidebar-container"
         {...rest}
       >
         <ark.div
-          className={cn("size-full", "flex flex-col", "bg-sidebar")}
+          className={cn("size-full min-w-0", "flex flex-col", "bg-sidebar")}
           data-sidebar="sidebar"
           data-slot="sidebar-inner"
         >
           {children}
         </ark.div>
       </ark.div>
-    </ark.div>
+    </ark.aside>
   );
 };
 
-export const SidebarTrigger = (props: React.ComponentProps<typeof Button>) => {
-  const { className, onClick, ...rest } = props;
+/**
+ * A disclosure: it says whether the sidebar is expanded and which element it
+ * controls. On a phone it opens a dialog, and says that instead.
+ */
+export const SidebarTrigger = (
+  props: Omit<React.ComponentProps<typeof IconButton>, "label"> & { label?: string }
+) => {
+  const { className, onClick, label, ...rest } = props;
 
-  const { toggleSidebar } = useSidebar();
+  const { toggleSidebar, isMobile, open, openMobile } = useSidebar();
+  const expanded = isMobile ? openMobile : open;
 
   return (
-    <Button
-      className={cn("size-7", className)}
+    <IconButton
+      aria-controls={SIDEBAR_ID}
+      aria-expanded={expanded}
+      aria-haspopup={isMobile ? "dialog" : undefined}
+      className={className}
       data-sidebar="trigger"
       data-slot="sidebar-trigger"
+      label={label ?? (isMobile ? "Menu" : "Sidebar")}
       onClick={(event) => {
         onClick?.(event);
         toggleSidebar();
       }}
-      size="icon-md"
-      variant="ghost"
+      tooltip={isMobile ? "Menu" : expanded ? "Collapse sidebar" : "Expand sidebar"}
+      tooltipPlacement="bottom"
       {...rest}
     >
-      <PanelLeftIcon className="rtl:rotate-180" />
-      <ark.span className="sr-only">Toggle Sidebar</ark.span>
-    </Button>
+      <PanelLeftIcon aria-hidden className="rtl:rotate-180" />
+    </IconButton>
   );
 };
 
-export const SidebarInset = (props: React.ComponentProps<typeof ark.main>) => {
+/**
+ * The column beside the sidebar. A plain <div>: it holds the top bar (the
+ * banner) and the page's <main>, and a <main> cannot contain a banner.
+ */
+export const SidebarInset = (props: React.ComponentProps<typeof ark.div>) => {
   const { className, ...rest } = props;
 
   return (
-    <ark.main
-      className={cn("relative flex w-full flex-1 flex-col bg-background", className)}
+    <ark.div
+      className={cn("relative flex w-full min-w-0 flex-1 flex-col bg-background", className)}
       data-slot="sidebar-inset"
       {...rest}
     />
@@ -342,13 +374,15 @@ export const SidebarGroupLabel = (
         "h-8",
         "px-2",
         "flex shrink-0 items-center",
-        "font-medium text-sidebar-foreground/70 text-xs",
+        // Full --sidebar-foreground: 7.4:1 in both themes. At /70 it was 3.55
+        // and 4.05:1, small text under the 4.5:1 floor.
+        "font-medium text-sidebar-foreground text-xs",
         "rounded-md",
-        "transition-[margin,opacity] duration-200 ease-linear",
-        "outline-hidden ring-sidebar-ring focus-visible:ring-2",
         "[&_svg]:size-4 [&_svg]:shrink-0",
-        "group-data-[collapsible=icon]:-mt-8 group-data-[collapsible=icon]:opacity-0",
-        "motion-reduce:transition-none!",
+        // Gone from the rail rather than animated out of it: the rail has no
+        // room for a word, and margin/opacity transitions were two of the four
+        // layout animations a collapse used to run.
+        "group-data-[collapsible=icon]:hidden",
         className
       )}
       data-sidebar="group-label"
@@ -419,9 +453,11 @@ export const SidebarMenuButton = ({
         "peer/menu-button group/menu-button",
         "w-full",
         "justify-start gap-2",
-        "p-2",
+        // A fixed 32px row with 8px padding: Button's heights are minimums
+        // now (a label may wrap), and 8px padding round a 20px line is 36.
+        "h-8 p-2",
         "overflow-hidden",
-        "transition-[width,height,padding]",
+        "transition-[color,background-color]",
         "group-data-[collapsible=icon]:size-8! group-data-[collapsible=icon]:p-2!",
         "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
         "active:bg-sidebar-accent active:text-sidebar-accent-foreground",

@@ -17,13 +17,21 @@ interface TableProps extends React.ComponentProps<typeof ark.table> {
    * @default "plain"
    */
   variant?: "plain" | "striped";
+  /**
+   * Classes for the scrolling wrapper. There is exactly one scroll container
+   * around a table: a caller that caps the height puts the cap here rather
+   * than on a second wrapper, because a sticky header sticks to its nearest
+   * scrolling ancestor — with two, it stuck to the inner one, which never
+   * scrolled, and the header left with the first row.
+   */
+  wrapperClassName?: string;
 }
 
 export const Table = (props: TableProps) => {
-  const { variant = "plain", isHoverable = true, className, ...rest } = props;
+  const { variant = "plain", isHoverable = true, className, wrapperClassName, ...rest } = props;
 
   return (
-    <div className="relative w-full overflow-auto" data-slot="table-wrapper">
+    <div className={cn("relative w-full overflow-auto", wrapperClassName)} data-slot="table-wrapper">
       <ark.table
         className={cn(
           "group/table",

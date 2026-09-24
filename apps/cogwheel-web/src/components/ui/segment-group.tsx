@@ -18,6 +18,22 @@ interface SegmentGroupProps
   variant?: SegmentGroupVariant;
 }
 
+/**
+ * A segmented control: the theme toggle, Activity's verdict filter.
+ *
+ * The chosen segment is painted on the item itself, inverted — the primary
+ * surface with the primary foreground, the same black-on-white pair as the
+ * primary button — and set in medium weight, while the others sit in
+ * --muted-foreground. It used to be a sliding `bg-input` indicator at
+ * 1.42–1.73:1 with the label unchanged, which asked a person to find the
+ * slightly greyer of three boxes.
+ *
+ * There is no sliding indicator any more, for two reasons. It animated
+ * left/top/width/height, a layout transition on every change; and with an
+ * inverted fill the label has to turn white at the moment the fill arrives
+ * under it, which a fill that travels for 150ms cannot promise. A colour
+ * crossfade on the item says "this one now" with neither problem.
+ */
 export const SegmentGroup = (props: SegmentGroupProps) => {
   const {
     orientation = "horizontal",
@@ -31,22 +47,24 @@ export const SegmentGroup = (props: SegmentGroupProps) => {
     <ArkSegmentGroup.Root
       className={cn(
         "group/segment-group relative",
-        "flex gap-2",
+        "flex gap-0.5",
         "isolate",
         "data-[orientation=vertical]:flex-col",
         "data-disabled:opacity-64",
-        "data-[variant=underline]:gap-1 data-[variant=underline]:border-input",
+        "data-[variant=underline]:gap-1",
         "data-[orientation=horizontal]:data-[variant=underline]:border-b",
         "data-[orientation=vertical]:data-[variant=underline]:border-l",
-        className
+        className,
+        // Last, so a caller's `border-border` cannot undo it: the group's edge
+        // is a control edge and takes the 3:1 --input token, not the 1.26:1
+        // hairline cards use.
+        "border-input"
       )}
       data-slot="segment-group"
       data-variant={variant}
       orientation={orientation}
       {...rest}
     >
-      <SegmentGroupIndicator />
-
       {children}
     </ArkSegmentGroup.Root>
   );
@@ -61,11 +79,27 @@ export const SegmentGroupItem = (
     <ArkSegmentGroup.Item
       className={cn(
         "relative",
-        "cursor-pointer",
+        "inline-flex items-center justify-center",
+        "cursor-pointer select-none",
         "data-[orientation=vertical]:w-full data-[orientation=vertical]:justify-start",
-        "rounded-[inherit] border border-transparent",
-        "data-focus-visible:border-primary",
+        "rounded-[calc(var(--radius-lg)-3px)]",
+        "text-muted-foreground",
+        "transition-[color,background-color] duration-150",
+        "hover:bg-accent hover:text-foreground",
+        "data-[state=checked]:bg-primary data-[state=checked]:font-medium data-[state=checked]:text-primary-foreground",
+        "data-[state=checked]:hover:bg-primary",
+        // Underline variant: the chosen item is marked by a 2px foreground rule
+        // along the group's edge instead of an inverted fill.
+        "group-data-[variant=underline]/segment-group:rounded-none",
+        "group-data-[variant=underline]/segment-group:data-[state=checked]:bg-transparent",
+        "group-data-[variant=underline]/segment-group:data-[state=checked]:text-foreground",
+        "group-data-[variant=underline]/segment-group:data-[state=checked]:shadow-[inset_0_-2px_0_var(--foreground)]",
+        // The focusable element is Ark's visually hidden radio, so the ring the
+        // global :focus-visible rule would draw lands on a 1px box. Ark mirrors
+        // keyboard focus onto the item as data-focus-visible.
+        "data-focus-visible:outline-2 data-focus-visible:outline-offset-2 data-focus-visible:outline-ring",
         "data-disabled:pointer-events-none data-disabled:opacity-64",
+        "motion-reduce:transition-none!",
         className
       )}
       data-slot="segment-group-item"
@@ -86,37 +120,8 @@ export const SegmentGroupItemText = (
 
   return (
     <ArkSegmentGroup.ItemText
-      className={cn("relative z-1", className)}
+      className={cn("relative", className)}
       data-slot="segment-group-item-text"
-      {...rest}
-    />
-  );
-};
-
-const SegmentGroupIndicator = (
-  props: React.ComponentProps<typeof ArkSegmentGroup.Indicator>
-) => {
-  const { className, ...rest } = props;
-
-  return (
-    <ArkSegmentGroup.Indicator
-      className={cn(
-        "absolute top-(--top) left-(--left) z-0",
-        "h-(--height) w-(--width)",
-        "rounded-[inherit]",
-        "bg-input",
-        "transition-[width,height,left,top] duration-150 ease-out",
-        "[transition-property:var(--transition-property,width,height,left,top)]",
-        "group-data-[variant=underline]/segment-group:bg-primary",
-        "data-[orientation=horizontal]:group-data-[variant=underline]/segment-group:top-[calc(var(--top)+var(--height)-1px)]",
-        "data-[orientation=vertical]:group-data-[variant=underline]/segment-group:right-[calc(var(--left)+var(--width)-1px)]",
-        "data-[orientation=vertical]:group-data-[variant=underline]/segment-group:-translate-x-px",
-        "data-[orientation=horizontal]:group-data-[variant=underline]/segment-group:h-0.5",
-        "data-[orientation=vertical]:group-data-[variant=underline]/segment-group:w-0.5",
-        "motion-reduce:transition-none!",
-        className
-      )}
-      data-slot="segment-group-indicator"
       {...rest}
     />
   );

@@ -16,6 +16,7 @@ import {
 import type React from "react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { IconButton } from "@/components/ui/icon-button";
 import { Spinner } from "@/components/ui/spinner";
 
 export const toast = createToaster({
@@ -110,8 +111,14 @@ const ToastItem = (props: ToastItemProps) => {
             // The 700/300 partners, not the 400 accents: a red-400 glyph on
             // --popover is 2.89:1 and a yellow-400 one 1.36:1, under the 3:1
             // §7 asks of a meaningful graphic.
+            //
+            // Success is not a status. "Protection paused" succeeded, and a
+            // green tick beside it said the household was healthy at the
+            // moment it stopped being filtered. Green means protected,
+            // allowed, online (DESIGN.md §2); a confirmation that the click
+            // worked is neutral.
             "in-data-[type=warning]:text-warning-foreground",
-            "in-data-[type=success]:text-success-foreground",
+            "in-data-[type=success]:text-foreground",
             "in-data-[type=error]:text-destructive-foreground",
             "in-data-[type=info]:text-info-foreground",
             "[&_svg]:pointer-events-none [&_svg]:h-lh [&_svg]:w-4 [&_svg]:shrink-0"
@@ -155,14 +162,13 @@ const ToastItem = (props: ToastItemProps) => {
 
         {!isExplicitClosable && (
           <ArkToast.CloseTrigger asChild data-slot="toast-close-trigger">
-            <Button
-              aria-label="Close"
+            <IconButton
               className="opacity-64 hover:opacity-100"
+              label="Dismiss"
               size="icon-xs"
-              variant="ghost"
             >
-              <XIcon />
-            </Button>
+              <XIcon aria-hidden />
+            </IconButton>
           </ArkToast.CloseTrigger>
         )}
       </div>

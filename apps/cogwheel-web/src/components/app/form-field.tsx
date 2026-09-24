@@ -1,4 +1,5 @@
 import type React from "react";
+import { Field as ArkField } from "@ark-ui/react/field";
 import { cn } from "@/lib/utils";
 import { Field, FieldError, FieldHelper, FieldLabel } from "@/components/ui/field";
 
@@ -30,7 +31,12 @@ export function FormField({
       orientation={orientation}
       required={required}
     >
-      <FieldLabel>{label}</FieldLabel>
+      <FieldLabel>
+        {label}
+        {/* Seen, not heard: the input's own `required` is what a screen
+            reader announces, so the mark is aria-hidden. */}
+        <ArkField.RequiredIndicator className="text-muted-foreground">*</ArkField.RequiredIndicator>
+      </FieldLabel>
       {children}
       {hint && !error ? <FieldHelper>{hint}</FieldHelper> : null}
       {error ? <FieldError>{error}</FieldError> : null}

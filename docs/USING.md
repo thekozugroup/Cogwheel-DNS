@@ -35,12 +35,17 @@ reachable from outside the house.
 
 ## The five screens
 
-**Overview** — whether protection is on, how many queries were blocked, the top
-queried and top blocked names of the last day, and the exact addresses to put in
-a router.
+**Overview** — first, in one line, whether the household is protected right
+now, and when it is not, the one thing to press. Then how many queries were
+blocked, the top queried and top blocked names of the last day, and the exact
+addresses to put in a router.
 
 **Activity** — every query as it happens, with the device that asked and whether
-it was blocked. Turn *Live* off to read it; filter by device, verdict or name.
+it was blocked. It stays live, but while you are reading or pointing at the
+list, new queries wait above it behind *Show N new* instead of pushing it down;
+turn *Live* off to hold everything. Filter by device, verdict or name; the
+filters are in the page's address, so a filtered log can be bookmarked or
+linked.
 Each row's menu can allow or block that name, name the device that asked, or
 answer **"Why?"** — which tells you exactly which rule or list decided.
 
@@ -48,18 +53,23 @@ answer **"Why?"** — which tells you exactly which rule or list decided.
 optionally its own settings: filtering off, a chosen set of lists, and rules
 that apply to it alone.
 
-**Lists** — the blocklists (add one from the presets or by URL, turn it on or
-off, delete it, refresh now), your household allow/block rules, and a box that
-answers what would happen to a name right now.
+**Lists** — the blocklists (add one by how much it blocks — *Light*,
+*Balanced* or *Strict* — or any list by its address; turn it on or off, delete
+it, refresh now), your household allow/block rules alongside each device's own
+(adding or removing one can be undone from the notice that confirms it), and a
+box that answers what would happen to a name right now.
 
 **Settings** — a read-only summary of what is stored. Upstream servers, bind
 addresses and retention are set by whoever runs the machine, in its environment
 file, so the page reports them rather than offering a control that would not
 stick.
 
-The sidebar also has the **pause control** — 5, 15 or 60 minutes, with a
-countdown — and the light/dark toggle. `⌘`/`Ctrl` and a digit jumps between
-screens; `/` focuses the search box.
+The sidebar also shows whether protection is on and lets you **pause** it for
+5, 15 or 60 minutes, with a countdown; with the sidebar collapsed, or on a
+phone, a paused appliance says so in the bar along the top, with Resume beside
+it. The light/dark toggle is at the foot of the sidebar. On a Mac, `⌘` and a
+digit jumps between screens and `⌘B` folds the sidebar; `/` focuses the search
+box.
 
 ---
 
@@ -82,10 +92,11 @@ queries appear, it is going through Cogwheel.
 
 ## Setting it up for the first time
 
-1. **Add a list.** *oisd small* is the right first subscription — it blocks the
-   large majority of advertising and tracking and breaks very little. *oisd big*
-   blocks more and breaks more. A fresh install already subscribes to oisd
-   small, so this may be done.
+1. **Add a list.** *Light* (oisd small) is the right first subscription — it
+   blocks the large majority of advertising and breaks very little. *Balanced*
+   and *Strict* (HaGeZi Pro and Pro++) add trackers and malware, and break more
+   the stronger you go. A fresh install already subscribes to oisd small, so
+   this may be done.
 2. **Name the devices you care about**, on Devices.
 3. **Leave everything else alone.** The defaults are chosen for a household.
 
@@ -137,9 +148,9 @@ a device with no route back to working, with errors that point nowhere near DNS.
 A clock that has drifted, in particular, fails TLS everywhere.
 
 So: **a list that contains one of these is still installed and still used.** The
-names it hit are recorded against it and shown in its Status column, and those
-names keep resolving. You do not lose the rest of a list because it contained
-one line you would not have chosen.
+names it hit are recorded against it and shown under its name on Lists, and
+those names keep resolving. You do not lose the rest of a list because it
+contained one line you would not have chosen.
 
 Your own block rule is the exception, and deliberately so. If *you* block one of
 these knowingly, it stays blocked.

@@ -319,121 +319,194 @@ device marker.
 
 ## 4 UI pages
 
-Shell: reuse the approved Shark UI shell exactly — `AppLayout` with `AppSidebar`
-(Navigation group of five entries; the "Appliance" group, `SidebarSeparator` and
-`SECONDARY_NAV` removed; a "Right now" group directly beneath Navigation holding
-the protection status line and the enabled-list count — the protection row is
-suppressed on `/`, where the Protection tile says the same word behind the same
-dot and says more besides, unless the appliance is unreachable, which the tile
-cannot know; footer keeps `PauseControl` — one verb for the thing the tile, the
-toast and route 4 all call pausing — and `ThemeToggle`),
-`PageShell/PageHeader/PageSections`, `SectionCard` (24 px
-gutters, no accent strips), `StatTile`, `DataTable` (with the container-query
-`hideBelow`/`stackBelow`), `ConfirmDialog`, `TextField/SelectField/FieldRow`,
-`StatusPill`, `EmptyState/ErrorState/LoadingSkeleton/NoticeBanner`,
-`StaleBanner`, `Toaster`, `ErrorBoundary`. Keep ⌘1–⌘5 and `/` focus-search; the
-shortcuts dialog and its `?` handler are deleted. Black/white neutrals,
-red/green/yellow-400 status only (the five `--chart-*` tokens are deleted).
-`nav.ts`: five `PRIMARY_NAV` entries (Overview `/`, Activity `/activity`,
-Devices `/devices`, Lists `/lists`, Settings `/settings`).
+Shell: reuse the approved Shark UI shell — `AppLayout` with `AppSidebar` (one
+`<nav aria-label="Main">` of five entries with no group label, inside an
+`<aside>`; the "Appliance" group, `SidebarSeparator` and `SECONDARY_NAV`
+removed). Under the nav, `ProtectionPanel`: the protection status line with the
+enabled-list count, then "Pause for" 5 / 15 / 60 min, each confirmed through
+`ConfirmDialog`; while paused, a yellow-tinted block with the countdown and
+"Resume protection" (not confirmed). On the icon rail the mark tile carries a
+status dot and one button resumes, or opens the three durations. The footer
+keeps `ThemeToggle`. The top bar (`<header>`, holding `StaleBanner`) shows
+`ProtectionChip` — "Paused · 12:31 left" plus Resume — whenever the sidebar is
+collapsed or a phone drawer and the state is not Protected. One verb
+throughout: the answer, the panel, the chip, the toast and route 4 all call it
+pausing. `PageShell/PageHeader/PageSections`, `SectionCard` (24 px gutters, no
+accent strips, title rendered as an `h2`), `StatTile`, `DataTable` (with the
+container-query `hideBelow`/`stackBelow`; when rows open, the primary cell is a
+real `<button>`; `NarrowRow` for the stacked form), `ConfirmDialog`,
+`TextField/SelectField/FieldRow`, `StatusPill`/`StatusChip`, `IconButton`,
+`EmptyState/ErrorState/LoadingSkeleton/NoticeBanner`, `StaleBanner`, `Toaster`,
+`ErrorBoundary`. ⌘1–⌘5 on Apple platforms only — off the Mac Ctrl/Alt + digit
+are the browser's tab shortcuts, so nothing is bound and no hint is printed —
+and `/` focus-search; the shortcuts dialog and its `?` handler are deleted.
+Black/white neutrals, red/green/yellow-400 status only (the five `--chart-*`
+tokens are deleted). `nav.ts`: five `PRIMARY_NAV` entries (Overview `/`,
+Activity `/activity`, Devices `/devices`, Lists `/lists`, Settings `/settings`).
 
-Data provider: snapshot = `{overview, settings, lists, devices, rules}`;
-`FULL_LOADERS` = all five; `LIVE_FIELDS` = `overview` only (5 s, visible tab);
-localStorage cache keys kept; `mutate()` unchanged.
+Data provider: snapshot = `{overview, settings, lists, devices, rules}`, held in
+an external store and read per field (`useSnapshot(field)`), so a poll that
+changes `overview` re-renders only its readers and an identical response writes
+nothing; `FULL_LOADERS` = all five; `LIVE_FIELDS` = `overview` only (5 s,
+visible tab); localStorage cache keys kept; `mutate()` unchanged.
 
 ### `/` Overview
 - Counts render in one format everywhere in the product: grouped digits from
   `formatCount`, never abbreviated. A tile does not shorten what a sentence
   spells out.
-- StatTile row (4): **Protection** (Protected / Paused hh:mm, Resume in the
-  footer when paused; hint "Lists not downloaded yet" in yellow-400 when
-  `lists.downloaded=false`), **Queries (24 h)** with hint "since last restart:
-  N", **Blocked (24 h)** with `%` delta, **Devices** value = `active_clients`,
-  delta "N named · M unnamed" (link to /devices).
-- SectionCard "Last 24 hours": 24 bars of plain `div`s from `per_hour` — blocked
-  stacked in neutral-900 / dark neutral-100 over answered in neutral-300 / dark
-  neutral-600; no library — hour labels every 6 h. Its description says what the
-  chart is, not the two totals the tiles above it already carry.
-- SectionCard "Top blocked" / "Top queried" side by side, 10 rows, mono domain +
-  count; row action menu: "Allow for everyone" / "Block for everyone" → POST
-  /rules; "Why?" → GET /check shown inline in a `NoticeBanner`.
-- SectionCard "Connect your devices": one row per `connect.targets` (IPv6
-  labelled) + port, Copy button; the three platform hints kept.
-- Header action: "Refresh lists", with a `title` naming its cost, because it
-  re-downloads every subscribed list over the internet. There is no second
-  "Reload" button: the provider already polls `overview` on a 5 s tick and
-  `StaleBanner` owns the retry when a poll fails. Lists carries the same action
-  as "Refresh all", with the same `title`.
+- First, the answer: an `h2` with a status dot, one supporting sentence and at
+  most one action, in this order of precedence — "Cogwheel is not answering"
+  with "Try again" (red tint); "Protection is paused · mm:ss left" with "Resume
+  protection" (yellow tint); "Lookups are failing" with "See the upstream"
+  (red tint; `upstream_failures_total` rose by at least 3 and by at least half
+  of the cache misses over the last minute of polls); "No blocklists yet" / "Every blocklist is switched off" with
+  "Go to Lists"; "Your blocklists have not downloaded yet" with "Refresh
+  lists" (`list-refresh-all`, the Lists key); "Cogwheel is ready · no device is
+  using it yet" (neutral); "Your household is protected · N blocked in the last
+  24 hours" (green) with "Every device using Cogwheel is filtered except
+  <unfiltered devices>." read from `devices`. No page-level Refresh lists; no
+  page description.
+- When `last_24h.queries = 0`: the answer, "Connect your devices", then one line
+  standing in for the chart and the top names. When nothing has ever loaded
+  (no answer, no cache): the answer alone.
+- StatTile row (4, container queries: 1 / 2 from 18rem / 4 from 48rem):
+  **Queries (24 h)** with hint "N since this process started" (suppressed at
+  zero and when it equals the 24-hour count), **Blocked (24 h)** with "% of
+  queries", **Devices seen (24 h)** value = `active_clients`, delta "N named · M
+  unnamed" (link to /devices), **Blocklists** (enabled, or "n of m on"; "N rules
+  loaded"; "Updated <relative>" / "Not downloaded yet").
+- SectionCard "Queries by hour": 24 bars of plain `div`s from `per_hour` —
+  blocked stacked in neutral-900 / dark neutral-100 over answered in
+  neutral-300 / dark neutral-600; no library — in a `<figure>` whose sr-only
+  caption is the busiest hour and the day's share blocked. The strip is one
+  `role="slider"` over the hours (arrows, PageUp/PageDown by 6, Home/End; hover
+  or drag to read); a readout above it prints the hovered or selected hour, else
+  the busiest. Axis labels every 6 h in the reader's clock convention.
+- SectionCard "Top blocked" / "Top queried" side by side from 56rem of
+  container, 10 rows, mono domain (wrapping before a dot) + count; row action
+  menu: "Allow for everyone" / "Block for everyone" → POST /rules; "Why?" →
+  GET /check for the household, then for each filtering device whose rules
+  cover the name, and (when the household blocks it) each device on a narrower
+  set of lists; answered inline in a `NoticeBanner` with "Show in Activity"
+  (`/activity?q=<domain>`, plus `&verdict=blocked` from Top blocked). Each
+  card's ten row menus are one tab stop, as on Activity.
+  For Top blocked a name every scope now allows also gets its last block from
+  the log. A cleared or disabled log with traffic replaces both cards with one
+  line saying which.
+- SectionCard "Connect your devices": one row per `connect.targets` in 18 px
+  mono with "IPv4 · port 53" / "IPv6 · port 53" under it and a copy
+  `IconButton`; the three platform hints as a hairline-divided list.
 
 ### `/activity` Activity
-- Filter bar: **Live** switch (SSE; rows prepend), Device select (All / each
-  named device / Unnamed), Verdict segment (All / Blocked / Allowed), search
-  `TextField`.
+- Filter bar: search `TextField` "Domain contains" (the `/` target), Device
+  select (All devices / each named device / Unnamed devices), Verdict segment
+  (All / Blocked / Allowed). Below `sm`, Device and Verdict fold behind a
+  "Filters" disclosure that counts the active ones. The three are in the URL
+  (`?q=`, `?verdict=`, `?client=<ip>|unnamed`), read on open and kept in step
+  with `replace`.
+- Live line above the list, fixed height: the **Live** switch, the stream's
+  state in words (connecting / connected / holding / reconnecting / paused) and
+  "Show N new". The stream (SSE, frames batched every 250 ms) stays connected
+  while the screen is open; Live off holds every arriving row instead of
+  closing it. Rows are also held — not prepended — while keyboard focus or an
+  open row menu is in the list, a moving mouse is over it (lapses after 15 s
+  still), the newest row is scrolled out of sight, or the tab is hidden. Up to
+  500 are held and the rest counted; on release past that, with logging on, the
+  first page is re-read. An sr-only polite line reports the count every 20 s.
 - One `DataTable`: Time, Domain (mono), Device (name, else IP with a muted
-  "unnamed" tag), Type (A/AAAA/HTTPS…), Verdict (`StatusPill` Blocked=bad /
-  Allowed=good) + reason text ("oisd small", "device rule", "household rule",
-  "protected", "CNAME → x", "paused", "unfiltered"). Row menu: Allow/Block for
-  everyone, Allow/Block on <device>, Name this device… (unnamed → Devices with
-  `?ip=`), Why?.
-- Footer: "Load older than <clock time of the keyset cursor>" (keyset
-  `before`; plain "Load older" when there is no cursor), "Show N more" while
-  the buffer holds more than is drawn, and the held count stated once — here,
-  not also in the card's description. "Clear log" sits in the card header
-  (ConfirmDialog → DELETE /queries).
-- Below the table's stacking breakpoint each row is two lines rather than a
-  label/value card: domain and clock time, then the verdict **as a word** with
-  its reason and the device. The verdict is never a bare dot. When `logging=false`: NoticeBanner "Query logging is off
-  (COGWHEEL_RETENTION__HISTORY_DAYS=0); only the live stream is shown."
-- History loads from GET /queries on mount and after Clear; live frames
-  deduplicated by (ts, client, domain) against the top 50 rows.
+  "unnamed" tag), Verdict (`StatusPill` "Blocked" = bad; "Allowed" as a plain
+  muted word, because colour marks the exception) + reason text ("oisd small",
+  "device rule", "household rule", "protected", "CNAME → x", "paused",
+  "unfiltered"), and an actions column. Row menu, grouped by scope with a rule
+  between groups: Allow/Block for everyone | Allow/Block on <device>, or Name
+  this device… (unnamed → Devices with `?ip=`) | Why?. The fifty row menus are one tab stop with a roving tabindex (arrows,
+  PageUp/PageDown by 10, Home/End).
+- Below 768 px of card (`stackBelow="3xl"`) each row is a `NarrowRow`: the
+  domain alone on the first line, then the verdict **as a word** with its
+  reason, the device and the clock time — one line from 320 px of row text, the
+  verdict and reason on their own line below that. The verdict is never a bare
+  dot. When `logging=false`: NoticeBanner "Query logging is off", naming
+  COGWHEEL_RETENTION__HISTORY_DAYS; only the live stream is shown.
+- Footer: "Show 50 more" while more are loaded than drawn, "Load older than
+  <clock time of the oldest loaded row>" (keyset `before`; "No older rows" when
+  the cursor is spent), "Showing N of M loaded rows", and "Clear log" at the far
+  end, last in the tab order (ConfirmDialog → DELETE /queries).
+- Empty states distinguish filtered ("No queries match these filters", Clear
+  filters), just cleared, logging off, a log emptied before this visit, and
+  first run.
+- History loads from GET /queries on mount and on a filter change (debounced
+  250 ms); Clear empties the list rather than re-reading it. Live frames are
+  deduplicated by (ts, client, domain) against the log rows among the top 50,
+  and live rows the writer has not flushed yet survive a filter change.
 
 ### `/devices` Devices
-- Two-column: **form card** ("Add device" / "Edit <name>") with Name, IP address
-  (validated), **Filtering** switch ("Off: this device resolves everything and is
-  still logged"), **Lists**: radio "Use all household lists" / "Choose lists" →
-  checkbox per enabled list (unchecking every list = lists off, household/device
-  rules still apply — stated inline), **Rules for this device**: domain +
-  Allow/Block add row and a list with delete; Delete device (ConfirmDialog).
-- **Devices table**: Name, IP, Filtering (a `Status` dot plus the word On or
-  Off — one shape for both states, the tone carrying which), Lists ("All" / "n of m"),
-  Rules (count), Queries / Blocked (24 h), Last seen. It sheds columns on its own
-  container width, not the viewport's — it sits in the narrower half of the grid,
-  so a wider window can mean a narrower table — in this order: Rules, then Lists
-  and Last seen together, then the table itself for stacked cards, which render
-  every field. Name, IP, Filtering and Queries / Blocked never go. Rules goes
-  first because that count is also on the form beside the table; a last-seen is
-  nowhere else on the page, so a column order that hid it from every desktop
-  width would show a 1440px browser strictly less than a phone. The stacked form
-  is a purpose-built two-line row, not the generic label/value card: name and IP,
-  then filtering state, list selection and the 24-hour counts — no card border
-  inside the section card's own.
-- **Unnamed clients** SectionCard: IP, queries/blocked 24 h, last seen, "Name
-  this device" → prefills the form (`?ip=` also honoured).
+- SectionCard **Named devices**, full width, header action "Add device" (a
+  disclosure for the form): table Name (the row's button, "Edit <name>"), IP,
+  Filtering (a `Status` dot plus a word — On with the neutral dot; Off, or
+  No lists when filtering is on but no chosen list is enabled, with the yellow
+  dot), Lists ("All" / "n of m" / "None"), Rules (count), Queries / Blocked
+  (24 h), Last seen. It sheds columns on its own container width, not the
+  viewport's — Rules first, then Lists and Last seen together — and below `md`
+  becomes a purpose-built `NarrowRow`: name and IP, then filtering state, list
+  selection, rule count and the 24-hour counts, with no card border inside the
+  section card's own.
+- **Form card** below it ("Add device" / "Edit <name>"), a real `<form>` with
+  inline errors: Name, IP address (validated; malformed only once the field is
+  left; an address already used names its device), **Filtering** switch ("Off:
+  this device resolves everything and is still logged"), **Lists**: radio "Use
+  all household lists" / "Choose lists" → checkbox per enabled list (nothing
+  ticked is refused inline) / "No lists" ("Only rules apply. Nothing on a list
+  is blocked for this device."), **Rules for this device**: domain +
+  Block/Allow segment + "Add rule", staged until Save — each marked New,
+  Changed or Removed (struck through, with Undo). Footer: Save / Add device,
+  Cancel, and Delete device at the far end (ConfirmDialog naming what the
+  address falls back to). `?device=<id>` and `?ip=<address>` open the form.
+- SectionCard **Unnamed devices**: table Address, Queries / Blocked (24 h),
+  Last seen, "Name this device" → prefills the form (`?ip=` also honoured).
 
 ### `/lists` Lists
-- SectionCard "Add a list": Preset select (§2.5; fills name/url/kind) or Name,
-  URL, **Format** select (hosts / domains / adblock); Enabled switch; Add.
-- SectionCard "Lists": table Name, Format badge, Enabled `Switch`, Rules loaded,
-  Last updated, Status (yellow-400 `last_error`, or `note` such as "contains 2
-  protected names (ignored)"), Refresh row, Delete row; header "Refresh all".
-- SectionCard "Household rules": Allow/Block for everyone — add row and table
-  with delete; footnote "Allow beats block. A domain covers its subdomains."
-- SectionCard "Check a domain": domain input + optional device select → verdict
-  + reason inline.
+- Page header action "Refresh all" with a `title` naming its cost ("Takes up to
+  a minute"); the card's busy rule shows while it runs.
+- SectionCard **Subscribed lists** (description "N of M enabled · N rules
+  loaded", header action "Add a list"): table Name (with the URL under it, and a
+  failed download or a note such as "contains 2 protected names (ignored)" as
+  words under that), Format badge ("Adblock-style" / "Hosts file" / "Domain
+  list"), Enabled `Switch` (turning off a list some device uses alone asks
+  first, naming the device), Rules loaded, Last updated, and a Refresh
+  `IconButton` + "⋯" (Delete list…). Below `xl` a `NarrowRow`: name, switch and
+  "⋯" (Refresh now, Delete list…), then format, rule count and freshness.
+- SectionCard **Add a list** (opened from the header): three radio choices by
+  strength — Light = oisd small, Balanced = HaGeZi Pro, Strict = HaGeZi Pro++,
+  resolved by name against the §2.5 catalogue — each with its one-line
+  trade-off; a subscribed tier is disabled; a fourth choice, "More lists", holds
+  the Preset select (every §2.5 preset) and Name, Address, **Format** select
+  (hosts / domains / adblock) and Enabled switch. The submit button names what
+  it adds ("Add HaGeZi Pro").
+- SectionCard **Rules**: `h3` "Household rules" — domain + Block/Allow segment
+  + "Add rule" form and a list with delete — and `h3` "Device rules", read-only,
+  grouped by device, each group linking to `/devices?device=<id>`; footnote
+  "Allow beats block. A domain covers its subdomains."
+- SectionCard **Check a domain** (`role="search"`, the `/` target): domain input
+  + "As device" select ("The household" or a device) → verdict + reason inline
+  behind a red or green status dot.
 
 ### `/settings` Settings (read-only)
-- "Resolver": upstream rows with badge UDP (plus "cleartext" warning) / DoT /
-  DoH, block response mode, bind addresses, advertised targets + port; each
-  value shows its env var name in mono; footnote "Set via COGWHEEL_* in
-  /etc/cogwheel/.env — the installer and Compose both read it — or
-  /etc/cogwheel/cogwheel.env for a native systemd install. Restart afterwards."
-  (`.env` is the Compose deployment's file and the one scripts/install.sh
-  writes; `cogwheel.env` belongs to scripts/install-native.sh alone.)
-- "Activity log": logging on/off, retention days, max rows, database size, lists
-  dir; "Clear log" button.
-- "Protected domains": collapsible list of the 21 suffixes with one sentence
-  explaining they outrank lists but not your own rules.
-- "About": version, schema version, theme toggle.
+- "Resolver": upstream rows with a `StatusPill` for the protocol — UDP "warn"
+  (plus a "cleartext" `NoticeBanner` at the top of the card), DoT / DoH
+  "good" — block response mode, bind addresses, advertised targets + port;
+  "Show the variable names" discloses the env var name under each value in mono;
+  footnote "Set via COGWHEEL_* in /etc/cogwheel/.env — the installer and Compose
+  both read it — or /etc/cogwheel/cogwheel.env for a native systemd install.
+  Restart afterwards." (`.env` is the Compose deployment's file and the one
+  scripts/install.sh writes; `cogwheel.env` belongs to
+  scripts/install-native.sh alone.)
+- "Activity log": logging on/off, retention days, max rows, prune interval,
+  database path and size, lists dir; "Clear log" button.
+- "Protected domains": the 21 suffixes behind "Show the list", with one
+  sentence explaining they outrank lists but not your own rules.
+- "About": version, schema version. The theme toggle lives in the sidebar only.
+- Before the first answer, a skeleton; if settings never load, "Could not read
+  the settings" with Try again, never placeholder values.
 
 ---
 
@@ -709,7 +782,7 @@ needs a harness and a host named beside it to mean anything at all.
 ```sh
 find apps/cogwheel-web/src -type f | xargs wc -l | tail -1   # web LOC
 grep -n '\.route(' apps/cogwheel-server/src/http.rs         # 16 calls, 22 routes
-ls apps/cogwheel-web/src/routes/ | wc -l                    # sidebar pages
+grep -c '{ to: "/' apps/cogwheel-web/src/lib/nav.ts        # sidebar pages
 grep -c '^\[\[package\]\]' Cargo.lock                      # lock packages
 grep -c 'CREATE TABLE' crates/cogwheel-storage/src/schema_v1.sql
 stat -c %s target/release/cogwheel-server                   # binary bytes

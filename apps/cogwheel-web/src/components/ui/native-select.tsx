@@ -12,11 +12,15 @@ const nativeSelectVariants = tv({
     "appearance-none",
     "w-full min-w-0",
     "ps-2.5 pe-8",
-    "select-none text-sm",
-    "bg-transparent dark:bg-input/30",
+    // 16px below md, like a text field: iOS zooms the page into any control
+    // whose text is smaller than that when it takes focus.
+    "select-none text-base md:text-sm",
+    "bg-transparent dark:bg-muted/60",
     "rounded-lg border border-input shadow-xs/5",
-    "transition-colors",
-    "[&:has(option[value='']:checked)]:text-muted-foreground/64",
+    // Named rather than `transition-colors`, which in Tailwind v4 includes
+    // `outline-color` and eased the focus ring in over 150ms.
+    "transition-[color,background-color,border-color]",
+    "[&:has(option[value='']:checked)]:text-muted-foreground",
     "disabled:pointer-events-none disabled:cursor-not-allowed",
     "focus-visible:border-primary",
     "aria-invalid:border-destructive",

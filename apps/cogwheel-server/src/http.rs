@@ -12,8 +12,8 @@ use axum::Json;
 use axum::Router;
 use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{FromRequest, FromRequestParts, OptionalFromRequest, Query, Request, State};
-use axum::http::StatusCode;
 use axum::http::request::Parts;
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use cogwheel_storage::StorageError;
@@ -351,7 +351,13 @@ pub fn api_router() -> Router<ServerState> {
 
 /// The whole application: the API, the bundled web assets, compression and tracing.
 pub fn app(state: ServerState) -> Router {
-    let router = match web_dist_dir() {
+    app_serving(state, web_dist_dir())
+}
+
+/// [`app`], serving the web assets from `dist` rather than from wherever [`web_dist_dir`]
+/// finds them. Split out so a test can point it at a build it made itself.
+pub(crate) fn app_serving(state: ServerState, dist: Option<PathBuf>) -> Router {
+    let router = match dist {
         Some(dist) => {
             tracing::info!(path = %dist.display(), "serving bundled web assets");
             // Serve the built SPA, answering a client-side route with `index.html` and a 200.
@@ -361,11 +367,19 @@ pub fn app(state: ServerState) -> Router {
             // 404, and an unmatched API path never reaches the static service at all: §3
             // promises a JSON envelope for every failure, and a client that asked for JSON must
             // not be handed an HTML shell to parse.
+            //
+            // A client-side route is answered by the shell *as a file*, not through ServeDir's
+            // not-found service. That service relabels whatever the shell answered as a 404, so
+            // a conditional request — every load, now that the shell is `no-cache` — came back
+            // as a 304 relabelled 404, then 200, with no body: a reload of /devices was a blank
+            // page. Served directly, a revalidation gets the 304 it asked for.
             let index = dist.join("index.html");
-            let spa = ServeDir::new(dist).not_found_service(ServeFile::new(index));
+            let shell = ServeFile::new(&index);
+            let files = ServeDir::new(dist).not_found_service(ServeFile::new(index));
             api_router().fallback_service(tower::service_fn(
                 move |request: axum::http::Request<axum::body::Body>| {
-                    let spa = spa.clone();
+                    let shell = shell.clone();
+                    let files = files.clone();
                     let path = request.uri().path().to_owned();
                     async move {
                         if is_api_path(&path) {
@@ -373,12 +387,19 @@ pub fn app(state: ServerState) -> Router {
                         }
                         let is_spa_route =
                             !path.rsplit('/').next().is_some_and(|s| s.contains('.'));
-                        let mut response = tower::ServiceExt::oneshot(spa, request)
-                            .await
-                            .map(IntoResponse::into_response)?;
-                        if is_spa_route && response.status() == StatusCode::NOT_FOUND {
-                            *response.status_mut() = StatusCode::OK;
-                        }
+                        let mut response = if is_spa_route {
+                            tower::ServiceExt::oneshot(shell, request)
+                                .await
+                                .map(IntoResponse::into_response)?
+                        } else {
+                            tower::ServiceExt::oneshot(files, request)
+                                .await
+                                .map(IntoResponse::into_response)?
+                        };
+                        let policy = cache_control(&path, response.status());
+                        response
+                            .headers_mut()
+                            .insert(header::CACHE_CONTROL, HeaderValue::from_static(policy));
                         Ok::<_, std::convert::Infallible>(response)
                     }
                 },
@@ -399,6 +420,33 @@ pub fn app(state: ServerState) -> Router {
         // not a trade worth making for a link that is already a local network.
         .layer(CompressionLayer::new().gzip(true))
         .layer(TraceLayer::new_for_http())
+}
+
+/// `Cache-Control` for a file whose name changes whenever its contents do.
+pub(crate) const CACHE_IMMUTABLE: &str = "public, max-age=31536000, immutable";
+
+/// `Cache-Control` for a file that keeps its name across releases: keep it, but ask first.
+pub(crate) const CACHE_REVALIDATE: &str = "no-cache";
+
+/// How long a browser may keep what the static service answered for `path`.
+///
+/// Everything under `/assets/` is Vite's build output, named after a hash of its contents: a
+/// changed file is a new URL, so the old one can be kept for a year and never asked about
+/// again. Without this every revisit revalidated the vendor split — four requests for bytes
+/// that cannot have changed. Everything else — `index.html`, the shell a client-side route is
+/// answered with — keeps its name across releases, so the browser must check it each time
+/// (`no-cache` means "revalidate", not "do not store"). That is what makes a `docker pull`
+/// show on the next load: the new shell names new asset URLs, and the old ones age out
+/// untouched. A missing asset is answered with the shell and a 404, and pinning that for a
+/// year would outlive the release that fixes it.
+fn cache_control(path: &str, status: StatusCode) -> &'static str {
+    let hashed =
+        path.starts_with("/assets/") && (status.is_success() || status == StatusCode::NOT_MODIFIED);
+    if hashed {
+        CACHE_IMMUTABLE
+    } else {
+        CACHE_REVALIDATE
+    }
 }
 
 /// Whether a path belongs to the API rather than to the web app.

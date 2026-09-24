@@ -18,13 +18,10 @@ export function EmptyState({
   className?: string;
 }) {
   return (
-    <div
-      className={cn(
-        "flex flex-col items-center justify-center gap-3 rounded-xl border border-border border-dashed",
-        "px-6 py-10 text-center",
-        className,
-      )}
-    >
+    // No box of its own. It always sits inside a section card, and the card is
+    // the container: a dashed border inside the card's border was a second
+    // frame around nothing.
+    <div className={cn("flex flex-col items-center justify-center gap-3 px-gutter py-10 text-center", className)}>
       <Icon aria-hidden className="size-5 text-muted-foreground" />
       <div className="space-y-1">
         <p className="font-medium text-foreground text-sm">{title}</p>
@@ -51,7 +48,7 @@ export function ErrorState({
       className={cn(
         // Tint + 700-weight text: the accent is the surface, never the copy.
         "flex flex-col gap-3 rounded-xl border border-destructive/24",
-        "bg-destructive/8 px-4 py-3",
+        "bg-destructive/8 px-[16px] py-[12px]",
         className,
       )}
       role="alert"
@@ -87,19 +84,19 @@ export function LoadingSkeleton({
   const keys = Array.from({ length: rows }, (_, index) => `skeleton-${variant}-${index}`);
 
   if (variant === "cards") {
+    // The same container-query grid as Overview's tiles, so the columns do not
+    // jump from two to one (320px, or 200% text) when the numbers arrive.
     return (
-      <div
-        aria-busy="true"
-        className={cn("grid grid-cols-2 gap-6 xl:grid-cols-4", className)}
-        aria-label="Loading"
-      >
-        {keys.map((key) => (
-          <div className="rounded-xl border border-border p-4" key={key}>
-            <Skeleton className="h-3 w-24" />
-            <Skeleton className="mt-3 h-7 w-20" />
-            <Skeleton className="mt-3 h-3 w-32" />
-          </div>
-        ))}
+      <div aria-busy="true" aria-label="Loading" className={cn("@container", className)}>
+        <div className="grid grid-cols-1 gap-gutter @2xs:grid-cols-2 @3xl:grid-cols-4">
+          {keys.map((key) => (
+            <div className="rounded-xl border border-border p-gutter" key={key}>
+              <Skeleton className="h-3 w-24" />
+              <Skeleton className="mt-3 h-7 w-20" />
+              <Skeleton className="mt-3 h-3 w-32" />
+            </div>
+          ))}
+        </div>
       </div>
     );
   }
@@ -150,7 +147,7 @@ export function NoticeBanner({
   return (
     <div
       className={cn(
-        "flex flex-col gap-2 rounded-xl border px-4 py-3 sm:flex-row sm:items-center sm:justify-between",
+        "flex flex-col gap-2 rounded-xl border px-[16px] py-[12px] sm:flex-row sm:items-center sm:justify-between",
         toneClass,
         className,
       )}
@@ -160,7 +157,7 @@ export function NoticeBanner({
         <p className="font-medium text-sm">{title}</p>
         {detail ? <p className="text-foreground/80 text-sm">{detail}</p> : null}
       </div>
-      {actions ? <div className="flex shrink-0 items-center gap-2">{actions}</div> : null}
+      {actions ? <div className="flex flex-wrap items-center gap-2 sm:shrink-0">{actions}</div> : null}
     </div>
   );
 }

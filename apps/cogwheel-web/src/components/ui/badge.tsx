@@ -11,7 +11,9 @@ const badgeVariants = tv({
     "select-none whitespace-nowrap font-medium text-xs",
     "rounded-md border border-transparent",
     "overflow-hidden",
-    "transition-colors",
+    // Not `transition-colors`: in Tailwind v4 that list includes
+    // `outline-color`, and the focus ring must not ease in.
+    "transition-[color,background-color,border-color]",
     "focus-visible:border-primary",
     "[&_svg]:pointer-events-none [&_svg]:size-3 [&_svg]:shrink-0",
     "[button&,a&]:cursor-pointer [button&,a&]:pointer-coarse:after:absolute [button&,a&]:pointer-coarse:after:size-full [button&,a&]:pointer-coarse:after:min-h-11 [button&,a&]:pointer-coarse:after:min-w-11",

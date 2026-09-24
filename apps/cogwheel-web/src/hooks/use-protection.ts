@@ -1,25 +1,13 @@
 import React from "react";
 import { api } from "@/lib/api";
-import { pauseSecondsRemaining } from "@/lib/derive";
-import { useCogwheel } from "@/data/context";
+import { useCogwheelActions } from "@/data/context";
 
-/** Ticks once a second only while a pause window is actually open. */
-export function usePauseCountdown(): number {
-  const { data } = useCogwheel();
-  const pausedUntil = data.overview.protection.paused_until;
-  const [now, setNow] = React.useState(() => Date.now());
-
-  React.useEffect(() => {
-    if (!pausedUntil) return;
-    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
-    return () => window.clearInterval(timer);
-  }, [pausedUntil]);
-
-  return pauseSecondsRemaining(pausedUntil, now);
-}
-
+/**
+ * Pause and resume. Reads the verbs only, so a component that pauses does not
+ * re-render when the overview moves.
+ */
 export function useProtectionActions() {
-  const { mutate } = useCogwheel();
+  const { mutate } = useCogwheelActions();
 
   const pause = React.useCallback(
     (minutes: number) =>

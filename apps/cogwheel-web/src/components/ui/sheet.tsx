@@ -6,7 +6,7 @@ import { XIcon } from "lucide-react";
 import type React from "react";
 import { tv, type VariantProps } from "tailwind-variants";
 import { cn } from "@/lib/utils";
-import { Button } from "@/components/ui/button";
+import { IconButton } from "@/components/ui/icon-button";
 import { Dialog, DialogHeader, DialogOverlay } from "@/components/ui/dialog";
 
 export const Sheet = (props: React.ComponentProps<typeof Dialog>) => (
@@ -68,7 +68,7 @@ const SheetPositioner = (props: SheetPositionerProps) => {
 
 const sheetContentVariants = tv({
   base: [
-    "[--space:--spacing(6)]",
+    "[--space:var(--spacing-gutter)]",
     "relative",
     "max-h-full min-h-0 w-full min-w-0",
     "flex flex-col",
@@ -155,14 +155,9 @@ export const SheetContent = (props: SheetContentProps) => {
 
           {!!showCloseButton && (
             <SheetClose asChild>
-              <Button
-                aria-label="Close"
-                className="absolute inset-e-2 top-2 opacity-64 hover:opacity-100"
-                size="icon-sm"
-                variant="ghost"
-              >
-                <XIcon />
-              </Button>
+              <IconButton className="absolute inset-e-2 top-2" label="Close" size="icon-sm">
+                <XIcon aria-hidden />
+              </IconButton>
             </SheetClose>
           )}
         </ArkDialog.Content>

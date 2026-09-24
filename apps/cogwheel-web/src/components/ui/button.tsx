@@ -8,7 +8,13 @@ const buttonVariants = tv({
   base: [
     "relative",
     "inline-flex shrink-0 items-center justify-center gap-2",
-    "whitespace-nowrap font-medium text-sm",
+    // A label wraps rather than running off its card. Buttons keep their one-
+    // line size everywhere they fit — `shrink-0` stops a flex row from
+    // squeezing them — and only a container narrower than the label, which is
+    // a phone at 200% text, makes it take a second line. It used to be
+    // `whitespace-nowrap` and a fixed height, and "Load older than 9:59:47 PM"
+    // ran 168px past a 375px card. So the sizes below are minimum heights.
+    "max-w-full font-medium text-sm",
     "rounded-lg",
     // Everything a button animates, named rather than `transition-all`: the focus
     // outline is the one thing that must be there the instant the key is released,
@@ -36,7 +42,9 @@ const buttonVariants = tv({
         "text-foreground",
         "border border-input shadow-sm/5",
         "hover:bg-accent hover:text-accent-foreground",
-        "dark:bg-input/32 dark:hover:bg-input/64",
+        // --muted, not --input: --input is the 3:1 edge now, and a fill in
+        // the edge's own colour would swallow it.
+        "dark:bg-muted/60 dark:hover:bg-accent",
         "focus-visible:border-primary",
       ],
       /**
@@ -54,7 +62,7 @@ const buttonVariants = tv({
         "text-foreground",
         "border border-input shadow-sm/5",
         "hover:bg-accent hover:text-accent-foreground",
-        "dark:bg-input/32 dark:hover:bg-input/64",
+        "dark:bg-muted/60 dark:hover:bg-accent",
         "focus-visible:border-primary",
       ],
       secondary: [
@@ -79,22 +87,22 @@ const buttonVariants = tv({
     },
     size: {
       xs: [
-        "h-6",
+        "min-h-6",
         "gap-1.5",
-        "px-2",
+        "px-2 py-0.5",
         "text-xs",
         "rounded-sm",
         "[&_svg:not([class*='size-'])]:size-2.5",
       ],
       sm: [
-        "h-7",
-        "px-2.5",
+        "min-h-7",
+        "px-2.5 py-1",
         "gap-1.5",
         "[&_svg:not([class*='size-'])]:size-3.5",
       ],
-      md: ["h-8", "px-3", "py-2"],
-      lg: ["h-9", "px-3.5"],
-      xl: ["h-10", "text-base", "px-4"],
+      md: ["min-h-8", "px-3", "py-1"],
+      lg: ["min-h-9", "px-3.5", "py-1.5"],
+      xl: ["min-h-10", "text-base", "px-4", "py-2"],
       "icon-xs": "size-6 rounded-sm",
       "icon-sm": "size-7",
       "icon-md": "size-8",

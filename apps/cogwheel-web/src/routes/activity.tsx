@@ -1,8 +1,8 @@
 import React from "react";
-import { useNavigate } from "react-router-dom";
-import { ActivityIcon, Trash2Icon } from "lucide-react";
-import { api, errorMessage, type QueryRow, type StreamQueryEvent } from "@/lib/api";
-import { checkSentence, reasonLabel } from "@/lib/derive";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import { ActivityIcon, SearchXIcon, Trash2Icon } from "lucide-react";
+import { api, errorMessage, type Device, type StreamQueryEvent } from "@/lib/api";
+import { checkSentence } from "@/lib/derive";
 import { formatClock, formatCount, pluralize } from "@/lib/format";
 import { notify } from "@/lib/toast";
 import {
@@ -11,78 +11,80 @@ import {
   ACTIVITY_PAGE_SIZE,
   ACTIVITY_VISIBLE_STEP,
 } from "@/lib/constants";
-import { useCogwheel } from "@/data/context";
+import { useCogwheelActions, useSnapshot } from "@/data/context";
 import { useQueryStream } from "@/hooks/use-event-stream";
+import { ROW_TRIGGER, useRovingMenus } from "@/hooks/use-roving-menus";
 import { Button } from "@/components/ui/button";
-import { Switch } from "@/components/ui/switch";
-import { Status } from "@/components/ui/status";
-import { SegmentGroup, SegmentGroupItem, SegmentGroupItemText } from "@/components/ui/segment-group";
 import { PageHeader, PageSections, PageShell } from "@/components/app/page";
 import { SectionCard } from "@/components/app/section-card";
 import { DataTable, type Column } from "@/components/app/data-table";
-import { SelectField } from "@/components/app/select-field";
-import { TextField } from "@/components/app/text-field";
-import { GroupLabel } from "@/components/app/form-field";
-import { RowMenu } from "@/components/app/row-menu";
-import { StatusPill } from "@/components/app/status-indicator";
 import { ConfirmDialog } from "@/components/app/confirm-dialog";
 import { NoticeBanner } from "@/components/app/states";
+import {
+  NOTHING_HELD,
+  fromFrame,
+  fromLog,
+  holdsFocus,
+  matches,
+  prepend,
+  rowKey,
+  scrolledIntoList,
+  withHistory,
+  type Feed,
+  type Filters,
+  type Held,
+  type Row,
+  type RowAction,
+  type Verdict,
+  VERDICTS,
+  streamWords,
+} from "./activity/model";
+import {
+  AnsweredWatcher,
+  DeviceCell,
+  DomainCell,
+  LiveLine,
+  NarrowQueryRow,
+  RowActions,
+  TimeCell,
+  VerdictCell,
+} from "./activity/rows";
+import { QueryFilters } from "./activity/filters";
 
-type Verdict = "all" | "blocked" | "allowed";
+/** How long a still mouse over the list keeps holding it. */
+const POINTER_IDLE_MS = 15_000;
 
-/** A log row and a live frame rendered as one thing. Live frames have no log id. */
-type Row = Omit<QueryRow, "id"> & { key: string };
-
-let liveSequence = 0;
-
-function fromFrame(frame: StreamQueryEvent): Row {
-  liveSequence += 1;
-  return {
-    key: `live-${liveSequence}`,
-    ts: frame.ts,
-    client: frame.client,
-    device_id: null,
-    device_name: frame.deviceName,
-    domain: frame.domain,
-    qtype: frame.qtype,
-    blocked: frame.blocked,
-    reason: frame.reason,
-    list: frame.list,
-  };
-}
-
+/**
+ * The filters are in the URL — `?q=`, `?verdict=`, `?client=` (an address, or
+ * `unnamed`) — so a link can open the log already filtered. Overview's "Show
+ * in Activity" linked to `?q=youtube.com&verdict=blocked` and landed on the
+ * whole unfiltered log.
+ */
 export function ActivityScreen() {
-  const { data, mutate, reload } = useCogwheel();
-  const navigate = useNavigate();
+  const { devices } = useSnapshot("devices");
 
-  const [live, setLive] = React.useState(true);
-  const [device, setDevice] = React.useState("all");
-  const [verdict, setVerdict] = React.useState<Verdict>("all");
-  const [search, setSearch] = React.useState("");
+  const [params, setParams] = useSearchParams();
+  const [device, setDevice] = React.useState(() => params.get("client") || "all");
+  const [verdict, setVerdict] = React.useState<Verdict>(() => {
+    const asked = params.get("verdict");
+    return VERDICTS.find((option) => option === asked) ?? "all";
+  });
+  const [search, setSearch] = React.useState(() => params.get("q") ?? "");
+  React.useEffect(() => {
+    setParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        const set = (key: string, value: string | null) => (value ? next.set(key, value) : next.delete(key));
+        set("q", search.trim() || null);
+        set("verdict", verdict === "all" ? null : verdict);
+        set("client", device === "all" ? null : device);
+        return next.toString() === current.toString() ? current : next;
+      },
+      { replace: true },
+    );
+  }, [device, search, setParams, verdict]);
 
-  const [rows, setRows] = React.useState<Row[]>([]);
-  const [nextBefore, setNextBefore] = React.useState<number | null>(null);
-  const [logging, setLogging] = React.useState(true);
-  const [loading, setLoading] = React.useState(true);
-  const [error, setError] = React.useState<string | null>(null);
-  const [clearing, setClearing] = React.useState(false);
-  const [why, setWhy] = React.useState<string | null>(null);
-  // A page of history is 200 rows; the table draws 50 of them until asked for
-  // more. The fetch size is unchanged — this is about how much of it is put on
-  // screen at once, which on a phone is the difference between a page eleven
-  // screens long and one forty-nine screens long.
-  const [visible, setVisible] = React.useState(ACTIVITY_VISIBLE_STEP);
-  const verdictLabelId = React.useId();
-
-  // Screen readers and a live table do not mix: wrapping the table in a live
-  // region read out every column of every arriving row, and with Live on by
-  // default that is the page's opening move. A periodic count carries the one
-  // thing the region was there to say — that rows are still landing — and
-  // leaves the table itself to be read on request.
-  const arrived = React.useRef(0);
-  const [announcement, setAnnouncement] = React.useState("");
-
-  const filters = React.useMemo(
+  const filters = React.useMemo<Filters>(
     () => ({
       client: device !== "all" && device !== "unnamed" ? device : undefined,
       unnamed: device === "unnamed" ? true : undefined,
@@ -92,7 +94,195 @@ export function ActivityScreen() {
     [device, search, verdict],
   );
 
-  // History reload. Debounced because the search field drives it keystroke by
+  const filtered = device !== "all" || verdict !== "all" || filters.q !== undefined;
+
+  const clearFilters = React.useCallback(() => {
+    setDevice("all");
+    setVerdict("all");
+    setSearch("");
+  }, []);
+
+  // Built here rather than inside the feed, which renders a few times a second
+  // while the stream runs: an element React has already seen is passed through
+  // untouched, so the filters are not rendered again with every batch of rows.
+  const [initiallyOpen] = React.useState(() => params.has("client") || params.has("verdict"));
+  const controls = (
+    <QueryFilters
+      device={device}
+      devices={devices}
+      initiallyOpen={initiallyOpen}
+      onDevice={setDevice}
+      onSearch={setSearch}
+      onVerdict={setVerdict}
+      search={search}
+      verdict={verdict}
+    />
+  );
+
+  return (
+    <PageShell>
+      <PageHeader
+        description="Every query the resolver answered, most recently answered first."
+        title="Activity"
+      />
+      <QueryFeed
+        controls={controls}
+        devices={devices}
+        filtered={filtered}
+        filters={filters}
+        onClearFilters={clearFilters}
+      />
+    </PageShell>
+  );
+}
+
+/**
+ * The log, live.
+ *
+ * Live, but never under someone's hand. While keyboard focus or an open row
+ * menu is in the list, the pointer is over it, or the newest row has been
+ * scrolled out of sight, arriving rows wait above it behind "Show N new"
+ * instead of pushing everything down. At ten queries a second a focused
+ * row used to slide two thousand pixels in six seconds, fall past row 50,
+ * unmount, and drop focus on <body>. Leaving the list lets them in.
+ *
+ * Switching Live off keeps the stream connected and holds every row that
+ * arrives, so switching it back on shows what was missed; it used to close the
+ * stream, and what was answered in between never appeared at all.
+ */
+function QueryFeed({
+  filters,
+  filtered,
+  onClearFilters,
+  controls,
+  devices,
+}: {
+  filters: Filters;
+  filtered: boolean;
+  onClearFilters: () => void;
+  controls: React.ReactNode;
+  devices: Device[];
+}) {
+  const { mutate } = useCogwheelActions();
+  const navigate = useNavigate();
+
+  const [live, setLive] = React.useState(true);
+  const [feed, setFeed] = React.useState<Feed>({ rows: [], cursor: null });
+  const [logging, setLogging] = React.useState(true);
+  const [loading, setLoading] = React.useState(true);
+  const [loadingOlder, setLoadingOlder] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const [attempt, setAttempt] = React.useState(0);
+  const [clearing, setClearing] = React.useState(false);
+  const [clearedAt, setClearedAt] = React.useState<number | null>(null);
+  const [why, setWhy] = React.useState<string | null>(null);
+  // A page of history is 200 rows; the table draws 50 of them until asked for
+  // more. On a phone that is the difference between a page eleven screens long
+  // and one forty-nine screens long.
+  const [visible, setVisible] = React.useState(ACTIVITY_VISIBLE_STEP);
+  const [heldCount, setHeldCount] = React.useState(0);
+  const [interacting, setInteracting] = React.useState(false);
+  const [announcement, setAnnouncement] = React.useState("");
+
+  const hintId = React.useId();
+
+  const regionRef = React.useRef<HTMLDivElement>(null);
+  const held = React.useRef<Held>(NOTHING_HELD);
+  const liveRef = React.useRef(true);
+  const holdingRef = React.useRef(false);
+  const filtersRef = React.useRef(filters);
+  const loggingRef = React.useRef(true);
+  const arrived = React.useRef(0);
+  const presence = React.useRef({ focus: false, pointer: false, scroll: false, hidden: false });
+  const listedRef = React.useRef(false);
+  const [answeredBefore, setAnsweredBefore] = React.useState(false);
+
+  React.useEffect(() => {
+    filtersRef.current = filters;
+    loggingRef.current = logging;
+  });
+
+  /* ---------------------------------------------------------------- rows */
+
+  /**
+   * Lets the held rows in. Everything that decides *when* ends up here.
+   * `urgent` skips the transition, for "Show N new": the rows it lets in are
+   * the ones focus is about to move to.
+   */
+  const release = React.useCallback((urgent = false) => {
+    const { rows, overflow } = held.current;
+    if (rows.length === 0) return;
+    held.current = NOTHING_HELD;
+    setHeldCount(0);
+    arrived.current += rows.length;
+
+    if (overflow && loggingRef.current) {
+      // More arrived than the buffer keeps. The log has every one of them, so
+      // it is read again rather than showing 500 rows with a hole behind them.
+      api
+        .queries({ ...filtersRef.current, limit: ACTIVITY_PAGE_SIZE })
+        .then((page) =>
+          React.startTransition(() =>
+            setFeed((current) =>
+              withHistory(page.rows, [...rows, ...current.rows.filter((row) => row.id === null)], page.next_before),
+            ),
+          ),
+        )
+        .catch(() => React.startTransition(() => setFeed((current) => prepend(current, rows))));
+      return;
+    }
+    if (urgent) setFeed((current) => prepend(current, rows));
+    else React.startTransition(() => setFeed((current) => prepend(current, rows)));
+  }, []);
+
+  /** Recomputes whether rows are held, from the refs the event handlers keep current. */
+  const settle = React.useCallback(() => {
+    const { focus, pointer, scroll, hidden } = presence.current;
+    // An empty list has no row to keep still, so the first rows always come in.
+    const busy = (listedRef.current && (focus || pointer || scroll)) || hidden;
+    holdingRef.current = !liveRef.current || busy;
+    setInteracting(busy);
+    if (!holdingRef.current) release();
+  }, [release]);
+
+  const listed = feed.rows.length > 0;
+  React.useEffect(() => {
+    listedRef.current = listed;
+    settle();
+  }, [listed, settle]);
+
+  const onFrames = React.useCallback((frames: StreamQueryEvent[]) => {
+    const current = filtersRef.current;
+    const rows: Row[] = [];
+    for (let index = frames.length - 1; index >= 0; index -= 1) {
+      const row = fromFrame(frames[index]);
+      if (matches(row, current)) rows.push(row);
+    }
+    if (rows.length === 0) return;
+
+    if (holdingRef.current) {
+      const previous = held.current;
+      const next = [...rows, ...previous.rows];
+      held.current = {
+        rows: next.slice(0, ACTIVITY_BUFFER_LIMIT),
+        total: previous.total + rows.length,
+        overflow: previous.overflow || next.length > ACTIVITY_BUFFER_LIMIT,
+      };
+      setHeldCount(held.current.total);
+      return;
+    }
+
+    arrived.current += rows.length;
+    // A transition: typing in the search field or opening a menu is never
+    // queued behind drawing a batch of rows.
+    React.startTransition(() => setFeed((feedNow) => prepend(feedNow, rows)));
+  }, []);
+
+  // Connected for as long as the screen is open; Live decides what is shown,
+  // not whether anything is received.
+  const stream = useQueryStream(true, onFrames);
+
+  // History. Debounced because the search field drives it keystroke by
   // keystroke, and every filter is answered by the server, not in the browser.
   React.useEffect(() => {
     const controller = new AbortController();
@@ -101,8 +291,19 @@ export function ActivityScreen() {
       api
         .queries({ ...filters, limit: ACTIVITY_PAGE_SIZE }, { signal: controller.signal })
         .then((page) => {
-          setRows(page.rows.map((row) => ({ ...row, key: `log-${row.id}` })));
-          setNextBefore(page.next_before);
+          // Rows held so far were held under the previous filters. The page
+          // has every one of them that was logged; the rest are the newest
+          // few seconds the writer has not flushed, kept if they still match.
+          const waiting = held.current.rows;
+          held.current = NOTHING_HELD;
+          setHeldCount(0);
+          setFeed((current) =>
+            withHistory(
+              page.rows,
+              [...waiting, ...current.rows.filter((row) => row.id === null)].filter((row) => matches(row, filters)),
+              page.next_before,
+            ),
+          );
           setLogging(page.logging);
           setError(null);
         })
@@ -110,66 +311,192 @@ export function ActivityScreen() {
           if (cause instanceof DOMException && cause.name === "AbortError") return;
           setError(errorMessage(cause));
         })
-        .finally(() => setLoading(false));
+        .finally(() => {
+          if (!controller.signal.aborted) setLoading(false);
+        });
     }, 250);
 
     return () => {
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [filters]);
+  }, [filters, attempt]);
 
   React.useEffect(() => setVisible(ACTIVITY_VISIBLE_STEP), [filters]);
 
-  const onFrame = React.useCallback(
-    (frame: StreamQueryEvent) => {
-      if (filters.client && frame.client !== filters.client) return;
-      // Device = Unnamed asks for the clients with no `devices` row; a live
-      // frame carries the name when there is one, which is the same question.
-      if (filters.unnamed && frame.deviceName) return;
-      if (filters.blocked !== undefined && frame.blocked !== filters.blocked) return;
-      if (filters.q && !frame.domain.toLowerCase().includes(filters.q.toLowerCase())) return;
-      arrived.current += 1;
-
-      setRows((current) => {
-        // The writer flushes to SQLite every 5 s, so a frame and its log row can
-        // both arrive; the newest 50 rows are the only window where they overlap.
-        const duplicate = current
-          .slice(0, 50)
-          .some((row) => row.ts === frame.ts && row.client === frame.client && row.domain === frame.domain);
-        if (duplicate) return current;
-        return [fromFrame(frame), ...current].slice(0, ACTIVITY_BUFFER_LIMIT);
-      });
-    },
-    [filters],
-  );
-
-  const stream = useQueryStream(live, onFrame);
+  /* ------------------------------------------------------------- holding */
 
   React.useEffect(() => {
-    arrived.current = 0;
-    setAnnouncement("");
-    if (!live) return;
-    // A running total rather than a per-tick count: an unchanged sentence is an
-    // unchanged state, and React not re-rendering it is exactly the silence a
-    // stalled stream should get.
+    const region = regionRef.current;
+    let frame = 0;
+    const measure = () => {
+      frame = 0;
+      if (!region) return;
+      const scroll = scrolledIntoList(region);
+      if (scroll !== presence.current.scroll) {
+        presence.current.scroll = scroll;
+        settle();
+      }
+    };
+    const onScroll = () => {
+      if (!frame) frame = requestAnimationFrame(measure);
+    };
+    const onVisibility = () => {
+      // Nobody is reading a background tab; drawing rows into it is work for
+      // nothing, and they are all let in the moment it is looked at again.
+      presence.current.hidden = document.hidden;
+      settle();
+    };
+    presence.current.hidden = document.hidden;
+    // Capture, so the table's own scroll container reports too: scroll does
+    // not bubble, but it is still captured on the way down.
+    window.addEventListener("scroll", onScroll, { capture: true, passive: true });
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.removeEventListener("scroll", onScroll, { capture: true });
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [settle]);
+
+  const blurTimer = React.useRef<number | undefined>(undefined);
+  React.useEffect(() => () => window.clearTimeout(blurTimer.current), []);
+
+  /* --------------------------------------------------------- tab stops */
+
+  // One tab stop for the whole list, not fifty (hooks/use-roving-menus.ts).
+  const roving = useRovingMenus(regionRef);
+
+  const onFocus = (event: React.FocusEvent<HTMLDivElement>) => {
+    window.clearTimeout(blurTimer.current);
+    const target = event.target as HTMLElement;
+    roving.noteFocus(target);
+    // Focus arriving from a portaled row menu bubbles here through React too.
+    const focus = holdsFocus(target);
+    if (focus !== presence.current.focus) {
+      presence.current.focus = focus;
+      settle();
+    }
+  };
+
+  const onBlur = () => {
+    // Checked a moment later: a menu closing hands focus back to its trigger
+    // on the next frame, and letting rows in during that gap would move the
+    // row the person just acted on.
+    window.clearTimeout(blurTimer.current);
+    blurTimer.current = window.setTimeout(() => {
+      const region = regionRef.current;
+      if (!region) return;
+      const active = document.activeElement;
+      const inside = Boolean(active && region.contains(active) && holdsFocus(active));
+      const menuOpen = Boolean(region.querySelector('[aria-haspopup="menu"][aria-expanded="true"]'));
+      const focus = inside || menuOpen;
+      if (!inside && !menuOpen) {
+        // Tabbing back in lands on the newest row, not wherever the last
+        // visit ended — in a live log that row may be hundreds down by now.
+        roving.leave();
+      }
+      if (focus !== presence.current.focus) {
+        presence.current.focus = focus;
+        settle();
+      }
+    }, 150);
+  };
+
+  // A pointer resting on the list holds it only while it is being used: a
+  // mouse left parked over a log on a spare screen is not someone reading it,
+  // and the list would otherwise stop being live for as long as it sat there.
+  const lastMove = React.useRef(0);
+  const idleTimer = React.useRef<number | undefined>(undefined);
+  React.useEffect(() => () => window.clearTimeout(idleTimer.current), []);
+
+  const expirePointer = React.useCallback(() => {
+    const idle = performance.now() - lastMove.current;
+    if (idle < POINTER_IDLE_MS) {
+      idleTimer.current = window.setTimeout(expirePointer, POINTER_IDLE_MS - idle);
+      return;
+    }
+    idleTimer.current = undefined;
+    if (!presence.current.pointer) return;
+    presence.current.pointer = false;
+    settle();
+  }, [settle]);
+
+  const onPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.pointerType !== "mouse") return;
+    lastMove.current = performance.now();
+    if (idleTimer.current === undefined) idleTimer.current = window.setTimeout(expirePointer, POINTER_IDLE_MS);
+    // Over the rows, a row's position is about to be clicked on. Over the
+    // Live switch, it is Live that is about to change.
+    const pointer = !(event.target as HTMLElement).closest?.("[data-live-control]");
+    if (pointer !== presence.current.pointer) {
+      presence.current.pointer = pointer;
+      settle();
+    }
+  };
+
+  const onPointerLeave = () => {
+    if (!presence.current.pointer) return;
+    presence.current.pointer = false;
+    settle();
+  };
+
+  const toggleLive = React.useCallback(
+    (on: boolean) => {
+      liveRef.current = on;
+      setLive(on);
+      if (on) arrived.current = 0;
+      settle();
+    },
+    [settle],
+  );
+
+  const showNew = React.useCallback(
+    (event: React.MouseEvent<HTMLButtonElement>) => {
+      const region = regionRef.current;
+      const scroller = region?.querySelector<HTMLElement>('[data-slot="table-wrapper"]');
+      if (scroller) scroller.scrollTop = 0;
+      release(true);
+      // From the keyboard, the button is about to disappear under focus, and
+      // the rows it let in are the ones that were asked for.
+      if (event.detail === 0) {
+        requestAnimationFrame(() => region?.querySelector<HTMLElement>(ROW_TRIGGER)?.focus());
+      }
+    },
+    [release],
+  );
+
+  /* ------------------------------------------------------ announcements */
+
+  // Screen readers and a live table do not mix: wrapping the table in a live
+  // region read out every column of every arriving row. A periodic count
+  // carries the one thing the region was there to say.
+  React.useEffect(() => {
     const timer = window.setInterval(() => {
-      if (arrived.current === 0) return;
+      const waiting = held.current.total;
       setAnnouncement(
-        `${pluralize(arrived.current, "new query", "new queries")} since Live was switched on.`,
+        waiting > 0
+          ? `${pluralize(waiting, "new query", "new queries")} waiting above the list.`
+          : liveRef.current && arrived.current > 0
+            ? `${pluralize(arrived.current, "new query", "new queries")} since Live was switched on.`
+            : "",
       );
     }, ACTIVITY_ANNOUNCE_INTERVAL_MS);
     return () => window.clearInterval(timer);
-  }, [live]);
+  }, []);
+
+  /* ------------------------------------------------------------ actions */
 
   const loadOlder = async () => {
-    if (nextBefore === null) return;
+    if (feed.cursor === null) return;
+    setLoadingOlder(true);
     try {
-      const page = await api.queries({ ...filters, before: nextBefore, limit: ACTIVITY_PAGE_SIZE });
-      setRows((current) => [...current, ...page.rows.map((row) => ({ ...row, key: `log-${row.id}` }))]);
-      setNextBefore(page.next_before);
+      const page = await api.queries({ ...filters, before: feed.cursor, limit: ACTIVITY_PAGE_SIZE });
+      setFeed((current) => ({ rows: [...current.rows, ...page.rows.map(fromLog)], cursor: page.next_before }));
     } catch (cause) {
       notify.error("Could not load older rows", errorMessage(cause));
+    } finally {
+      setLoadingOlder(false);
     }
   };
 
@@ -183,315 +510,280 @@ export function ActivityScreen() {
       failureTitle: "Could not clear the log",
     });
     if (result) {
-      setRows([]);
-      setNextBefore(null);
+      held.current = NOTHING_HELD;
+      setHeldCount(0);
+      setFeed({ rows: [], cursor: null });
+      setVisible(ACTIVITY_VISIBLE_STEP);
+      setClearedAt(Math.floor(Date.now() / 1000));
     }
   };
 
-  const addRule = (domain: string, action: "allow" | "block", deviceId?: string) =>
-    mutate({
-      key: `rule-${domain}`,
-      action: () => api.createRule({ domain, action, device_id: deviceId }),
-      successTitle: action === "allow" ? "Allow rule saved" : "Block rule saved",
-      successDetail: domain,
-      failureTitle: "Could not save the rule",
-    });
+  const byIp = React.useMemo(() => {
+    const map = new Map<string, { id: string; name: string }>();
+    for (const entry of devices) map.set(entry.ip_address, { id: entry.id, name: entry.name });
+    return map;
+  }, [devices]);
 
-  const explain = async (row: Row) => {
-    try {
-      setWhy(checkSentence(await api.check(row.domain, row.client)));
-    } catch (cause) {
-      notify.error("Could not check that domain", errorMessage(cause));
+  // Read through a ref so the handler every row holds never changes identity:
+  // a new one would re-render every memoised row.
+  const handlers = React.useRef({ byIp, mutate, navigate });
+  React.useEffect(() => {
+    handlers.current = { byIp, mutate, navigate };
+  });
+
+  const onAction = React.useCallback<RowAction>((row, action) => {
+    const { byIp: named, mutate: run, navigate: go } = handlers.current;
+    const deviceId = named.get(row.client)?.id;
+    const addRule = (verb: "allow" | "block", scoped?: string) =>
+      void run({
+        key: `rule-${row.domain}`,
+        action: () => api.createRule({ domain: row.domain, action: verb, device_id: scoped }),
+        successTitle: verb === "allow" ? "Allow rule saved" : "Block rule saved",
+        successDetail: row.domain,
+        failureTitle: "Could not save the rule",
+      });
+
+    if (action === "allow") addRule("allow");
+    else if (action === "block") addRule("block");
+    else if (action === "allow-device") addRule("allow", deviceId);
+    else if (action === "block-device") addRule("block", deviceId);
+    else if (action === "name") go(`/devices?ip=${encodeURIComponent(row.client)}`);
+    else {
+      api
+        .check(row.domain, row.client)
+        .then((result) => setWhy(checkSentence(result)))
+        .catch((cause) => notify.error("Could not check that domain", errorMessage(cause)));
     }
-  };
+  }, []);
 
-  const rowMenu = (row: Row) => {
-    const named = data.devices.devices.find((entry) => entry.ip_address === row.client);
-    return (
-      <RowMenu
-        actions={[
-          { value: "allow", label: "Allow for everyone" },
-          { value: "block", label: "Block for everyone" },
-          ...(named
-            ? [
-                { value: "allow-device", label: `Allow on ${named.name}` },
-                { value: "block-device", label: `Block on ${named.name}` },
-              ]
-            : [{ value: "name", label: "Name this device…" }]),
-          { value: "why", label: "Why?" },
-        ]}
-        label={`Actions for ${row.domain}`}
-        onSelect={(value) => {
-          if (value === "allow") void addRule(row.domain, "allow");
-          else if (value === "block") void addRule(row.domain, "block");
-          else if (value === "allow-device") void addRule(row.domain, "allow", named?.id);
-          else if (value === "block-device") void addRule(row.domain, "block", named?.id);
-          else if (value === "name") navigate(`/devices?ip=${encodeURIComponent(row.client)}`);
-          else void explain(row);
-        }}
-      />
-    );
-  };
+  /* -------------------------------------------------------------- table */
 
-  const shown = React.useMemo(() => rows.slice(0, visible), [rows, visible]);
-
-  const columns: Column<Row>[] = [
-    {
-      key: "ts",
-      header: "Time",
-      render: (row) => <span className="tabular text-muted-foreground text-xs">{formatClock(row.ts)}</span>,
-    },
-    {
-      key: "domain",
-      header: "Domain",
-      render: (row) => (
-        <span className="font-mono text-sm" title={row.domain}>
-          {row.domain}
-        </span>
-      ),
-    },
-    {
-      key: "device",
-      header: "Device",
-      render: (row) =>
-        row.device_name ? (
-          row.device_name
-        ) : (
-          <span className="flex items-center gap-2">
-            <span className="font-mono text-sm">{row.client}</span>
-            <span className="text-muted-foreground text-xs">unnamed</span>
-          </span>
-        ),
-    },
-    {
-      key: "verdict",
-      header: "Verdict",
-      // A pill only for Blocked. Colour marks the exception, never the rule:
-      // a column of two hundred green "Allowed" pills pulls the eye to the
-      // 86% of rows that need no attention and buries the handful that do.
-      // This is the reasoning the Lists status column already applies to
-      // itself; Activity was doing the opposite.
-      render: (row) => {
-        const reason = reasonLabel(row.reason, row.list);
-        return (
-          <span className="flex flex-wrap items-center gap-2">
-            {row.blocked ? (
-              <StatusPill label="Blocked" tone="bad" />
-            ) : (
-              <span className="text-muted-foreground text-sm">Allowed</span>
-            )}
-            {reason ? <span className="text-muted-foreground text-xs">{reason}</span> : null}
-          </span>
-        );
+  const columns = React.useMemo<Column<Row>[]>(
+    () => [
+      { key: "ts", header: "Time", render: (row) => <TimeCell ts={row.ts} /> },
+      { key: "domain", header: "Domain", render: (row) => <DomainCell domain={row.domain} /> },
+      {
+        key: "device",
+        header: "Device",
+        render: (row) => <DeviceCell client={row.client} name={row.device_name} />,
       },
-    },
-    { key: "actions", header: "", align: "end", stackHeader: true, render: rowMenu },
-  ];
+      {
+        key: "verdict",
+        header: "Verdict",
+        render: (row) => <VerdictCell blocked={row.blocked} list={row.list} reason={row.reason} />,
+      },
+      {
+        key: "actions",
+        header: "Actions",
+        hideHeader: true,
+        align: "end",
+        stackHeader: true,
+        render: (row) => <RowActions deviceName={byIp.get(row.client)?.name} onAction={onAction} row={row} />,
+      },
+    ],
+    [byIp, onAction],
+  );
 
-  // A log row is a domain and a verdict; everything else is context. Two lines
-  // at about 56px, against the five-line label/value card the generic stacked
-  // form would build — which at 200 rows was forty-nine phone screens of
-  // scroll with the only controls at the bottom of it.
-  //
-  // The verdict is a word on both lines' worth of width, not a bare dot with
-  // the word in sr-only: DESIGN.md's rule is that every tone pairs a dot with
-  // a word, and a red dot alone was the narrow form quietly opting out of it.
-  // The reason travels with it, because "Blocked · HaGeZi Pro" is the sentence
-  // the whole page is for — the desktop table has always said it and the phone
-  // dropped it.
-  const narrowRow = (row: Row) => {
-    const reason = reasonLabel(row.reason, row.list);
-    return (
-      <div className="flex items-start gap-3 py-3">
-        <div className="min-w-0 flex-1">
-          <p className="flex items-baseline gap-2">
-            {row.blocked ? <Status className="self-center" size="sm" variant="destructive" /> : null}
-            <span className="min-w-0 flex-1 truncate font-mono text-foreground text-sm">{row.domain}</span>
-            <span className="tabular shrink-0 text-muted-foreground text-xs">{formatClock(row.ts)}</span>
-          </p>
-          <p className="mt-1 truncate text-muted-foreground text-xs">
-            <span className={row.blocked ? "font-medium text-foreground" : undefined}>
-              {row.blocked ? "Blocked" : "Allowed"}
-            </span>
-            {reason ? ` · ${reason}` : ""} · {row.device_name ?? `${row.client} (unnamed)`}
-          </p>
-        </div>
-        {rowMenu(row)}
-      </div>
-    );
-  };
+  const card = React.useCallback(
+    (row: Row) => <NarrowQueryRow deviceName={byIp.get(row.client)?.name} onAction={onAction} row={row} />,
+    [byIp, onAction],
+  );
+
+  const retry = React.useCallback(() => setAttempt((count) => count + 1), []);
+
+  const empty = React.useMemo(() => {
+    if (filtered) {
+      return {
+        icon: SearchXIcon,
+        title: "No queries match these filters",
+        description: logging
+          ? "Nothing in the log matches them, and nothing that does has arrived since."
+          : "Nothing that matches them has arrived since this page was opened.",
+        action: (
+          <Button onClick={onClearFilters} size="sm" variant="outline">
+            Clear filters
+          </Button>
+        ),
+      };
+    }
+    if (clearedAt !== null) {
+      return {
+        icon: ActivityIcon,
+        title: "Log cleared",
+        description: `Queries answered after ${formatClock(clearedAt)} appear here ${
+          live ? "as they happen" : "when Live is switched back on"
+        }.`,
+      };
+    }
+    if (!logging) {
+      return {
+        icon: ActivityIcon,
+        title: "Waiting for queries",
+        description: "Nothing is stored while query logging is off, so this list fills from the live stream.",
+      };
+    }
+    if (answeredBefore) {
+      // The appliance has answered queries (the 24-hour counters, which are
+      // kept apart from the log, say so) but none are in the log: it was
+      // cleared before this page was opened, or aged out. Telling this person
+      // to point a device's DNS here would be telling them what they did.
+      return {
+        icon: ActivityIcon,
+        title: "The log is empty",
+        description: `Queries answered from now on appear here ${live ? "as they happen" : "when Live is switched back on"}.`,
+      };
+    }
+    return {
+      icon: ActivityIcon,
+      title: "No queries yet",
+      description:
+        "Point a device's DNS at the address on Overview, then reload a page on it — the queries land here within seconds.",
+    };
+  }, [answeredBefore, clearedAt, filtered, live, logging, onClearFilters]);
+
+  const shown = React.useMemo(() => feed.rows.slice(0, visible), [feed.rows, visible]);
+
+  // Memoised as a whole: the table re-renders every row it holds, so the
+  // status line changing under the pointer must not reach it.
+  const table = React.useMemo(
+    () => (
+      <DataTable
+        card={card}
+        columns={columns}
+        empty={empty}
+        error={error}
+        errorTitle="Could not load the query log"
+        loading={loading}
+        onRetry={retry}
+        rowKey={rowKey}
+        rows={shown}
+        // The narrow row below 768px of card: at 1024px with the sidebar open
+        // the table was 722px in a 638px card, and the row menu — the only
+        // route to Allow, Block and Why? — sat behind a nested scroll.
+        stackBelow="3xl"
+        stickyHeader
+      />
+    ),
+    [card, columns, empty, error, loading, retry, shown],
+  );
+
+  const rows = feed.rows;
+  const oldest = rows.at(-1);
+  const status = streamWords(live, stream.status, interacting);
 
   return (
-    <PageShell>
-      <PageHeader
-        description="Every query the resolver answered, most recently answered first."
-        title="Activity"
-      />
+    <PageSections>
+      {logging ? null : (
+        <NoticeBanner
+          detail="Only the live stream is shown, and nothing survives a reload. Set COGWHEEL_RETENTION__HISTORY_DAYS to a non-zero number of days and restart to keep history."
+          title="Query logging is off"
+          tone="warn"
+        />
+      )}
 
-      <PageSections>
-        {logging ? null : (
+      {/* No description: the count is stated once, in the footer beside the
+          controls that change it, and the page header already says what the
+          rows are and what order they are in. */}
+      <SectionCard title="Queries">
+        <AnsweredWatcher onChange={setAnsweredBefore} />
+        {controls}
+
+        {stream.error ? <NoticeBanner className="mb-4" title={stream.error} tone="warn" /> : null}
+
+        {/* Above the table, not up with the page header: the answer is about
+            one of the rows below and has to be read next to them. */}
+        {why ? (
           <NoticeBanner
-            detail="Only the live stream is shown, and nothing survives a reload. Set COGWHEEL_RETENTION__HISTORY_DAYS to a non-zero number of days and restart to keep history."
-            title="Query logging is off"
-            tone="warn"
+            actions={
+              <Button onClick={() => setWhy(null)} size="sm" variant="outline">
+                Dismiss
+              </Button>
+            }
+            className="mb-4"
+            title={why}
+            tone="neutral"
           />
-        )}
+        ) : null}
 
-        <SectionCard
-          actions={
-            <>
-              <span className="flex items-center gap-2 text-sm">
-                <Switch
-                  aria-label="Live"
-                  checked={live}
-                  onCheckedChange={(details) => setLive(details.checked)}
-                />
-                Live
-                {live ? (
-                  <span className="text-muted-foreground text-xs">
-                    {stream.status === "open" ? "connected" : stream.status}
-                  </span>
-                ) : null}
+        <p aria-live="polite" className="sr-only">
+          {announcement}
+        </p>
+        <p className="sr-only" id={hintId}>
+          Arrow keys move between rows. While you are in the list, new queries wait above it.
+        </p>
+
+        <div
+          aria-describedby={hintId}
+          aria-label="Query log"
+          onBlur={onBlur}
+          onFocus={onFocus}
+          onKeyDownCapture={roving.onKeyDownCapture}
+          onPointerLeave={onPointerLeave}
+          onPointerMove={onPointerMove}
+          ref={regionRef}
+          role="group"
+        >
+          <LiveLine
+            held={heldCount}
+            live={live}
+            onShowNew={showNew}
+            onToggle={toggleLive}
+            short={status.short}
+            long={status.long}
+          />
+
+          {table}
+        </div>
+
+        {/* Under the rows but inside the card. Clear log is here, last in the
+            tab order and at the far end of the row from the two benign
+            buttons: in the header it was the first control on the page. */}
+        {rows.length > 0 || filtered || clearedAt !== null ? (
+          <div className="mt-4 flex flex-wrap items-center gap-3 border-border border-t pt-4">
+            {rows.length > visible ? (
+              <Button onClick={() => setVisible((current) => current + ACTIVITY_VISIBLE_STEP)} variant="outline">
+                Show {ACTIVITY_VISIBLE_STEP} more
+              </Button>
+            ) : null}
+            {/* The first draws more of what is already loaded; this one goes
+                back to the server for rows older than the oldest loaded, and
+                says which time that is. It used to format the log cursor — a
+                row id — as a time, and printed an hour in 1970. */}
+            {rows.length > 0 ? (
+              <Button
+                disabled={feed.cursor === null}
+                isLoading={loadingOlder}
+                onClick={() => void loadOlder()}
+                variant="outline"
+              >
+                {feed.cursor !== null && oldest ? `Load older than ${formatClock(oldest.ts)}` : "No older rows"}
+              </Button>
+            ) : null}
+            {rows.length > 0 ? (
+              <span className="tabular text-muted-foreground text-xs">
+                Showing {formatCount(shown.length)} of {pluralize(rows.length, "loaded row")}
               </span>
-              {/* One home for this action, and it is the header slot Settings
-                  already uses. Side by side with Load older in a footer, in
-                  identical outline styling, adjacency was the only thing
-                  separating the destructive verb from the benign one. */}
-              <Button className="sm:ms-4" onClick={() => setClearing(true)} variant="destructive">
+            ) : null}
+            {logging ? (
+              <Button className="ms-auto" onClick={() => setClearing(true)} variant="destructive">
                 <Trash2Icon aria-hidden />
                 Clear log
               </Button>
-            </>
-          }
-          // No description: the count is stated once, in the footer beside the
-          // controls that change it, and the page header above already says
-          // what the rows are and what order they are in.
-          title="Queries"
-        >
-          {/* Each control is capped by what it holds rather than stretched to a
-              third of the card: a domain fragment is not 470px wide, and three
-              short words are not a 470px segment group. */}
-          <div className="mb-4 flex flex-wrap items-end gap-4 [&>*]:min-w-0">
-            <TextField
-              className="max-w-md flex-1 basis-64"
-              label="Domain contains"
-              onChange={setSearch}
-              placeholder="example.com"
-              searchTarget
-              value={search}
-            />
-            <SelectField
-              className="max-w-xs flex-1 basis-56"
-              label="Device"
-              onChange={setDevice}
-              options={[
-                { value: "all", label: "All devices" },
-                ...data.devices.devices.map((entry) => ({
-                  value: entry.ip_address,
-                  label: `${entry.name} (${entry.ip_address})`,
-                })),
-                { value: "unnamed", label: "Unnamed clients" },
-              ]}
-              value={device}
-            />
-            <div className="flex flex-col gap-2">
-              <GroupLabel id={verdictLabelId}>Verdict</GroupLabel>
-              <SegmentGroup
-                aria-labelledby={verdictLabelId}
-                className="w-fit rounded-lg border border-border p-0.5"
-                onValueChange={(details) => {
-                  if (details.value) setVerdict(details.value as Verdict);
-                }}
-                value={verdict}
-              >
-                {(["all", "blocked", "allowed"] as const).map((option) => (
-                  <SegmentGroupItem className="px-3 py-1" key={option} value={option}>
-                    <SegmentGroupItemText className="text-sm capitalize">{option}</SegmentGroupItemText>
-                  </SegmentGroupItem>
-                ))}
-              </SegmentGroup>
-            </div>
+            ) : null}
           </div>
-
-          {stream.error && live ? (
-            <NoticeBanner className="mb-4" title={stream.error} tone="warn" />
-          ) : null}
-
-          {/* Above the table, not up with the page header: the answer is about one
-              of the rows below and has to be read next to them. */}
-          {why ? (
-            <NoticeBanner
-              actions={
-                <Button onClick={() => setWhy(null)} size="sm" variant="outline">
-                  Dismiss
-                </Button>
-              }
-              className="mb-4"
-              title={why}
-              tone="neutral"
-            />
-          ) : null}
-
-          <p aria-live="polite" className="sr-only">
-            {announcement}
-          </p>
-
-          <DataTable
-            card={narrowRow}
-            columns={columns}
-            empty={{
-              icon: ActivityIcon,
-              title: "No queries yet",
-              description:
-                "Point a device's DNS at the address on Overview, then reload a page on it — the queries land here within seconds.",
-            }}
-            error={error}
-            loading={loading}
-            onRetry={() => void reload()}
-            rowKey={(row) => row.key}
-            rows={shown}
-            stackBelow="xl"
-            stickyHeader
-          />
-
-          {/* Under the rows but inside the card, and above the fold because the
-              table body is its own scroll container. These used to sit 9,500px
-              down the page at 1440px and 39,000px down on a phone. */}
-          {rows.length > 0 ? (
-            <div className="mt-4 flex flex-wrap items-center gap-2 border-border border-t pt-4">
-              {/* Two buttons that read as alternatives until you know the
-                  buffer exists. The first draws more of what is already
-                  held; the second goes back to the server for rows older
-                  than the oldest one held, and now says which time that is. */}
-              {rows.length > visible ? (
-                <Button
-                  onClick={() => setVisible((current) => current + ACTIVITY_VISIBLE_STEP)}
-                  variant="outline"
-                >
-                  Show {ACTIVITY_VISIBLE_STEP} more
-                </Button>
-              ) : null}
-              <Button disabled={nextBefore === null} onClick={() => void loadOlder()} variant="outline">
-                {nextBefore === null ? "Load older" : `Load older than ${formatClock(nextBefore)}`}
-              </Button>
-              <span className="tabular ms-auto text-muted-foreground text-xs">
-                Showing {formatCount(shown.length)} of {pluralize(rows.length, "row")} held
-              </span>
-            </div>
-          ) : null}
-        </SectionCard>
-      </PageSections>
+        ) : null}
+      </SectionCard>
 
       <ConfirmDialog
         confirmLabel="Clear log"
         consequence="The 24-hour counters on Overview and Devices are kept — they are stored separately from the log."
         description="Every stored query row is deleted. This cannot be undone."
-        destructive
+        tone="bad"
         onConfirm={clearLog}
         onOpenChange={setClearing}
         open={clearing}
         title="Clear the query log?"
       />
-    </PageShell>
+    </PageSections>
   );
 }

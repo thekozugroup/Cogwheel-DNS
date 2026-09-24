@@ -37,10 +37,17 @@ function toDate(seconds: number | null | undefined): Date | null {
   return new Date(seconds * 1000);
 }
 
+/**
+ * A wall-clock time in the reader's own convention: "6:12:36 PM" in the US,
+ * "18:12:36" in most of Europe. `hour: "numeric"`, not "2-digit": the latter
+ * forced "06:12:36 PM", a leading zero no twelve-hour clock prints.
+ */
+const clock = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit", second: "2-digit" });
+
 export function formatClock(seconds: number | null | undefined): string {
   const date = toDate(seconds);
   if (!date) return DASH;
-  return date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  return clock.format(date);
 }
 
 export function formatRelative(seconds: number | null | undefined): string {

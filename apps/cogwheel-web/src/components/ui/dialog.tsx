@@ -7,7 +7,7 @@ import { XIcon } from "lucide-react";
 import React from "react";
 import { tv, type VariantProps } from "tailwind-variants";
 import { cn } from "@/lib/utils";
-import { Button } from "@/components/ui/button";
+import { IconButton } from "@/components/ui/icon-button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 
 interface DialogContextProps {
@@ -95,7 +95,7 @@ const DialogPositioner = (
 
 const dialogContentVariants = tv({
   base: [
-    "[--space:--spacing(6)]",
+    "[--space:var(--spacing-gutter)]",
     "z-[calc(50+var(--layer-index,0))]",
     "relative",
     "row-start-2",
@@ -191,14 +191,13 @@ export const DialogContent = (props: DialogContentProps) => {
 
           {!!showCloseButton && (
             <DialogClose asChild>
-              <Button
-                aria-label="Close"
+              <IconButton
                 className="absolute inset-e-2 top-2 opacity-64 hover:opacity-100"
+                label="Close"
                 size="icon-sm"
-                variant="ghost"
               >
-                <XIcon />
-              </Button>
+                <XIcon aria-hidden />
+              </IconButton>
             </DialogClose>
           )}
         </ArkDialog.Content>

@@ -8,6 +8,7 @@ p1_count: 3
 target_identity: "file:/home/user/Cogwheel-DNS/apps/cogwheel-web/src"
 timestamp: 2026-09-23T18-48-58Z
 slug: apps-cogwheel-web-src
+closed: true
 ---
 Method: dual-agent (A: design review · B: detector + browser evidence), isolated sub-agents. B's report reached the parent before A's; A never saw it.
 

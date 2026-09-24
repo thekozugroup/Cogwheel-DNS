@@ -24,7 +24,22 @@ const TONE: Record<Tone, { variant: "success" | "warning" | "destructive" | "def
  * failed list's error used to do at 375px, where `.stacked-value` forces
  * `overflow: visible`. Anything longer than a label belongs in prose, not here.
  */
-export function StatusPill({ tone, label, className }: { tone: Tone; label: string; className?: string }) {
+export function StatusPill({
+  tone,
+  label,
+  verdict = false,
+  className,
+}: {
+  tone: Tone;
+  label: string;
+  /**
+   * The label is itself the meaning — a query's "Blocked", a rule's "Allow" —
+   * so no hidden status word goes in front of it. A block rule is a decision,
+   * not a problem, and was announced as "Problem: Block".
+   */
+  verdict?: boolean;
+  className?: string;
+}) {
   const { variant, word } = TONE[tone];
 
   return (
@@ -36,7 +51,7 @@ export function StatusPill({ tone, label, className }: { tone: Tone; label: stri
       )}
     >
       <Status size="sm" variant={variant} />
-      <span className="sr-only">{word}: </span>
+      {verdict ? null : <span className="sr-only">{word}: </span>}
       {label}
     </span>
   );

@@ -1,11 +1,48 @@
 "use client";
 
 import { Switch as ArkSwitch } from "@ark-ui/react/switch";
-import type React from "react";
+import React from "react";
 import { cn } from "@/lib/utils";
 
+/**
+ * The control that takes focus is `ArkSwitch.HiddenInput`, a visually hidden
+ * checkbox, so that is where the switch semantics and the name have to be.
+ *
+ * `role="switch"` on the input: an on/off setting announced as "checkbox,
+ * checked" invites the reading that ticking it selects something. And the
+ * `aria-label` the call sites pass is forwarded to the input rather than left
+ * on the root <label>, which has no text of its own to name the input with.
+ */
 export const Switch = (props: React.ComponentProps<typeof ArkSwitch.Root>) => {
-  const { className, tabIndex, ...rest } = props;
+  const {
+    className,
+    tabIndex,
+    "aria-label": ariaLabel,
+    "aria-labelledby": ariaLabelledBy,
+    "aria-describedby": ariaDescribedBy,
+    onCheckedChange,
+    ...rest
+  } = props;
+
+  // A controlled switch whose parent refuses a change — Lists asks before
+  // disabling a list a device depends on — keeps its track, but the native
+  // checkbox under it had already been toggled by the click, and a screen
+  // reader read the new state. After the parent has had its render, the
+  // input is put back in step with the `checked` it was actually given.
+  const inputRef = React.useRef<HTMLInputElement>(null);
+  const checkedRef = React.useRef(props.checked);
+  checkedRef.current = props.checked;
+  const handleCheckedChange = React.useCallback(
+    (details: { checked: boolean }) => {
+      onCheckedChange?.(details);
+      requestAnimationFrame(() => {
+        const input = inputRef.current;
+        const checked = checkedRef.current;
+        if (input && checked !== undefined && input.checked !== checked) input.checked = checked;
+      });
+    },
+    [onCheckedChange],
+  );
 
   return (
     <ArkSwitch.Root
@@ -36,12 +73,16 @@ export const Switch = (props: React.ComponentProps<typeof ArkSwitch.Root>) => {
         "data-invalid:border-destructive",
         "dark:data-invalid:border-destructive-foreground",
         "data-[state=checked]:bg-primary",
-        "data-[state=unchecked]:bg-input dark:data-[state=unchecked]:bg-input",
+        // --input is the 3:1 control edge, so the unchecked track clears 3:1
+        // against the surface and the white thumb clears it against the
+        // track (3.47:1 light; the dark thumb is --foreground, 4.5:1).
+        "data-[state=unchecked]:bg-input",
         "data-disabled:pointer-events-none data-disabled:opacity-64",
         "motion-reduce:transition-none!",
         className
       )}
       data-slot="switch"
+      onCheckedChange={handleCheckedChange}
       {...rest}
     >
       <ArkSwitch.Control
@@ -66,7 +107,14 @@ export const Switch = (props: React.ComponentProps<typeof ArkSwitch.Root>) => {
         />
       </ArkSwitch.Control>
 
-      <ArkSwitch.HiddenInput tabIndex={tabIndex} />
+      <ArkSwitch.HiddenInput
+        aria-describedby={ariaDescribedBy}
+        aria-label={ariaLabel}
+        aria-labelledby={ariaLabelledBy}
+        ref={inputRef}
+        role="switch"
+        tabIndex={tabIndex}
+      />
     </ArkSwitch.Root>
   );
 };

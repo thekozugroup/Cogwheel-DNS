@@ -1,7 +1,8 @@
 //! The read routes and the rebuild rules behind them: the query log, pause, the Overview and
-//! the settings dump (§3 routes 3–8 and 22, §6 step 4).
+//! the settings dump (§3 routes 3–8 and 22, §6 step 4), and the cache headers the web shell is
+//! served with.
 
-use super::{ADS_LIST, Harness, device_input, rule_input, subscribe};
+use super::{ADS_LIST, Harness, TempDir, device_input, rule_input, subscribe};
 use crate::api::{devices, overview, queries, rules, runtime, settings};
 use crate::http::{ApiJson, ApiQuery};
 use crate::policy_build::{Rebuild, rebuild};
@@ -448,4 +449,122 @@ async fn a_page_larger_than_the_cap_is_refused_rather_than_trimmed() {
     .await
     .expect("the cap itself is allowed");
     assert!(page.data.rows.is_empty());
+}
+
+// ------------------------------------------------------------------- web shell
+
+/// Hashed assets are kept for a year; the shell is revalidated on every load.
+///
+/// The pair is what makes an update land: the browser asks for `index.html` each time, the new
+/// one names new asset URLs, and the vendor split it already has is never asked about again. A
+/// 404 under `/assets/` is the shell with a 404 status and must not be pinned, and the API is
+/// not the static service's to label.
+#[tokio::test]
+async fn hashed_assets_are_immutable_and_the_shell_is_revalidated() {
+    use crate::http::{CACHE_IMMUTABLE, CACHE_REVALIDATE};
+
+    let harness = Harness::new().await;
+    let dist = TempDir::new("web");
+    std::fs::create_dir_all(dist.path().join("assets")).expect("create the assets directory");
+    std::fs::write(
+        dist.path().join("index.html"),
+        "<!doctype html><title>Cogwheel</title>",
+    )
+    .expect("write the shell");
+    std::fs::write(dist.path().join("assets/index-3f9a1c.js"), "export {};")
+        .expect("write a hashed asset");
+    let app = crate::http::app_serving(harness.state.clone(), Some(dist.path().to_path_buf()));
+
+    let cases = [
+        (
+            "GET",
+            "/assets/index-3f9a1c.js",
+            StatusCode::OK,
+            Some(CACHE_IMMUTABLE),
+        ),
+        (
+            "HEAD",
+            "/assets/index-3f9a1c.js",
+            StatusCode::OK,
+            Some(CACHE_IMMUTABLE),
+        ),
+        ("GET", "/", StatusCode::OK, Some(CACHE_REVALIDATE)),
+        ("GET", "/index.html", StatusCode::OK, Some(CACHE_REVALIDATE)),
+        // A client-side route, answered with the shell.
+        ("GET", "/settings", StatusCode::OK, Some(CACHE_REVALIDATE)),
+        ("HEAD", "/devices", StatusCode::OK, Some(CACHE_REVALIDATE)),
+        (
+            "GET",
+            "/assets/index-000000.js",
+            StatusCode::NOT_FOUND,
+            Some(CACHE_REVALIDATE),
+        ),
+        ("GET", "/api/v1/settings", StatusCode::OK, None),
+    ];
+
+    for (method, uri, status, cache_control) in cases {
+        let request = axum::http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(axum::body::Body::empty())
+            .expect("build a request");
+        let response = tower::ServiceExt::oneshot(app.clone(), request)
+            .await
+            .expect("the router answers");
+        assert_eq!(response.status(), status, "{method} {uri}");
+        let header = response
+            .headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .map(|value| value.to_str().expect("an ASCII header"));
+        assert_eq!(header, cache_control, "{method} {uri}");
+    }
+}
+
+/// A reload of a client-side route revalidates the shell, and must get the shell or a 304.
+///
+/// The shell used to be reached through ServeDir's not-found service, which relabels whatever
+/// the shell answered as a 404; the fallback then turned that 404 into a 200. A conditional
+/// request therefore came back as `200 OK` with an empty body, and the browser — told by
+/// `no-cache` to revalidate on every load — drew a blank page on every reload of /devices.
+#[tokio::test]
+async fn a_revalidated_client_route_is_a_304_not_an_empty_page() {
+    let harness = Harness::new().await;
+    let dist = TempDir::new("web-revalidate");
+    let shell = "<!doctype html><title>Cogwheel</title>";
+    std::fs::write(dist.path().join("index.html"), shell).expect("write the shell");
+    let app = crate::http::app_serving(harness.state.clone(), Some(dist.path().to_path_buf()));
+
+    let send = |uri: &str, since: Option<&str>| {
+        let mut request = axum::http::Request::builder().uri(uri);
+        if let Some(since) = since {
+            request = request.header(axum::http::header::IF_MODIFIED_SINCE, since);
+        }
+        tower::ServiceExt::oneshot(
+            app.clone(),
+            request
+                .body(axum::body::Body::empty())
+                .expect("build a request"),
+        )
+    };
+
+    for uri in ["/", "/devices", "/lists"] {
+        let first = send(uri, None).await.expect("the router answers");
+        assert_eq!(first.status(), StatusCode::OK, "{uri}");
+        let modified = first
+            .headers()
+            .get(axum::http::header::LAST_MODIFIED)
+            .expect("the shell carries Last-Modified")
+            .to_str()
+            .expect("an ASCII header")
+            .to_owned();
+        let body = axum::body::to_bytes(first.into_body(), usize::MAX)
+            .await
+            .expect("read the shell");
+        assert_eq!(&body[..], shell.as_bytes(), "{uri}");
+
+        let again = send(uri, Some(&modified))
+            .await
+            .expect("the router answers");
+        assert_eq!(again.status(), StatusCode::NOT_MODIFIED, "{uri}");
+    }
 }

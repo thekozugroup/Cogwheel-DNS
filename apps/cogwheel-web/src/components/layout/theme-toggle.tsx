@@ -14,7 +14,7 @@ export function ThemeToggle({ compact = false }: { compact?: boolean }) {
   return (
     <SegmentGroup
       aria-label="Colour theme"
-      className="rounded-lg border border-border p-0.5"
+      className="rounded-lg border p-0.5"
       onValueChange={(details) => {
         if (details.value) setPreference(details.value as ThemePreference);
       }}
@@ -22,9 +22,8 @@ export function ThemeToggle({ compact = false }: { compact?: boolean }) {
     >
       {OPTIONS.map((option) => (
         <SegmentGroupItem
-          className="px-2 py-1"
+          className="flex-1 px-2 py-1"
           key={option.value}
-          title={option.label}
           value={option.value}
         >
           <SegmentGroupItemText className="flex items-center gap-2 text-xs">

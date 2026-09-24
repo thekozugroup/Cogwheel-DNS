@@ -23,7 +23,7 @@ export function ConfirmDialog({
   title,
   description,
   confirmLabel,
-  destructive = false,
+  tone = "neutral",
   consequence,
   onConfirm,
 }: {
@@ -32,7 +32,14 @@ export function ConfirmDialog({
   title: string;
   description: string;
   confirmLabel: string;
-  destructive?: boolean;
+  /**
+   * The state the appliance will be in afterwards, which colours the
+   * consequence line: `bad` for what is lost (a deleted list, a cleared log),
+   * `warn` for what is degraded (a pause, a device left with no list), and
+   * `neutral` for the rest. The pause said red for a state that is yellow
+   * everywhere else in the product.
+   */
+  tone?: "bad" | "warn" | "neutral";
   /** Extra line spelling out what changes on the appliance. */
   consequence?: string;
   onConfirm: () => void | Promise<void>;
@@ -72,9 +79,11 @@ export function ConfirmDialog({
             <p
               className={cn(
                 "rounded-xl border px-3 py-3 text-sm",
-                destructive
+                tone === "bad"
                   ? "border-destructive/24 bg-destructive/8 text-destructive-foreground"
-                  : "border-border bg-muted text-foreground",
+                  : tone === "warn"
+                    ? "border-warning/32 bg-warning/10 text-warning-foreground"
+                    : "border-border bg-muted text-foreground",
               )}
             >
               {consequence}

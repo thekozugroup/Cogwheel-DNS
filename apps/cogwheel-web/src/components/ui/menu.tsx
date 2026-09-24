@@ -84,6 +84,19 @@ export const MenuContent = (props: MenuContentProps) => {
   );
 };
 
+/**
+ * The highlighted item — keyboard or pointer, Ark does not distinguish — is
+ * inverted: primary surface, primary foreground. It was --accent on
+ * --popover, #f5f5f5 on #fff, 1.09:1 with no outline, so a keyboard user
+ * arrowing through a row menu could not see which verb Enter would fire. An
+ * inverted row is how a native menu marks the same thing, and in a black and
+ * white product it is the only highlight that reads at a glance.
+ *
+ * `destructive` keeps its name for the call sites but not its red. DESIGN.md
+ * §2: a status colour on a control is a colour being used as a control. The
+ * guard on "Delete list…" is the ConfirmDialog it opens, which is where the
+ * red lives, on the sentence describing what the appliance will be in after.
+ */
 const menuItemVariants = tv({
   base: [
     "group/menu-item",
@@ -94,21 +107,16 @@ const menuItemVariants = tv({
     "select-none text-sm",
     "rounded-lg",
     "outline-hidden",
-    "group-data-[date=open]/trigger-item:bg-accent group-data-[date=open]/trigger-item:text-accent-foreground",
+    "cursor-default",
+    "data-highlighted:bg-primary data-highlighted:text-primary-foreground",
     "data-disabled:pointer-events-none data-disabled:opacity-64",
     "[&_svg:not([class*='size-'])]:size-3.5 [&_svg]:pointer-events-none [&_svg]:shrink-0",
+    "pointer-coarse:min-h-11",
   ],
   variants: {
     variant: {
-      default: [
-        "data-highlighted:bg-accent data-highlighted:text-accent-foreground",
-      ],
-      destructive: [
-        // Tint + 700/300 text, matching the destructive button.
-        "text-destructive-foreground",
-        "data-highlighted:bg-destructive/10 dark:data-highlighted:bg-destructive-foreground/10",
-        "**:[svg]:text-destructive-foreground!",
-      ],
+      default: [],
+      destructive: [],
     },
   },
   defaultVariants: {
@@ -132,3 +140,22 @@ export const MenuItem = (props: MenuItemProps) => {
   );
 };
 
+
+/**
+ * Items that act on the same scope — "for everyone", "on Sam's iPhone" — kept
+ * together. The label is for assistive technology: the items' own words
+ * already name the scope, and the separator draws the grouping.
+ */
+export const MenuItemGroup = (props: React.ComponentProps<typeof ArkMenu.ItemGroup>) => (
+  <ArkMenu.ItemGroup data-slot="menu-item-group" {...props} />
+);
+
+export const MenuItemGroupLabel = (props: React.ComponentProps<typeof ArkMenu.ItemGroupLabel>) => {
+  const { className, ...rest } = props;
+  return <ArkMenu.ItemGroupLabel className={cn("sr-only", className)} data-slot="menu-item-group-label" {...rest} />;
+};
+
+export const MenuSeparator = (props: React.ComponentProps<typeof ArkMenu.Separator>) => {
+  const { className, ...rest } = props;
+  return <ArkMenu.Separator className={cn("-mx-1 my-1 h-px border-0 bg-border", className)} data-slot="menu-separator" {...rest} />;
+};
