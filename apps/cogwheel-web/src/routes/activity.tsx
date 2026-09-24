@@ -561,7 +561,8 @@ function QueryFeed({
   const columns = React.useMemo<Column<Row>[]>(
     () => [
       { key: "ts", header: "Time", render: (row) => <TimeCell ts={row.ts} /> },
-      { key: "domain", header: "Domain", render: (row) => <DomainCell domain={row.domain} /> },
+      // The domain names the row, so it is the column that takes the slack.
+      { key: "domain", header: "Domain", primary: true, render: (row) => <DomainCell domain={row.domain} /> },
       {
         key: "device",
         header: "Device",

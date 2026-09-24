@@ -26,7 +26,9 @@ export type Column<Row> = {
    * table has `onRowClick`, this cell's content is rendered inside a real
    * <button> — the row's one tab stop and its accessible action — and the
    * other cells stay ordinary cells a screen reader reads with their column
-   * headers. Defaults to the first column.
+   * headers. It is also the column that takes the width the others leave (see
+   * FILL), so mark it even on a table without `onRowClick`. Defaults to the
+   * first column.
    */
   primary?: boolean;
   /**
@@ -246,6 +248,18 @@ function isRowOpenClick(event: React.MouseEvent<HTMLElement>): boolean {
   return true;
 }
 
+/**
+ * The naming column takes whatever width the other columns leave, and truncates
+ * or wraps inside it. A table sizes its columns before max-width applies, so a
+ * truncating cell still set its column's minimum to the full length of its
+ * text: a 60-character list address or a long tracker domain pushed the table
+ * past its card into a sideways scroll at laptop widths. `max-w-0` takes the
+ * text out of that minimum, `w-full` hands the column the slack, and `min-w-32`
+ * keeps a name readable down to the width where the table stacks — each
+ * table's `hideBelow` breakpoints are set against that 8rem floor.
+ */
+const FILL = "w-full max-w-0 min-w-32";
+
 function primaryOf<Row>(columns: Column<Row>[]): Column<Row> | undefined {
   return columns.find((column) => column.primary) ?? columns.find((column) => !column.stackHeader);
 }
@@ -272,7 +286,8 @@ function renderTable<Row>({
   caption?: string;
   stickyHeader: boolean;
 }) {
-  const primary = onRowClick ? primaryOf(columns) : undefined;
+  const fill = primaryOf(columns);
+  const primary = onRowClick ? fill : undefined;
 
   return (
     <Table wrapperClassName={cn(stickyHeader && "max-h-[50vh]")}>
@@ -287,6 +302,10 @@ function renderTable<Row>({
                 // The header has to carry its own background, or the rows
                 // scroll underneath a transparent strip.
                 stickyHeader && "sticky top-0 z-10 bg-card",
+                // The fill column is the only one that gives up width, so the
+                // others hold their header on one line instead of stacking
+                // "Queries / Blocked" into two above a cramped number.
+                column === fill ? FILL : "whitespace-nowrap",
                 column.headClassName,
               )}
               key={column.key}
@@ -300,6 +319,7 @@ function renderTable<Row>({
         {rows.map((row) => (
           <DataRow
             columns={columns}
+            fill={fill}
             key={rowKey(row)}
             onRowClick={onRowClick}
             primary={primary}
@@ -315,12 +335,13 @@ function renderTable<Row>({
 type DataRowProps<Row> = {
   row: Row;
   columns: Column<Row>[];
+  fill?: Column<Row>;
   primary?: Column<Row>;
   onRowClick?: (row: Row) => void;
   rowActionLabel?: (row: Row) => string;
 };
 
-function DataRowBody<Row>({ row, columns, primary, onRowClick, rowActionLabel }: DataRowProps<Row>) {
+function DataRowBody<Row>({ row, columns, fill, primary, onRowClick, rowActionLabel }: DataRowProps<Row>) {
   return (
     <TableRow
       className={cn(primary && "cursor-pointer")}
@@ -335,7 +356,8 @@ function DataRowBody<Row>({ row, columns, primary, onRowClick, rowActionLabel }:
       {columns.map((column) => (
         <TableCell
           className={cn(
-            column.wrap ? "max-w-[26rem] whitespace-normal" : "max-w-[22rem] truncate",
+            column.wrap ? "whitespace-normal" : "truncate",
+            column === fill ? FILL : column.wrap ? "max-w-[26rem]" : "max-w-[22rem]",
             column.align === "end" && "text-right",
             column.className,
           )}

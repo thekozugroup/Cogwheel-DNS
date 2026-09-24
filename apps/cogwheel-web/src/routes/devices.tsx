@@ -135,7 +135,10 @@ export function DevicesScreen() {
       key: "seen",
       header: "Last seen",
       align: "end",
-      hideBelow: "lg",
+      // Measured with the name at its 8rem floor: the fixed columns and Lists
+      // need 478px, Rules brings that to 526 and this column to 626. At "lg"
+      // it arrived before there was room and scrolled the card sideways.
+      hideBelow: "2xl",
       render: (row) => <span className="text-muted-foreground text-xs">{formatRelative(row.last_seen_at)}</span>,
     },
   ];
