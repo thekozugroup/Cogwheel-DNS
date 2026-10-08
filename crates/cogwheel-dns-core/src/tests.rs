@@ -5,12 +5,17 @@
 //! and the header patching are all exercised exactly as in production.
 
 mod ai;
+mod answered;
 use super::*;
+use crate::answer::cname_target;
 use crate::response::MAX_CACHE_TTL;
 use crate::serve::{patch_header, wire_for};
-use cogwheel_policy::{Action, ListIndex, Pattern, RuleSet, SCOPE_HOUSEHOLD, Scope};
+use cogwheel_policy::{
+    Action, ListIndex, Pattern, RuleSet, SCOPE_HOUSEHOLD, Scope, normalize_domain,
+};
 use hickory_proto::op::{Edns, MessageType, Query};
 use hickory_proto::rr::rdata::{A, AAAA, CNAME};
+use hickory_proto::rr::{RData, Record};
 use hickory_resolver::config::{ConnectionConfig, NameServerConfig, ResolverConfig};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use std::collections::HashMap;
@@ -24,6 +29,7 @@ use tokio::time::timeout;
 const ANSWER: u8 = 0;
 const SERVFAIL: u8 = 1;
 const HANG: u8 = 2;
+const NXDOMAIN: u8 = 3;
 
 type Zone = HashMap<(String, RecordType), Vec<Record>>;
 
@@ -140,6 +146,7 @@ impl Stub {
             let response = match mode.load(Ordering::Relaxed) {
                 HANG => continue,
                 SERVFAIL => build_base_response(&request, ResponseCode::ServFail),
+                NXDOMAIN => build_base_response(&request, ResponseCode::NXDomain),
                 _ => {
                     let mut response = build_base_response(&request, ResponseCode::NoError);
                     let owner = normalize_domain(&query.name().to_utf8());
@@ -260,14 +267,7 @@ impl Harness {
     /// Age a cached entry past its freshness without waiting for it.
     fn expire(&self, key: &CacheKey) {
         let entry = self.runtime.cache.get(key).expect("entry is cached");
-        let stale = CachedWire {
-            bytes: entry.bytes.clone(),
-            truncated: entry.truncated.clone(),
-            fresh_until: Instant::now(),
-            stale_until: entry.stale_until,
-            blocked: entry.blocked,
-            verdict: entry.verdict,
-        };
+        let stale = entry.refreshed(Duration::ZERO);
         self.runtime.cache.insert(key.clone(), Arc::new(stale));
     }
 }

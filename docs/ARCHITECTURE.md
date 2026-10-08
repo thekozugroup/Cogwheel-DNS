@@ -178,7 +178,11 @@ to wait on anything that is not DNS.
 
 9. **Log it.** The query goes to a bounded channel (8,192) with `try_send`, so a
    slow writer drops log rows rather than slowing resolution. Everything after
-   this point is off the hot path.
+   this point is off the hot path. The entry carries one flag besides the
+   verdict: whether the upstream answered with A or AAAA addresses that are all
+   public. A miss reads it off the answer once, when it caches the answer, and
+   a hit copies it from the entry. AI review takes an allowed lookup only when
+   it is set.
 
 ### What the hot path may not do
 
@@ -379,8 +383,15 @@ Three decisions in that path are worth knowing because each is a refusal:
 
 Queries answered from the blocklists or the cache never leave the house at all,
 encrypted or not — unless AI review is on, when the names (not the lookups) are
-sent to OpenRouter to be judged. A repeat visit sends nothing: a name goes again
-only when its verdict is due another look, which
+sent to OpenRouter to be judged. Only names public by their own lookups go: one
+a list or the AI list blocked, or one the upstream answered with A or AAAA
+addresses that are all public. A name that failed to resolve, or resolved only
+to private, shared, loopback, link-local or unique-local addresses, never goes,
+whatever it is called; nor does one under a private-use, router, address-in-name
+or dynamic-DNS suffix, or one a household rule covers. A household name that
+resolves to a public address does go unless a household rule covers it. A
+repeat visit sends nothing: a name goes again only when its verdict is due
+another look, which
 [ADR 0002](adr/0002-ai-review-tier.md#what-leaves-the-house-and-when) spells out.
 
 ---

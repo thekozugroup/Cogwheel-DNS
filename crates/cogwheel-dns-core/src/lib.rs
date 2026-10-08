@@ -11,12 +11,9 @@
 //! (once per miss, never per hit) and what to do with the upstream's answer.
 
 use anyhow::{Context, Result};
-use cogwheel_policy::{
-    BlockMode, Policy, Reason, SCOPE_UNFILTERED, Verdict, evaluate, evaluate_lists,
-    normalize_domain,
-};
+use cogwheel_policy::{BlockMode, Policy, Reason, SCOPE_UNFILTERED, Verdict, evaluate};
 use hickory_proto::op::{Message, OpCode, ResponseCode};
-use hickory_proto::rr::{Name, RData, Record, RecordType};
+use hickory_proto::rr::{Name, RecordType};
 use hickory_resolver::TokioResolver;
 use hickory_resolver::net::{DnsError, NetError};
 use serde::Serialize;
@@ -32,6 +29,7 @@ use tokio::sync::{Semaphore, mpsc};
 
 #[cfg(test)]
 mod alloc_guard;
+mod answer;
 mod invalidate;
 mod response;
 mod runtime_support;
@@ -47,6 +45,7 @@ pub use upstream::{
 
 use runtime_support::{DnsRuntimeStats, average_ns, bump, read_recover, unix_now, write_recover};
 
+use answer::{answered_public, cname_block};
 use response::{BLOCKED_CACHE_TTL, build_base_response, build_blocked_response, cacheable_for};
 
 /// Names held at once. Each entry is one wire-format answer, so the whole cache is a few
@@ -96,9 +95,6 @@ const UDP_BUFFER: usize = 4096;
 /// The largest UDP answer a client without EDNS accepts (RFC 1035 §4.2.1).
 const MAX_PLAIN_UDP_PAYLOAD: usize = 512;
 
-/// CNAME targets checked per upstream answer.
-const MAX_CNAME_TARGETS: usize = 8;
-
 /// The longest name the wire can carry (RFC 1035 §2.3.4), which is also the longest text form
 /// `admit` can be asked to spell: every label byte is one character and the dots replace the
 /// length octets.
@@ -133,6 +129,14 @@ pub struct LogEntry {
     /// and a row waiting in the five-second flush window would then be attributed to whichever
     /// list happens to hold that bit by the time it is written.
     pub list: Option<Arc<str>>,
+    /// True only when the upstream answered NOERROR, the answer section holds at least one A or
+    /// AAAA address, and every A and AAAA address in it is public: not private or unique-local,
+    /// shared, loopback, link-local or site-local, multicast, reserved or unspecified, nor the
+    /// IPv4-mapped form of one (`answer.rs` lists the ranges; the documentation ranges count as
+    /// public). False for a block, NXDOMAIN, SERVFAIL, NODATA and an answer with no A or AAAA
+    /// record. AI review offers an allowed name only when this is true: an answer that points
+    /// inside the house is what no suffix list can recognise.
+    pub answered_public: bool,
 }
 
 /// What the runtime has done since it started.
@@ -207,6 +211,8 @@ struct CachedWire {
     stale_until: Instant,
     blocked: bool,
     verdict: Verdict,
+    /// [`LogEntry::answered_public`], fixed when the entry is made so a hit logs it as it is.
+    answered_public: bool,
 }
 
 impl CachedWire {
@@ -237,6 +243,8 @@ impl CachedWire {
             stale_until: now + STALE_CEILING,
             blocked: verdict.is_blocked(),
             verdict,
+            // A block is the reviewer's to judge by its verdict, whatever the block mode answers.
+            answered_public: !verdict.is_blocked() && answered_public(response),
         })
     }
 
@@ -249,6 +257,7 @@ impl CachedWire {
             stale_until: self.stale_until,
             blocked: self.blocked,
             verdict: self.verdict,
+            answered_public: self.answered_public,
         }
     }
 }
@@ -691,7 +700,7 @@ impl DnsRuntime {
         }
     }
 
-    fn log(&self, admitted: &Admitted, verdict: Verdict) {
+    fn log(&self, admitted: &Admitted, verdict: Verdict, answered_public: bool) {
         let verdict = logged_verdict(admitted, verdict);
         let entry = LogEntry {
             ts: admitted.ts,
@@ -703,6 +712,7 @@ impl DnsRuntime {
                 .slot()
                 .and_then(|slot| admitted.policy.index.name(slot))
                 .cloned(),
+            answered_public,
         };
         match self.log_tx.try_send(entry) {
             Ok(()) => {}
@@ -727,31 +737,6 @@ fn logged_verdict(admitted: &Admitted, stored: Verdict) -> Verdict {
     } else {
         Reason::Unfiltered
     })
-}
-
-/// A list-tier block for any CNAME target in `answers`, attributed to [`Reason::Cname`].
-///
-/// Read from the answer the upstream already returned, so the check costs no round trip. Only
-/// the list tier applies: a user's rule names the query, not the aliases behind it.
-fn cname_block(policy: &Policy, mask: u64, answers: &[Record]) -> Option<Verdict> {
-    answers
-        .iter()
-        .filter_map(cname_target)
-        .take(MAX_CNAME_TARGETS)
-        .find_map(|target| {
-            let target = normalize_domain(&target.to_ascii());
-            match evaluate_lists(policy, mask, &target) {
-                Verdict::Block(_, slot) => Some(Verdict::Block(Reason::Cname, slot)),
-                Verdict::Allow(..) => None,
-            }
-        })
-}
-
-fn cname_target(record: &Record) -> Option<&Name> {
-    match &record.data {
-        RData::CNAME(target) => Some(&target.0),
-        _ => None,
-    }
 }
 
 /// Spell `name` into `buffer` in the form the cache key and every list entry use: lowercase

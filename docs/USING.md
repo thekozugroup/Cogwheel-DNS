@@ -178,10 +178,14 @@ While it is on:
   never sent. Local names (`.lan`, `.home`, `fritz.box`, `speedport.ip` and the
   like), names under address, tailnet and dynamic-DNS services (`nip.io`,
   `ts.net`, `duckdns.org` and the like), the appliance's own names, and names
-  that look like they carry an identifier are never sent either. Any other
-  domain of your own is sent like a website's, whether or not it resolves: if
-  your router hands out a local domain of its own, or you use another
-  dynamic-DNS provider, give that domain a household rule.
+  that look like they carry an identifier are never sent either. Nor is a name
+  that didn't resolve (a typo, a guess with your search domain on the end) or
+  that only ever resolved to addresses inside your network (`192.168.x.x`,
+  `10.x.x.x`, `fd…` and the like), so your router's own local domain stays
+  home whatever it is called. What is sent like a website's is a name of your
+  own that resolves to a public address: a domain you point at your home
+  connection, a dynamic-DNS name from another provider, a device's public IPv6
+  address. Give that domain a household rule.
 - **"No lists" on a device means your rules and the AI list.** The AI list is
   household-wide and reaches every filtered device, including one set to No
   lists; the device editor says so. A device that should get nothing automated

@@ -149,6 +149,8 @@ async fn a_dead_reviewer_reads_stopped_and_stays_stopped() {
     assert!(ai.applying(), "stored verdicts keep applying");
 }
 
+/// A lookup of `cdn.example.com` that the upstream answered with public addresses, so only its
+/// type and verdict decide whether it is offered.
 fn entry(qtype: u16, verdict: Verdict) -> LogEntry {
     LogEntry {
         ts: 1_791_480_000,
@@ -157,6 +159,7 @@ fn entry(qtype: u16, verdict: Verdict) -> LogEntry {
         qtype,
         verdict,
         list: None,
+        answered_public: true,
     }
 }
 
@@ -205,6 +208,51 @@ async fn the_tap_offers_only_reviewable_reasons_and_types() {
         offer(&tap, &entry(1, Verdict::allow(Reason::NoMatch)), &ai);
     }
     assert_eq!(ai.counters.tap_dropped.load(Ordering::Relaxed), 2);
+}
+
+/// F01: an allowed lookup is offered only when its answer was public. One that failed, came back
+/// empty or resolved inside the house is never offered, whatever its suffix, so it can be neither
+/// a candidate nor a website nor context; a name a list or the AI list blocked is offered either
+/// way, because a block carries no answer and its listing already made it a public name.
+#[tokio::test]
+async fn the_tap_offers_an_allowed_lookup_only_when_its_answer_was_public() {
+    let ai = reviewing().await;
+    let (tap, mut seen) = mpsc::channel(64);
+    let offered = [
+        (1, Verdict::allow(Reason::NoMatch), true, true),
+        (1, Verdict::allow(Reason::NoMatch), false, false),
+        (28, Verdict::allow(Reason::NoMatch), false, false),
+        (65, Verdict::allow(Reason::NoMatch), false, false),
+        (1, Verdict::Allow(Reason::ListAllow, 2), false, false),
+        (28, Verdict::Allow(Reason::ListAllow, 2), true, true),
+        (1, Verdict::allow(Reason::Ai), false, false),
+        (1, Verdict::allow(Reason::Ai), true, true),
+        // Blocked: offered whatever the flag says, which for a block is always false.
+        (1, Verdict::Block(Reason::List, 1), false, true),
+        (65, Verdict::Block(Reason::List, 1), false, true),
+        (28, Verdict::Block(Reason::Ai, 0), false, true),
+        // A public answer does not reopen what the reason filter shuts.
+        (1, Verdict::allow(Reason::HouseholdRule), true, false),
+        (1, Verdict::Block(Reason::Cname, 1), false, false),
+    ];
+    for (qtype, verdict, answered_public, _) in offered {
+        let entry = LogEntry {
+            answered_public,
+            ..entry(qtype, verdict)
+        };
+        offer(&tap, &entry, &ai);
+    }
+    let expected: Vec<(Reason, bool)> = offered
+        .iter()
+        .filter(|(_, _, _, taken)| *taken)
+        .map(|(_, verdict, _, _)| (verdict.reason(), verdict.is_blocked()))
+        .collect();
+    let mut got = Vec::new();
+    while let Ok(item) = seen.try_recv() {
+        got.push((item.reason, item.blocked));
+    }
+    assert_eq!(got, expected);
+    assert_eq!(ai.counters.tap_dropped.load(Ordering::Relaxed), 0);
 }
 
 fn known(judged_at: i64) -> Known {

@@ -111,6 +111,16 @@ pub struct Seen {
 ///
 /// Only A, AAAA and HTTPS lookups, and only names the lists or the AI list decided: never a rule's
 /// name, a protected one, a paused or unfiltered device's, a CNAME-decided one, or PTR/TXT/SRV/MX.
+///
+/// And only a name that is public by its own lookup (F01): one a list or the AI list blocked —
+/// being listed already made it a public name, and the reviewer takes a block on its verdict — or
+/// one the upstream answered with addresses that are all public ([`LogEntry::answered_public`]).
+/// An allowed lookup that failed (NXDOMAIN, SERVFAIL), came back empty, came back with no A or
+/// AAAA record (every HTTPS lookup), or resolved to any non-public address (private, shared,
+/// loopback, link-local, unique-local: the ranges `answered_public` names) is never offered, so
+/// it can be neither a candidate, nor a website, nor a name sent with one. That is what keeps out a router's own local domain and a split-horizon name, which no
+/// suffix list in `site.rs` can name. A household name that resolves to a public address is still
+/// offered; a household rule is what keeps that one out.
 pub fn offer(tap: &mpsc::Sender<Seen>, entry: &LogEntry, ai: &AiState) {
     if !matches!(entry.qtype, 1 | 28 | 65) {
         return;
@@ -122,11 +132,15 @@ pub fn offer(tap: &mpsc::Sender<Seen>, entry: &LogEntry, ai: &AiState) {
     ) {
         return;
     }
+    let blocked = entry.verdict.is_blocked();
+    if !blocked && !entry.answered_public {
+        return;
+    }
     let seen = Seen {
         ts: entry.ts,
         client: entry.client,
         domain: Arc::clone(&entry.domain),
-        blocked: entry.verdict.is_blocked(),
+        blocked,
         reason,
     };
     if tap.try_send(seen).is_err() {

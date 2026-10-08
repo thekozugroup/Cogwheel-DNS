@@ -6,6 +6,7 @@
 //! uses, so each is registered for `halt()` to abort exactly as in production. Only the waiting is
 //! the test's; everything that decides is the reviewer's own.
 
+mod egress;
 mod isolation;
 
 use super::openrouter_stub::{

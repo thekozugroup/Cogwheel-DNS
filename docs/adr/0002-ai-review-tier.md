@@ -61,7 +61,8 @@ Cogwheel gains an opt-in **AI review** and a separate **AI list**:
   a new `ai_verdicts` table and compiled into an `AiList`. `evaluate` stays
   pure and does not allocate. On a cache miss the AI tier costs one branch
   when the list is empty and one hash probe when it is not. The cache-hit path
-  does not change.
+  does no new work: it copies into its log entry one flag, whether the answer
+  was public, that the miss computed when it cached the answer.
 - **The precedence** (`GET /api/v1/check` now names one of thirteen steps):
   device rules > household rules > protected suffixes > **AI list** > list
   `@@` > list block. The AI list is household-wide and applies in every
@@ -69,7 +70,8 @@ Cogwheel gains an opt-in **AI review** and a separate **AI list**:
 - **No new crate.** The reviewer is the server module `ai/`, so ADR 0001's
   dependency graph is unchanged and `cogwheel-dns-core` gains no dependency.
   The feature's own files are `crates/cogwheel-policy/src/ai.rs`,
-  `crates/cogwheel-dns-core/src/invalidate.rs`,
+  `crates/cogwheel-dns-core/src/invalidate.rs`, the answer classifier in
+  `crates/cogwheel-dns-core/src/answer.rs`,
   `crates/cogwheel-storage/src/ai_verdicts.rs`, `apps/cogwheel-server/src/ai/`
   and `apps/cogwheel-server/src/api/ai.rs`.
 
@@ -291,16 +293,32 @@ A name is sent only if it is shareable:
   protected;
 - no household rule covers it.
 
-A household rule is how a household keeps a name of its own, and everything
-under it, out of AI review. Allow is the usual choice. Some names are never
-even offered to the reviewer:
+Some names are never even offered to the reviewer:
 
 - names decided by a rule;
 - protected names;
 - lookups made during a pause;
 - devices with filtering off;
 - CNAME-decided names;
-- any lookup other than A, AAAA and HTTPS.
+- any lookup other than A, AAAA and HTTPS;
+- an allowed lookup whose answer was not public. It counts only when the
+  upstream answered NOERROR with at least one A or AAAA address and every
+  one of them is public. NXDOMAIN, SERVFAIL, an empty answer, an answer with
+  no A or AAAA record (so every HTTPS lookup), and an answer with any private,
+  shared (CGNAT), loopback, link-local, site-local, unique-local, multicast,
+  reserved or unspecified address, or an IPv6 form of one, are not. The
+  documentation ranges count as public. A blocked lookup is offered whatever its answer: a
+  list or the AI list already named it.
+
+A name reaches a request only through a lookup that was offered, as the
+candidate, the website or a name sent with them. So a name that never
+resolved, or never resolved to public addresses alone, is never sent,
+whatever it is called. That covers what no suffix list can: a router's own local domain, a
+split-horizon name, a search-domain guess, a typo. What it cannot cover is a
+household name that resolves to a public address: a domain pointed at the
+household's connection, another provider's dynamic-DNS name, a device's
+global IPv6 address. A household rule is how a household keeps such a name,
+and everything under it, out of AI review. Allow is the usual choice.
 
 **To whom.** Requests go to `openrouter.ai` over HTTPS, and through it to the
 company that runs the chosen model. The base URL is set only in the

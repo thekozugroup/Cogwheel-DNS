@@ -24,6 +24,7 @@ fn entry(qtype: u16, domain: &str, verdict: Verdict) -> LogEntry {
         qtype,
         verdict,
         list: None,
+        answered_public: true,
     }
 }
 

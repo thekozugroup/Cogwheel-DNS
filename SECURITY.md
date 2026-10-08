@@ -82,12 +82,20 @@ OpenRouter key and turns it on:
   `site::PRIVATE_SUFFIXES`), a name under a wildcard-address, tailnet or dynamic-DNS service
   (`nip.io`, `sslip.io`, `ts.net`, `duckdns.org`, `synology.me` and the rest of
   `site::HOME_SUFFIXES`), or a name with a dotted or dashed IPv4 address or an identifier-like
-  label in it. A name under any other domain is sent whether or not it resolved, so a household
-  domain Cogwheel cannot recognise — a router's own local domain, a split-horizon name, a
-  dynamic-DNS name of another provider — goes out unless a household rule covers it; give it one
-  (allow is the usual). Every request asks for providers that do not collect data, and by
-  default for zero data retention; Cogwheel cannot check that they comply. Turning review off, or
-  removing the key, closes the send gate before the request that did it answers.
+  label in it. Nor does a name leave on the strength of a lookup that failed or pointed inside
+  the house: an allowed lookup counts only when the upstream answered it NOERROR with at least one
+  A or AAAA address and every one of them public, and a name is never a candidate, a website or a
+  name sent with one unless one of its lookups counted or was blocked by a list or the AI list. So
+  a name that did not resolve (NXDOMAIN, SERVFAIL, an empty answer, an HTTPS answer alone), or
+  whose answers each held a private, shared (CGNAT), loopback, link-local, unique-local or other
+  non-public address, never leaves, whatever it is called — which keeps a router's own local
+  domain, a split-horizon name and a mistyped name at home where no suffix list could. What the
+  answers cannot catch is a household name that resolves publicly: a domain of your own pointed at
+  your connection, a dynamic-DNS name of another provider, a device's global IPv6 address. Such a
+  name goes out unless a household rule covers it; give it one (allow is the usual). Every request
+  asks for providers that do not collect data, and by default for zero data retention; Cogwheel
+  cannot check that they comply. Turning review off, or removing the key, closes the send gate
+  before the request that did it answers.
 - **The key.** It lives in `openrouter.key` beside the database, mode 0600 — never in SQLite, so
   never in a `.pre-v2` copy, a `VACUUM INTO` backup or the WAL. No route returns it or any part of
   it, nothing logs it, and the browser never caches it; OpenRouter's `label` for a key is a masked

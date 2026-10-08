@@ -172,7 +172,7 @@ impl DnsRuntime {
                 // Logged after the answer is out, per §5.2: resolving the list name and waking
                 // the writer task are bookkeeping, and nothing about them is worth adding to
                 // the time a stub waits.
-                self.log(&admitted, entry.verdict);
+                self.log(&admitted, entry.verdict, entry.answered_public);
             }
             Probe::Miss(stale) => {
                 let verdict = self.decide(&admitted);
@@ -214,15 +214,19 @@ impl DnsRuntime {
         stale: Option<Arc<CachedWire>>,
         peer: SocketAddr,
     ) {
-        let (bytes, verdict) = match self.resolve_miss(&admitted, verdict, stale).await {
+        let (bytes, verdict, answered_public) = match self
+            .resolve_miss(&admitted, verdict, stale)
+            .await
+        {
             Ok(wire) => (
                 wire_for(&wire, &admitted.request, admitted.edns_max),
                 wire.verdict,
+                wire.answered_public,
             ),
             Err(error) => {
                 tracing::warn!(%error, domain = %admitted.key.domain, "failed to resolve query");
                 match servfail(&admitted.request).to_vec() {
-                    Ok(bytes) => (bytes, Verdict::allow(Reason::NoMatch)),
+                    Ok(bytes) => (bytes, Verdict::allow(Reason::NoMatch), false),
                     Err(error) => {
                         tracing::warn!(%error, "failed to encode servfail");
                         return;
@@ -234,7 +238,7 @@ impl DnsRuntime {
         if let Err(error) = socket.send_to(&bytes, peer).await {
             tracing::warn!(%error, "failed to send udp dns response");
         }
-        self.log(&admitted, verdict);
+        self.log(&admitted, verdict, answered_public);
     }
 
     async fn accept_tcp(
@@ -280,7 +284,7 @@ impl DnsRuntime {
 
     /// TCP is the retry path for a truncated UDP answer, so it never truncates, and it runs the
     /// miss inline: a connection is already a per-client resource, so no permit is needed.
-    async fn answer_tcp(&self, payload: &[u8], client: IpAddr) -> Result<Vec<u8>> {
+    pub(crate) async fn answer_tcp(&self, payload: &[u8], client: IpAddr) -> Result<Vec<u8>> {
         let started = Instant::now();
         let admitted = match self.admit(payload, client, started) {
             Ok(admitted) => admitted,
@@ -302,7 +306,7 @@ impl DnsRuntime {
         } else {
             self.stats.record_miss(started.elapsed());
         }
-        self.log(&admitted, wire.verdict);
+        self.log(&admitted, wire.verdict, wire.answered_public);
         Ok(bytes)
     }
 }

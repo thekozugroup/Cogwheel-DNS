@@ -121,7 +121,7 @@ mod tests {
             };
             runtime.count_hit(&entry);
             let bytes = wire_for(&entry, &admitted.request, admitted.edns_max);
-            runtime.log(&admitted, entry.verdict);
+            runtime.log(&admitted, entry.verdict, entry.answered_public);
             bytes
         };
         // The first hit also pays for what the path allocates once and then keeps — the log

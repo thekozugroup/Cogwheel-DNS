@@ -55,7 +55,9 @@ fn free_port() -> SocketAddr {
 /// DNS listeners serving `state`'s runtime, ready. A port is only free a moment ago, and the
 /// tests in this binary bind loopback ports in parallel, so one taken in between is retried on
 /// another; one that never binds fails here, with the bind error, not later as a timeout.
-async fn serve_dns(state: &ServerState) -> (SocketAddr, watch::Sender<bool>, JoinHandle<()>) {
+pub(super) async fn serve_dns(
+    state: &ServerState,
+) -> (SocketAddr, watch::Sender<bool>, JoinHandle<()>) {
     let mut failures = Vec::new();
     for _ in 0..5 {
         let address = free_port();
@@ -83,7 +85,7 @@ async fn serve_dns(state: &ServerState) -> (SocketAddr, watch::Sender<bool>, Joi
 }
 
 /// Ask `name` once and return the reply.
-async fn ask(socket: &UdpSocket, address: SocketAddr, id: u16, name: &str) -> Vec<u8> {
+pub(super) async fn ask(socket: &UdpSocket, address: SocketAddr, id: u16, name: &str) -> Vec<u8> {
     socket
         .send_to(&query(id, name), address)
         .await
@@ -306,12 +308,19 @@ fn entry(domain: &str) -> LogEntry {
         qtype: 1,
         verdict: Verdict::allow(Reason::NoMatch),
         list: None,
+        answered_public: true,
     }
 }
 
 /// Run the query-log writer over `count` answered lookups and wait until it has written them all.
 async fn write_log(state: &ServerState, count: usize) {
-    let (log_tx, log_rx) = mpsc::channel(count + 1);
+    let entries = (0..count).map(|n| entry(&format!("n{n}.example.com")));
+    write_entries(state, entries.collect()).await;
+}
+
+/// Run the query-log writer over `entries` and wait until it has written them all.
+pub(super) async fn write_entries(state: &ServerState, entries: Vec<LogEntry>) {
+    let (log_tx, log_rx) = mpsc::channel(entries.len() + 1);
     let (stop, shutdown) = watch::channel(false);
     let writer = tokio::spawn(crate::querylog::writer(
         ServerState {
@@ -320,10 +329,8 @@ async fn write_log(state: &ServerState, count: usize) {
         },
         log_rx,
     ));
-    for n in 0..count {
-        log_tx
-            .try_send(entry(&format!("n{n}.example.com")))
-            .expect("room in the log channel");
+    for entry in entries {
+        log_tx.try_send(entry).expect("room in the log channel");
     }
     // Everything received (and so offered to the tap) before the stop, which flushes the rest.
     for _ in 0..10_000 {
