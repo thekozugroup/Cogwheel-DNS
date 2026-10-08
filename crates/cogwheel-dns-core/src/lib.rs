@@ -32,6 +32,7 @@ use tokio::sync::{Semaphore, mpsc};
 
 #[cfg(test)]
 mod alloc_guard;
+mod invalidate;
 mod response;
 mod runtime_support;
 mod serve;
@@ -168,7 +169,7 @@ pub struct DnsRuntime {
     /// Unix seconds; 0 when not paused.
     pause_until: AtomicU64,
     cache: WireCache,
-    /// Bumped by every swap that empties the cache, so a miss decided under the policy being
+    /// Bumped by every swap that drops cached answers, so a miss decided under the policy being
     /// replaced can tell that its answer came back too late to be cached.
     cache_epoch: AtomicU64,
     miss_permits: Arc<Semaphore>,
@@ -390,9 +391,9 @@ impl DnsRuntime {
 
     /// Install a policy that only re-maps clients to scopes (a device edit).
     ///
-    /// Cached answers stay valid because a scope's verdicts are a function of the lists and
-    /// household rules, which did not change; a device whose settings changed simply lands on a
-    /// fresh scope id and its old entries age out unread.
+    /// Cached answers stay valid: a scope's verdicts are a function of the lists, household rules
+    /// and the AI list, which did not change (an AI list change uses `swap_policy_invalidating`);
+    /// an edited device lands on a fresh scope id, and its old entries age out unread.
     pub fn swap_policy_keep_cache(&self, policy: Arc<Policy>) {
         *write_recover(&self.policy) = policy;
     }
@@ -566,7 +567,7 @@ impl DnsRuntime {
         }
     }
 
-    /// What the policy says about a name that was not in the cache — §6 steps 1 to 10.
+    /// What the policy says about a name that was not in the cache — §6 steps 1 to 11.
     ///
     /// A few hash probes and no I/O, which is what lets the receive loop run it: a block decided
     /// here is answered without ever reaching [`Self::resolve_miss`] and its upstream.
@@ -606,10 +607,10 @@ impl DnsRuntime {
             .await
         {
             Ok(lookup) => {
-                // Only a name nothing matched is re-checked through its aliases. An explicit
-                // allow — a rule, a protected suffix, a list exception — named the query, and
-                // a pause or bypass switched filtering off altogether.
-                if verdict.reason() == Reason::NoMatch
+                // Re-checked through its aliases: a name nothing matched, or one only the AI list
+                // allowed (a model judged the name, not its aliases). A rule, a protected suffix or
+                // a list exception named the query; a pause or bypass switched filtering off.
+                if verdict.rechecks_aliases()
                     && let Some(blocked) = cname_block(policy, scope.mask, lookup.answers())
                 {
                     bump(&self.stats.cname_blocks_total);

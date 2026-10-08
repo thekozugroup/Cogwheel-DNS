@@ -4,6 +4,7 @@
 //! runtime under test is driven through a real UDP socket so the receive loop, the miss hand-off
 //! and the header patching are all exercised exactly as in production.
 
+mod ai;
 use super::*;
 use crate::response::MAX_CACHE_TTL;
 use crate::serve::{patch_header, wire_for};
@@ -339,9 +340,9 @@ async fn a_cname_to_a_blocked_target_is_blocked_with_reason_cname() {
     assert_eq!(harness.runtime.snapshot().blocked_total, 2);
 }
 
-/// §6 step 11 sits below steps 4 to 10, and end to end is where that shows: the re-check runs
-/// only for a name nothing earlier had an opinion about, and what it runs against the target is
-/// steps 8 to 10 — so a protected target is spared there too.
+/// §6 step 12 sits below steps 4 to 11, and end to end is where that shows: the re-check runs
+/// only for a name nothing earlier had an opinion about (or only the AI list allowed), and what
+/// it runs against the target is steps 8, 10 and 11 — so a protected target is spared there too.
 #[tokio::test]
 async fn the_cname_recheck_runs_only_below_the_steps_above_it() {
     let zone = zone(&[

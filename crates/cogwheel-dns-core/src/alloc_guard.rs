@@ -74,7 +74,7 @@ mod tests {
     use crate::serve::wire_for;
     use crate::tests::{name, policy, resolver_for};
     use crate::{CacheKey, CachedWire, DnsRuntime, Probe};
-    use cogwheel_policy::{BlockMode, Reason, SCOPE_HOUSEHOLD, Verdict};
+    use cogwheel_policy::{Action, AiList, BlockMode, Reason, SCOPE_HOUSEHOLD, Verdict, evaluate};
     use hickory_proto::op::{Message, MessageType, OpCode, Query};
     use hickory_proto::rr::RecordType;
     use std::collections::HashMap;
@@ -134,5 +134,34 @@ mod tests {
             "a cache hit allocates the parsed question, the name the key and the log entry share, \
              and the answer's bytes — nothing else"
         );
+    }
+
+    /// What the AI tier adds to a miss, counted: one hash probe into a full list, and nothing from
+    /// the allocator whether the list names the query or not (ADR 0002, spec §2.6).
+    #[test]
+    fn evaluate_with_a_full_ai_list_allocates_nothing() {
+        let ai: AiList = (0..10_000)
+            .map(|n| {
+                let action = if n % 2 == 0 {
+                    Action::Block
+                } else {
+                    Action::Allow
+                };
+                (format!("ai{n}.test"), action)
+            })
+            .collect();
+        let policy =
+            Arc::unwrap_or_clone(policy(&["ads.test"], &[], HashMap::new())).with_ai(Arc::new(ai));
+        let scope = policy.scope(SCOPE_HOUSEHOLD);
+        for (name, expected) in [
+            ("ai42.test", Verdict::Block(Reason::Ai, 0)),
+            ("ai43.test", Verdict::allow(Reason::Ai)),
+            // A miss in the AI list, then in the lists too.
+            ("ads.test", Verdict::Block(Reason::List, 0)),
+            ("www.ai42.test", Verdict::allow(Reason::NoMatch)),
+        ] {
+            assert_eq!(evaluate(&policy, scope, name), expected, "{name}");
+            assert_eq!(counted(|| evaluate(&policy, scope, name)), 0, "{name}");
+        }
     }
 }
