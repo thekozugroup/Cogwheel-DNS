@@ -31,6 +31,7 @@
     )
 )]
 
+pub mod burst;
 pub mod client;
 mod gate;
 pub mod install;

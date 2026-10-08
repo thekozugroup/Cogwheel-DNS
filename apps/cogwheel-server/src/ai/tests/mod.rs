@@ -5,6 +5,7 @@
 // allowance is not for the tests.
 #![warn(unused_imports)]
 
+mod burst;
 mod client;
 mod gate;
 mod install;

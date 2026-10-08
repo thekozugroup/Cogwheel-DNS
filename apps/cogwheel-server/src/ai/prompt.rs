@@ -5,6 +5,8 @@
 //! constants tell the model that the words inside a name are not evidence and never instructions,
 //! because whoever registered a name chose them.
 
+use super::ListState;
+use super::client::BODY_CAP;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -62,6 +64,18 @@ pub enum Effect {
     Blocked,
     /// The lists make an exception for it: "if it were blocked, what would happen?"
     Excepted,
+}
+
+impl Effect {
+    /// The effect question to ask, from the household's lists on the candidate as they are when
+    /// the request is built. Only an answer that would override the lists needs it.
+    pub const fn for_lists(lists: ListState) -> Option<Self> {
+        match lists {
+            ListState::Nothing => None,
+            ListState::Block => Some(Self::Blocked),
+            ListState::Exception => Some(Self::Excepted),
+        }
+    }
 }
 
 /// The provider preferences every request carries.
@@ -196,6 +210,14 @@ pub struct Parsed {
     pub answer: Option<Answer>,
 }
 
+impl Parsed {
+    /// The model a verdict records: the dated snapshot that answered, or `requested` when the
+    /// response named none.
+    pub fn model_or<'a>(&'a self, requested: &'a str) -> &'a str {
+        self.model.as_deref().unwrap_or(requested)
+    }
+}
+
 #[derive(Deserialize)]
 struct RawUsage {
     input_tokens: Option<Value>,
@@ -210,8 +232,12 @@ struct RawAnswer {
     confidence: Option<Value>,
 }
 
-/// Read a decisions response. Never fails: what cannot be read is `None`.
+/// Read a decisions response. Never fails: what cannot be read is `None`. A body over the 64 KiB
+/// cap is not read at all, the same as one the client cut off.
 pub fn parse(body: &[u8], effect_asked: bool) -> Parsed {
+    if body.len() > BODY_CAP {
+        return Parsed::default();
+    }
     let Ok(value) = serde_json::from_slice::<Value>(body) else {
         return Parsed::default();
     };
