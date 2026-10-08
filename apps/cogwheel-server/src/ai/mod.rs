@@ -11,24 +11,15 @@
 //! This module is the state all of that shares: the gate and its generation, the state machine,
 //! the settings and the key, today's spend, and the `known` map of names already judged.
 
-// The reviewer task (`worker.rs`, with `burst.rs` and `review.rs`) and the AI routes
-// (`api/ai.rs`) land after this foundation, and they are what call most of it, through the
-// re-exports below. Expected rather than allowed, so this goes the moment nothing is unused.
+// The AI routes (`api/ai.rs`) land after this, and they are what call most of what is left, through
+// the re-exports below. Expected rather than allowed, so this goes the moment nothing is unused.
 #![cfg_attr(
     not(test),
-    expect(
-        dead_code,
-        unused_imports,
-        reason = "the AI reviewer task and the AI routes land next"
-    )
+    expect(dead_code, unused_imports, reason = "the AI routes land next")
 )]
 #![cfg_attr(
     test,
-    allow(
-        dead_code,
-        unused_imports,
-        reason = "the AI reviewer task and the AI routes land next"
-    )
+    allow(dead_code, unused_imports, reason = "the AI routes land next")
 )]
 
 pub mod burst;
@@ -40,6 +31,7 @@ mod known;
 mod models;
 mod patch;
 pub mod prompt;
+pub mod review;
 pub mod settings;
 pub mod site;
 mod spend;
@@ -48,6 +40,7 @@ mod test_run;
 #[cfg(test)]
 mod tests;
 pub mod verdict;
+pub mod worker;
 
 use gate::Machine;
 pub use gate::{AliveGuard, Halt};
@@ -555,12 +548,5 @@ impl AiState {
 /// only when AI review is available and the activity log is kept.
 pub fn spawn(state: &ServerState, tap_rx: mpsc::Receiver<Seen>) {
     tokio::spawn(install::task(state.clone()));
-    spawn_reviewer(state, tap_rx);
-}
-
-/// The reviewer hook: `worker::task(state.clone(), tap_rx)` is spawned here once the reviewer
-/// lands. Until then nothing calls [`AiState::reviewer_alive`], so the send gate never opens,
-/// `tap()` stays `None` and nothing is sent; verdicts already stored still compile and install.
-fn spawn_reviewer(_state: &ServerState, tap_rx: mpsc::Receiver<Seen>) {
-    drop(tap_rx);
+    tokio::spawn(worker::task(state.clone(), tap_rx));
 }

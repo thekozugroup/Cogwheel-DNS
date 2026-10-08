@@ -6,6 +6,7 @@
 #![warn(unused_imports)]
 
 mod burst;
+mod candidates;
 mod client;
 mod gate;
 mod install;
@@ -13,11 +14,13 @@ mod key;
 mod load;
 mod patch;
 mod prompt;
+mod review;
 mod site;
 mod spend;
 mod stub;
 mod test_run;
 mod verdict;
+mod worker;
 
 use crate::ai::key::SecretKey;
 use crate::ai::{AiState, Seen};
