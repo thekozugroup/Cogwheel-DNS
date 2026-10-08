@@ -1,4 +1,5 @@
-//! The one-way upgrade from the pre-v1 ("v0") schema to schema v1 (§2.3).
+//! The one-way upgrade from the pre-v1 ("v0") schema to schema v1 (§2.3), and the additive v1 -> v2
+//! step (ADR 0002).
 //!
 //! v0 was eleven incremental migration files and a dozen tables for features that no longer exist:
 //! compiled ruleset artifacts, audit and security events, notification deliveries, a config
@@ -32,8 +33,18 @@
 //! same story. Global-mode devices' `allowed_domains_json` was ignored at runtime, so importing it
 //! would silently unblock names that are blocked today. Each is dropped with a WARN naming the
 //! device, so the change is visible in the first boot's logs rather than discovered months later.
+//!
+//! # The v1 -> v2 step
+//!
+//! v2 adds one table, `ai_verdicts`, and touches nothing that v1 created, so the step is
+//! `schema_v2.sql` in one transaction — the same file a fresh install runs after `schema_v1.sql`,
+//! which keeps one definition of v2 just as there is one of v1. It is guarded by a `.pre-v2` copy
+//! for the same reasons as above, but only when the file was v1 when it was opened: a fresh file
+//! has nothing to keep, and a v0 file already has its `.pre-v1` copy of the only state worth going
+//! back to, so the v0 -> v2 jump takes one backup and not two. Rolling back to a v1 image means
+//! restoring `.pre-v2`, which costs the AI list and everything written since the upgrade.
 
-use crate::{SCHEMA_V1, StorageError};
+use crate::{SCHEMA_V1, SCHEMA_V2, StorageError};
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 use std::path::{Path, PathBuf};
 
@@ -95,7 +106,7 @@ pub(crate) fn upgrade_v0_to_v1(
     connection: &mut Connection,
     path: &Path,
 ) -> Result<(), StorageError> {
-    let backup = backup_path(path);
+    let backup = backup_path(path, 1);
     // `VACUUM INTO` refuses to write over an existing file, and a stale copy from an upgrade that
     // failed on a previous boot is worth less than a copy of what is on disk right now.
     if backup.exists() {
@@ -118,6 +129,55 @@ pub(crate) fn upgrade_v0_to_v1(
             message: error.to_string(),
         }),
     }
+}
+
+/// v1 -> v2 (ADR 0002): one additive table. `backup` is true only for a file that was v1 at open.
+///
+/// # Errors
+///
+/// With a backup, a failed step produces [`StorageError::Migration`] naming it; without one there
+/// is nothing to name and the failure is returned as itself. Either way the transaction rolled
+/// back and the file is still v1.
+pub(crate) fn upgrade_v1_to_v2(
+    connection: &mut Connection,
+    path: &Path,
+    backup: bool,
+) -> Result<(), StorageError> {
+    let copy = backup.then(|| backup_path(path, 2));
+    if let Some(copy) = &copy {
+        // As in the v0 upgrade: a stale copy from a failed boot is worth less than a fresh one,
+        // and `VACUUM INTO` will not overwrite it anyway.
+        if copy.exists() {
+            std::fs::remove_file(copy)?;
+        }
+        connection.execute("VACUUM INTO ?1", [copy.to_string_lossy()])?;
+        tracing::info!(
+            backup = %copy.display(),
+            "upgrading the database to schema v2; a copy of the previous file is at this path"
+        );
+    }
+
+    match apply_step(connection, SCHEMA_V2) {
+        Ok(()) => {
+            tracing::info!("database upgraded to schema v2");
+            Ok(())
+        }
+        Err(error) => match copy {
+            Some(backup) => Err(StorageError::Migration {
+                backup,
+                message: error.to_string(),
+            }),
+            None => Err(error.into()),
+        },
+    }
+}
+
+/// Execute one schema step file as one `IMMEDIATE` transaction; a failure drops it, which rolls
+/// back, `PRAGMA user_version` included.
+fn apply_step(connection: &mut Connection, sql: &str) -> rusqlite::Result<()> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute_batch(sql)?;
+    transaction.commit()
 }
 
 /// Steps 2–9 of §2.3. Every early return drops the [`Transaction`], which rolls back.
@@ -289,9 +349,10 @@ fn warn_about_dropped_device_settings(transaction: &Transaction<'_>) -> Result<(
     Ok(())
 }
 
-/// `<db path>.pre-v1`, built on the raw OS string so a non-UTF-8 path survives.
-fn backup_path(path: &Path) -> PathBuf {
+/// `<db path>.pre-v<version>`, named for the version the upgrade steps to, and built on the raw OS
+/// string so a non-UTF-8 path survives.
+fn backup_path(path: &Path, version: u32) -> PathBuf {
     let mut backup = path.as_os_str().to_owned();
-    backup.push(".pre-v1");
+    backup.push(format!(".pre-v{version}"));
     PathBuf::from(backup)
 }

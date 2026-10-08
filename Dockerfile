@@ -315,7 +315,7 @@ ARG DEBIAN_SUITE
 #     --format '{{ json .Image.Config.Labels }}'
 #
 # scripts/install.sh compares it across an upgrade and says what it means.
-ARG SCHEMA_VERSION=1
+ARG SCHEMA_VERSION=2
 
 LABEL org.opencontainers.image.title="Cogwheel DNS" \
       org.opencontainers.image.description="Network-wide DNS ad and tracker blocking, with per-device policy" \

@@ -3,6 +3,7 @@
 //! These are the parts the server compiles from the database. The hot path only reads them, and
 //! swaps the whole [`Policy`] rather than mutating any of it, so a query never sees half an edit.
 
+use crate::ai::AiList;
 use crate::index::ListIndex;
 use crate::{Action, BlockMode, SCOPE_HOUSEHOLD, SCOPE_UNFILTERED, boundaries};
 use std::collections::HashMap;
@@ -120,6 +121,8 @@ pub struct Policy {
     pub index: Arc<ListIndex>,
     /// Rules that apply to everyone.
     pub household: Arc<RuleSet>,
+    /// The AI list (ADR 0002). Empty unless AI review is applying.
+    pub ai: Arc<AiList>,
     /// Named devices by address. A client not listed here is in the household scope.
     pub by_ip: HashMap<IpAddr, Scope>,
     /// Bits of every enabled list slot; the household scope's mask.
@@ -148,6 +151,7 @@ impl Policy {
         Self {
             index,
             household,
+            ai: Arc::new(AiList::default()),
             by_ip,
             all_mask,
             block_mode,
@@ -155,6 +159,12 @@ impl Policy {
             household_scope: Scope::household(all_mask),
             unfiltered_scope: Scope::unfiltered(),
         }
+    }
+
+    /// The same policy with `ai` as its AI list.
+    pub fn with_ai(mut self, ai: Arc<AiList>) -> Self {
+        self.ai = ai;
+        self
     }
 
     /// A policy with no lists, rules or devices: what the runtime serves before the first

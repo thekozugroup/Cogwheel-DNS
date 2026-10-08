@@ -3,8 +3,8 @@
 //!
 //! They are together because they are the same shape — a handful of columns, a list, an upsert and
 //! a delete apiece — and splitting one file per table bought nothing but five copies of the same
-//! row-mapping boilerplate. The raw query log is the exception and lives in `query_log.rs`: it is
-//! the only table with a write path on a timer, a keyset reader and a retention policy.
+//! row-mapping boilerplate. The raw query log and the AI list are the exceptions and live in
+//! `query_log.rs` and `ai_verdicts.rs`: each has a background write path and a retention policy.
 //!
 //! `sources` rows are listed in `id` order everywhere because that order *is* the slot assignment:
 //! the enabled sources take bits 0..63 of a device's list mask in `id` order (§6), so a listing
@@ -17,12 +17,18 @@ use rusqlite::{Connection, OptionalExtension, params};
 const HOUR: i64 = 3600;
 const BUCKETS: i64 = 24;
 
-/// The one key `settings` holds.
+/// The pause deadline's key in `settings`.
 ///
 /// `pause_until` is stored rather than only held in the runtime's `AtomicU64` so that a pause
 /// survives a restart: someone who pauses for an hour and reboots the appliance should not find
 /// filtering back on. Everything else that could be a setting is an environment variable by
-/// design (§8), which is why this table has one key and no schema for a second.
+/// design (§8), with one exception: AI review (ADR 0002) is set up in the UI, and its consent,
+/// model and daily spend have to outlive a restart just as a pause does — a spend that a crash loop
+/// reset would hand the reviewer a fresh budget on every boot. Its keys are `ai_enabled`,
+/// `ai_model`, `ai_model_price`, `ai_daily_limit` and `ai_spend`. The server owns
+/// what they mean and reads and writes them through [`Storage::setting`] and
+/// [`Storage::set_setting`]; `ai_spend` alone is written with the verdicts it paid for, by
+/// [`Storage::record_ai_verdicts`]. Values are text and there is still no schema per key.
 const PAUSE_UNTIL: &str = "pause_until";
 
 record! {
@@ -488,25 +494,45 @@ impl Storage {
 
     // ---- settings ---------------------------------------------------------------------------
 
+    /// One stored setting, or `None` when the key has no row.
+    ///
+    /// `&'static str` keys because every key is a constant somewhere in the workspace; a key built
+    /// at run time would be a key nobody documented.
+    pub async fn setting(&self, key: &'static str) -> Result<Option<String>, StorageError> {
+        self.with_connection(move |connection| {
+            Ok(connection
+                .query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
+                    row.get(0)
+                })
+                .optional()?)
+        })
+        .await
+    }
+
+    /// Store a setting, or delete its row on `None`.
+    ///
+    /// Deleting rather than writing an empty value keeps "is there a row" meaning "is it set", which
+    /// is what the absent-means-default keys rely on.
+    pub async fn set_setting(
+        &self,
+        key: &'static str,
+        value: Option<String>,
+    ) -> Result<(), StorageError> {
+        self.with_connection(move |connection| write_setting(connection, key, value.as_deref()))
+            .await
+    }
+
     /// When protection is paused until, or `None` if it is not paused.
     ///
     /// A stored `0` and a value that will not parse both read as "not paused" — §2.1 defines absent
     /// and 0 as the same state, and a garbled row should fail open to filtering rather than leave
     /// the household unprotected while the UI insists everything is fine.
     pub async fn pause_until(&self) -> Result<Option<i64>, StorageError> {
-        self.with_connection(|connection| {
-            let stored: Option<String> = connection
-                .query_row(
-                    "SELECT value FROM settings WHERE key = ?1",
-                    [PAUSE_UNTIL],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            Ok(stored
-                .and_then(|value| value.trim().parse::<i64>().ok())
-                .filter(|until| *until > 0))
-        })
-        .await
+        Ok(self
+            .setting(PAUSE_UNTIL)
+            .await?
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .filter(|until| *until > 0))
     }
 
     /// Set or clear the pause deadline.
@@ -514,24 +540,10 @@ impl Storage {
     /// `None` deletes the row rather than writing a zero, so the table is empty whenever nothing is
     /// paused and "is there a settings row at all" stays a meaningful question.
     pub async fn set_pause_until(&self, until: Option<i64>) -> Result<(), StorageError> {
-        self.with_connection(move |connection| {
-            match until.filter(|until| *until > 0) {
-                Some(until) => {
-                    let now = now_seconds(connection)?;
-                    connection.execute(
-                        "INSERT INTO settings (key, value, updated_at) VALUES (?1, ?2, ?3)
-                         ON CONFLICT(key) DO UPDATE SET
-                             value = excluded.value, updated_at = excluded.updated_at",
-                        params![PAUSE_UNTIL, until.to_string(), now],
-                    )?;
-                }
-                None => {
-                    connection.execute("DELETE FROM settings WHERE key = ?1", [PAUSE_UNTIL])?;
-                }
-            }
-            Ok(())
-        })
-        .await
+        let value = until
+            .filter(|until| *until > 0)
+            .map(|until| until.to_string());
+        self.set_setting(PAUSE_UNTIL, value).await
     }
 
     // ---- 24-hour rollup reads ---------------------------------------------------------------
@@ -615,6 +627,30 @@ impl Storage {
         self.with_connection(move |connection| Ok(connection.execute(sql, [id])? > 0))
             .await
     }
+}
+
+/// Upsert one `settings` row, or delete it on `None`, on whatever connection or transaction the
+/// caller holds — `record_ai_verdicts` needs `ai_spend` inside its own transaction.
+pub(crate) fn write_setting(
+    connection: &Connection,
+    key: &str,
+    value: Option<&str>,
+) -> Result<(), StorageError> {
+    match value {
+        Some(value) => {
+            let now = now_seconds(connection)?;
+            connection.execute(
+                "INSERT INTO settings (key, value, updated_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(key) DO UPDATE SET
+                     value = excluded.value, updated_at = excluded.updated_at",
+                params![key, value, now],
+            )?;
+        }
+        None => {
+            connection.execute("DELETE FROM settings WHERE key = ?1", [key])?;
+        }
+    }
+    Ok(())
 }
 
 /// Run a query and read every row with `map`.

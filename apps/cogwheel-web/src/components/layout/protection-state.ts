@@ -32,7 +32,7 @@ export function useProtectionSummary() {
   // The empty default is the only overview that has never been loaded, from
   // the network or the cache: nothing it says is true yet.
   const known = overview !== emptyOverview;
-  const { lists, last_24h: day } = overview;
+  const { lists, last_24h: day, ai } = overview;
   const state = protectionState({
     pausedUntil,
     offline,
@@ -40,6 +40,8 @@ export function useProtectionSummary() {
     day: known
       ? { enabled: lists.enabled, total: lists.total, downloaded: lists.downloaded, queries: day.queries }
       : undefined,
+    // The same facts Overview's answer reads, so the two never disagree.
+    ai: { applying: ai.applying, applied_block: ai.applied_block },
   });
   const paused = state.paused && remaining > 0;
 

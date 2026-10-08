@@ -30,6 +30,8 @@ pub enum Reason {
     Paused = 7,
     /// The device has filtering switched off.
     Unfiltered = 8,
+    /// The AI list (ADR 0002) decided this exact name; the arm says allow or block.
+    Ai = 9,
 }
 
 impl Reason {
@@ -50,6 +52,7 @@ impl Reason {
             6 => Self::Cname,
             7 => Self::Paused,
             8 => Self::Unfiltered,
+            9 => Self::Ai,
             _ => return None,
         })
     }
@@ -94,6 +97,13 @@ impl Verdict {
         }
     }
 
+    /// Whether the upstream answer's CNAME targets are re-checked against the lists (§6 step 12):
+    /// for a name nothing matched, and for one only the AI list allowed. A rule, a protected suffix
+    /// or a list exception named the query on purpose; a model judged one name, not its aliases.
+    pub const fn rechecks_aliases(self) -> bool {
+        matches!(self, Self::Allow(Reason::NoMatch | Reason::Ai, _))
+    }
+
     const fn from_rule(action: Action, reason: Reason) -> Self {
         match action {
             Action::Allow => Self::allow(reason),
@@ -121,18 +131,32 @@ pub fn evaluate(policy: &Policy, scope: &Scope, name: &str) -> Verdict {
     if let Some(action) = policy.household.get_at_boundaries(name) {
         return Verdict::from_rule(action, Reason::HouseholdRule);
     }
-    evaluate_lists(policy, scope.mask, name)
+    if is_protected(name) {
+        return Verdict::allow(Reason::Protected);
+    }
+    // Step 9, the AI list (ADR 0002): below every rule and the protected suffixes, above every
+    // list, exact names only. Not in `evaluate_lists`: a CNAME target is re-checked against the
+    // lists alone, so no cached answer can depend on another name's AI verdict.
+    if let Some(action) = policy.ai.get(name) {
+        return Verdict::from_rule(action, Reason::Ai);
+    }
+    list_tiers(policy, scope.mask, name)
 }
 
-/// The protected and list tiers alone, for the lists in `mask`.
-///
-/// This is what a CNAME target in an upstream answer is re-checked against (user rules named
-/// the query, not its aliases), and what `GET /check` reports for the list tier.
+/// The protected and list tiers alone, for the lists in `mask`: what a CNAME target in an
+/// upstream answer is re-checked against. User rules and the AI list named the query, not its
+/// aliases. `GET /check` uses [`evaluate`].
 pub fn evaluate_lists(policy: &Policy, mask: u64, name: &str) -> Verdict {
     let name = name.trim_end_matches('.');
     if is_protected(name) {
         return Verdict::allow(Reason::Protected);
     }
+    list_tiers(policy, mask, name)
+}
+
+/// List `@@` then list block under `mask`: the tiers [`evaluate`] and [`evaluate_lists`] share
+/// below the protected suffixes. `name` is already trimmed.
+fn list_tiers(policy: &Policy, mask: u64, name: &str) -> Verdict {
     let masks = policy.index.lookup(name);
     let allowed = masks.allow & mask;
     if allowed != 0 {

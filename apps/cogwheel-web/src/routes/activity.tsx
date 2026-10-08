@@ -2,7 +2,7 @@ import React from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { ActivityIcon, SearchXIcon, Trash2Icon } from "lucide-react";
 import { api, errorMessage, type Device, type StreamQueryEvent } from "@/lib/api";
-import { checkSentence } from "@/lib/derive";
+import { whySentence } from "@/lib/derive";
 import { formatClock, formatCount, pluralize } from "@/lib/format";
 import { notify } from "@/lib/toast";
 import {
@@ -551,7 +551,7 @@ function QueryFeed({
     else {
       api
         .check(row.domain, row.client)
-        .then((result) => setWhy(checkSentence(result)))
+        .then((result) => setWhy(whySentence(row, result)))
         .catch((cause) => notify.error("Could not check that domain", errorMessage(cause)));
     }
   }, []);

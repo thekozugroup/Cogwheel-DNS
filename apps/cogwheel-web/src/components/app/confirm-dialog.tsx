@@ -40,8 +40,12 @@ export function ConfirmDialog({
    * everywhere else in the product.
    */
   tone?: "bad" | "warn" | "neutral";
-  /** Extra line spelling out what changes on the appliance. */
-  consequence?: string;
+  /**
+   * Extra line spelling out what changes on the appliance. Several lines when
+   * one action changes several things — Clear log also empties part of the AI
+   * list — each its own sentence in the same tinted aside.
+   */
+  consequence?: string | readonly string[];
   onConfirm: () => void | Promise<void>;
 }) {
   const [working, setWorking] = React.useState(false);
@@ -68,7 +72,7 @@ export function ConfirmDialog({
           <AlertDialogTitle>{title}</AlertDialogTitle>
           <AlertDialogDescription>{description}</AlertDialogDescription>
         </AlertDialogHeader>
-        {consequence ? (
+        {consequence && consequence.length > 0 ? (
           <AlertDialogBody>
             {/* The §3.3 tint, not free-floating red prose. Sixty words of
                 untinted red-700 was the largest chromatic mass in the product
@@ -76,9 +80,9 @@ export function ConfirmDialog({
                 inside a tinted aside the same sentence reads as marked out
                 rather than as an alarm. The description above stays plain, and
                 this line carries only what the description does not. */}
-            <p
+            <div
               className={cn(
-                "rounded-xl border px-3 py-3 text-sm",
+                "space-y-2 rounded-xl border px-3 py-3 text-sm",
                 tone === "bad"
                   ? "border-destructive/24 bg-destructive/8 text-destructive-foreground"
                   : tone === "warn"
@@ -86,8 +90,10 @@ export function ConfirmDialog({
                     : "border-border bg-muted text-foreground",
               )}
             >
-              {consequence}
-            </p>
+              {(typeof consequence === "string" ? [consequence] : consequence).map((line) => (
+                <p key={line}>{line}</p>
+              ))}
+            </div>
           </AlertDialogBody>
         ) : null}
         <AlertDialogFooter>

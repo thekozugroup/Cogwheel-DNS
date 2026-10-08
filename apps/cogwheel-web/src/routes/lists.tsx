@@ -17,6 +17,7 @@ import { DataTable, NarrowRow, type Column } from "@/components/app/data-table";
 import { RowMenu } from "@/components/app/row-menu";
 import { ConfirmDialog } from "@/components/app/confirm-dialog";
 import { AddList } from "./lists/add-list";
+import { AiListCard } from "./lists/ai-list";
 import { CheckDomain } from "./lists/check-domain";
 import { RulesCard } from "./lists/rules";
 
@@ -358,6 +359,10 @@ export function ListsScreen() {
         {adding ? (
           <AddList lists={lists} onDone={() => openAdd(false)} presets={catalogue.presets} />
         ) : null}
+
+        {/* In precedence order: the AI list ranks above every subscribed list
+            and below your rules, so it sits between them. */}
+        <AiListCard />
 
         <RulesCard />
 

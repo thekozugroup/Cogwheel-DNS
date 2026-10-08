@@ -12,19 +12,22 @@
 //! 2. the device's own rules ([`Scope::rules`]);
 //! 3. the household rules ([`Policy::household`]);
 //! 4. the [`PROTECTED_SUFFIXES`];
-//! 5. list exceptions (`@@`) under the scope's mask;
-//! 6. list blocks under the scope's mask, attributed to the lowest matching slot;
-//! 7. otherwise allow.
+//! 5. the AI list ([`Policy::ai`]), exact names only (ADR 0002);
+//! 6. list exceptions (`@@`) under the scope's mask;
+//! 7. list blocks under the scope's mask, attributed to the lowest matching slot;
+//! 8. otherwise allow.
 //!
 //! Explicit rules outrank the protected suffixes because a rule is a choice someone made on
 //! purpose; a list entry covering `pool.ntp.org` is almost always an accident upstream.
-//! [`evaluate_lists`] runs tiers 4–6 alone — that is the CNAME re-check and the "why?" probe.
+//! [`evaluate_lists`] runs the protected and list tiers alone — that is the CNAME re-check.
+//! `GET /check` runs [`evaluate`].
 //!
 //! # Matching
 //!
 //! Every tier matches a name and its subdomains on a label boundary: `example.com` covers
-//! `www.example.com` but not `notexample.com`. The only exception is a list entry inserted as
-//! [`Pattern::Exact`] (hosts-file lines), which matches that one name.
+//! `www.example.com` but not `notexample.com`. The exceptions are a list entry inserted as
+//! [`Pattern::Exact`] (hosts-file lines), which matches that one name, and the [`AiList`], which
+//! matches exact names only.
 //!
 //! # Normalisation
 //!
@@ -38,12 +41,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
+mod ai;
 mod evaluate;
 mod index;
 mod ruleset;
 #[cfg(test)]
 mod tests;
 
+pub use ai::AiList;
 pub use evaluate::{Reason, Verdict, evaluate, evaluate_lists};
 pub use index::{ListIndex, ListIndexBuilder, Masks, Pattern};
 pub use ruleset::{Policy, RuleSet, Scope};
@@ -59,7 +64,7 @@ pub use ruleset::{Policy, RuleSet, Scope};
 /// the device is broken -- which is why they are protected here rather than
 /// left to whichever list happens to be subscribed.
 ///
-/// These outrank subscribed lists, and only subscribed lists: a rule the
+/// These outrank subscribed lists and the AI list, and only those: a rule the
 /// operator wrote by hand still wins, because that is a choice someone made
 /// deliberately, whereas a list entry covering `pool.ntp.org` is almost always
 /// an accident upstream. Deliberately absent are banking, government,

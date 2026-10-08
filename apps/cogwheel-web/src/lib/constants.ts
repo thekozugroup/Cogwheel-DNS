@@ -32,6 +32,7 @@ export const emptyOverview: Overview = {
   top_blocked: [],
   top_queried: [],
   connect: { targets: [], port: 53 },
+  ai: { state: "off", applying: false, applied_block: 0, applied_allow: 0 },
 };
 
 export const emptySettings: Settings = {
@@ -50,6 +51,16 @@ export const emptySettings: Settings = {
   lists_dir: "",
   protected_suffixes: [],
   schema_version: 0,
+  ai: {
+    available: false,
+    unavailable_reason: null,
+    enabled: false,
+    key_source: "none",
+    model: null,
+    daily_limit_usd: 0.1,
+    zero_retention: true,
+    base_url: "",
+  },
 };
 
 export const emptyLists: ListCatalogue = { lists: [], presets: [] };
@@ -65,8 +76,8 @@ export const emptyRules: Rule[] = [];
  * first poll answers.
  */
 export const CACHE_KEYS = {
-  overview: "cogwheel_overview_cache_v3",
-  settings: "cogwheel_settings_cache_v3",
+  overview: "cogwheel_overview_cache_v4",
+  settings: "cogwheel_settings_cache_v4",
   lists: "cogwheel_lists_cache_v3",
   devices: "cogwheel_devices_cache_v3",
   rules: "cogwheel_rules_cache_v3",

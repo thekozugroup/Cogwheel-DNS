@@ -1,4 +1,4 @@
-import type { CheckResult, Device, ListKind, Reason } from "@/lib/api";
+import type { AiExplanation, AiState, CheckResult, Device, ListKind, Reason } from "@/lib/api";
 import type { Tone } from "@/components/app/status-indicator";
 
 export type ProtectionState = { tone: Tone; label: string; detail: string; paused: boolean };
@@ -20,6 +20,8 @@ export type ProtectionFacts = {
    */
   day?: { enabled: number; total: number; downloaded: boolean; queries: number };
   upstreamFailing?: boolean;
+  /** What the AI list is doing, from the overview. Only its blocks change a sentence here. */
+  ai?: { applying: boolean; applied_block: number };
 };
 
 /**
@@ -31,7 +33,13 @@ export type ProtectionFacts = {
  * "Protected" beside an answer saying no device was using Cogwheel yet, and
  * beside "No blocklists yet".
  */
-export function protectionState({ pausedUntil, offline, day, upstreamFailing: failing }: ProtectionFacts): ProtectionState {
+export function protectionState({
+  pausedUntil,
+  offline,
+  day,
+  upstreamFailing: failing,
+  ai,
+}: ProtectionFacts): ProtectionState {
   if (offline) {
     return {
       tone: "bad",
@@ -57,11 +65,14 @@ export function protectionState({ pausedUntil, offline, day, upstreamFailing: fa
       paused: false,
     };
   }
+  // An AI list holding only allows blocks nothing, so only its blocks earn it
+  // a place in these two sentences.
+  const blockers = ai && ai.applied_block > 0 ? "your own rules and the AI list are" : "your own rules are";
   if (day.enabled === 0) {
     return {
       tone: "warn",
       label: day.total === 0 ? "No blocklists" : "Blocklists off",
-      detail: "Only your own rules are blocking anything.",
+      detail: `Only ${blockers} blocking anything.`,
       paused: false,
     };
   }
@@ -69,7 +80,7 @@ export function protectionState({ pausedUntil, offline, day, upstreamFailing: fa
     return {
       tone: "warn",
       label: "Not downloaded",
-      detail: "Until a blocklist downloads, only your own rules are blocking anything.",
+      detail: `Until a blocklist downloads, only ${blockers} blocking anything.`,
       paused: false,
     };
   }
@@ -77,6 +88,32 @@ export function protectionState({ pausedUntil, offline, day, upstreamFailing: fa
     return { tone: "idle", label: "Ready", detail: "No device is using Cogwheel yet.", paused: false };
   }
   return { tone: "good", label: "Protected", detail: "Filtering is active.", paused: false };
+}
+
+/**
+ * AI review's state in a word, for a dot beside it. The four ways it can stop
+ * share one word; the Lists page, where it is fixed, says which.
+ */
+export function aiStateWord(state: AiState): { tone: Tone; word: string } {
+  switch (state) {
+    case "reviewing":
+      return { tone: "good", word: "On" };
+    case "paused_budget":
+      return { tone: "warn", word: "Daily limit reached" };
+    case "retrying":
+      return { tone: "warn", word: "Retrying" };
+    case "no_key":
+      return { tone: "warn", word: "Waiting for a key" };
+    case "key_refused":
+    case "out_of_credit":
+    case "model_refused":
+    case "stopped":
+      return { tone: "bad", word: "Stopped" };
+    case "unavailable":
+      return { tone: "idle", word: "Unavailable" };
+    default:
+      return { tone: "idle", word: "Off" };
+  }
 }
 
 /** One reading of the resolver's counters, taken from a poll of the overview. */
@@ -145,6 +182,8 @@ export function reasonLabel(reason: Reason, list: string | null): string {
       return "paused";
     case "unfiltered":
       return "unfiltered";
+    case "ai":
+      return "AI list";
     default:
       return "";
   }
@@ -165,8 +204,93 @@ export function checkSentence(result: CheckResult): string {
       : result.scope === "household"
         ? " for everyone"
         : "";
+  const ai = result.ai ?? null;
   const reason = reasonLabel(result.reason, result.list);
-  return `${result.domain} — ${verdict}${scope}${reason ? ` — ${reason}` : ""}.`;
+  const head = `${result.domain} — ${verdict}${scope}`;
+  if (result.reason === "ai") {
+    const decided = ai ? aiDecided(ai) : null;
+    return `${head} — ${reason}${decided ? `: ${decided}` : ""}.`;
+  }
+  const aside = ai ? aiAside(ai, result.reason) : null;
+  return `${head}${reason ? ` — ${reason}` : ""}.${aside ? ` ${aside}` : ""}`;
+}
+
+/** "the model was 93% sure": always the model's certainty, never Cogwheel's. */
+function modelSure(confidence: number | null): string {
+  return confidence === null ? "" : ` (the model was ${Math.round(confidence * 100)}% sure)`;
+}
+
+/**
+ * Why the AI list decided a name, after "AI list: ". Null in the race case —
+ * the verdict was forgotten a moment ago and only its action is left — where
+ * nothing may be said that the server did not send.
+ */
+function aiDecided(ai: AiExplanation): string | null {
+  if (ai.choice === null && ai.judged_at === null) return null;
+  const sure = modelSure(ai.confidence);
+  if (ai.verdict === "allow") {
+    const needed = ai.site ? `needed by ${ai.site}` : "judged needed";
+    return `${needed}${sure}; your lists block it`;
+  }
+  if (ai.verdict === "block") return `${ai.site ? `not needed by ${ai.site}` : "judged not needed"}${sure}`;
+  return null;
+}
+
+/**
+ * What the AI list thinks of a name something else decided: outranked by a
+ * rule, unsure, held back by today's limit, or handed back to the lists
+ * because two websites disagreed. Null when it has nothing to add.
+ */
+function aiAside(ai: AiExplanation, reason: Reason): string | null {
+  if (reason === "paused" || reason === "unfiltered" || ai.choice === null) return null;
+  if (ai.verdict !== "ignore") {
+    if (reason === "household_rule" || reason === "device_rule") return `Your rule outranks the AI list's ${ai.verdict}.`;
+    if (reason === "protected") return ai.verdict === "block" ? "Protected names outrank the AI list's block." : null;
+    // An AI allow keeps the redirect check: the model judged this name, not where it points.
+    if (reason === "cname" && ai.verdict === "allow" && ai.applied) {
+      return "The AI list allows this name itself, but not the names it redirects to.";
+    }
+    return ai.applied ? null : `The AI list's ${ai.verdict} is not applied right now; the Lists page says why.`;
+  }
+  const sure = modelSure(ai.confidence);
+  if (ai.why === "contested") {
+    return ai.site && ai.conflict_site
+      ? `The AI list has no opinion: it was core on ${ai.site} and not on ${ai.conflict_site}.`
+      : "The AI list has no opinion: two websites disagreed.";
+  }
+  if (ai.why === "unsure") {
+    // Blocking a name no list touches has a lower bar than overriding a list.
+    const bar = ai.choice === "block" && ai.lists === "nothing" ? "a block" : "overriding a list";
+    return `The AI list leaned ${ai.choice}${sure}, short of what ${bar} needs.`;
+  }
+  if (ai.why === "limit") {
+    return `The AI list leaned ${ai.choice}${sure}, but today's limit on overriding your lists had been reached.`;
+  }
+  return null;
+}
+
+/**
+ * "Why?" for a row of the log, which answers with what decided the name
+ * *then*, against `/check`, which says what decides it *now*. The two
+ * disagree in two ways a household meets, and both are about a redirect: a
+ * row blocked because the name it redirected to was on a list, which checked
+ * on its own is not blocked at all; and an AI allow, which lifts a list's
+ * block on the name the model judged but not on the names it redirects to.
+ * Everything else is `checkSentence`.
+ */
+export function whySentence(
+  row: { domain: string; reason: Reason; list: string | null },
+  result: CheckResult,
+): string {
+  if (row.reason !== "cname") return checkSentence(result);
+  const then = `${row.domain} — Blocked when it was looked up — ${reasonLabel("cname", row.list)}.`;
+  if (result.reason === "no_match") {
+    return `${then} Checked on its own, nothing blocks it: the block was on the name it redirects to.`;
+  }
+  if (result.reason === "ai" && result.verdict === "allow") {
+    return `${then} The AI list allows ${row.domain} itself, but not the names it redirects to, so the lookup is still blocked.`;
+  }
+  return checkSentence(result);
 }
 
 /**

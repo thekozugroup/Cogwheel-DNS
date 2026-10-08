@@ -1,11 +1,12 @@
 //! Fixtures and helpers shared by the storage test binaries.
 //!
 //! Each test file compiles this module separately, so anything one of them does not use is dead
-//! code there; the allows keep that from being a warning in three binaries at once.
+//! code there; the allows keep that from being a warning in every binary at once.
 #![allow(dead_code, unused_imports)]
 
 pub use cogwheel_storage::{
-    DeviceUpsert, FetchStatus, NewSource, QueryFilter, QueryLogEntry, SourcePatch, Storage,
+    AiCounts, AiPruned, AiVerdict, AiVerdictFilter, DeviceUpsert, FetchStatus, NewSource,
+    QueryFilter, QueryLogEntry, SCHEMA_VERSION, SourcePatch, Storage, StorageError,
 };
 pub use rusqlite::Connection;
 use std::path::{Path, PathBuf};
@@ -33,6 +34,15 @@ pub const LEGACY_MIGRATIONS: [&str; 11] = [
     include_str!("../fixtures/legacy/0010_config_version.sql"),
     include_str!("../fixtures/legacy/0011_retention_indexes.sql"),
 ];
+
+/// Schema v1 as it shipped, frozen here so a real v1 file can still be built however `src/` moves
+/// on: `src/schema_v1.sql` is frozen too, but this copy is what proves an upgrade works on the
+/// files that exist in the field rather than on whatever that file says today.
+pub const SCHEMA_V1_FIXTURE: &str = include_str!("../fixtures/schema_v1.sql");
+
+/// The subscription, device and household rule the v1 fixture carries; each must survive v1 -> v2.
+pub const V1_SOURCE_ID: &str = "0b0b0b0b-1111-4222-8333-444444444444";
+pub const V1_DEVICE_ID: &str = "0d0d0d0d-5555-4666-9777-888888888888";
 
 /// The baseline `data:` source every v0 install carried.
 pub const BASELINE_ID: &str = "00000000-0000-0000-0000-000000000001";
@@ -87,10 +97,10 @@ pub async fn fresh(label: &str) -> (TempDir, Storage) {
     (dir, storage)
 }
 
-/// `<path>.pre-v1`.
-pub fn backup_of(path: &Path) -> PathBuf {
+/// `<path>.pre-v<version>`: the copy taken before upgrading to `version`.
+pub fn backup_of(path: &Path, version: u32) -> PathBuf {
     let mut backup = path.as_os_str().to_owned();
-    backup.push(".pre-v1");
+    backup.push(format!(".pre-v{version}"));
     PathBuf::from(backup)
 }
 
@@ -195,6 +205,38 @@ pub fn build_v0_fixture(path: &Path) {
         .expect("insert broken device");
     drop(device);
     drop(connection);
+}
+
+/// Build a v1 database at `path` from the frozen v1 schema, in WAL mode as a running v1 build left
+/// it, with a row in every table a household would miss: a list, a device subscribed to it, a
+/// household rule, a pause, a logged query and its rollup.
+pub fn build_v1_fixture(path: &Path) {
+    let connection = Connection::open(path).expect("create v1 fixture");
+    connection
+        .pragma_update(None, "journal_mode", "WAL")
+        .expect("wal");
+    connection
+        .execute_batch(SCHEMA_V1_FIXTURE)
+        .expect("frozen v1 schema");
+    connection
+        .execute_batch(&format!(
+            "INSERT INTO sources (id, name, url, kind, enabled, rule_count, created_at, updated_at)
+                 VALUES ('{V1_SOURCE_ID}', 'HaGeZi Pro', 'https://example.invalid/pro.txt',
+                         'adblock', 1, 4200, {NOW}, {NOW});
+             INSERT INTO devices (id, name, ip_address, filtering, all_lists, created_at, updated_at)
+                 VALUES ('{V1_DEVICE_ID}', 'Kids Tablet', '192.168.1.50', 1, 0, {NOW}, {NOW});
+             INSERT INTO device_lists (device_id, source_id) VALUES ('{V1_DEVICE_ID}', '{V1_SOURCE_ID}');
+             INSERT INTO rules (domain, action, device_id, created_at)
+                 VALUES ('ads.example.com', 'block', NULL, {NOW});
+             INSERT INTO settings (key, value, updated_at) VALUES ('pause_until', '{until}', {NOW});
+             INSERT INTO query_log (ts, client, domain, qtype, blocked, reason, list)
+                 VALUES ({NOW}, '192.168.1.50', 'ads.example.com', 1, 1, 1, NULL);
+             INSERT INTO query_stats_hourly (hour, client, queries, blocked, last_seen)
+                 VALUES ({hour}, '', 1, 1, {NOW});",
+            until = NOW + 1800,
+            hour = NOW - NOW.rem_euclid(HOUR),
+        ))
+        .expect("seed the v1 fixture");
 }
 
 /// Everything `table_info`, `foreign_key_list` and `index_list` say about a database, sorted so a

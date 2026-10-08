@@ -150,3 +150,39 @@ export function truncateMiddle(value: string, max = 48): string {
   const tail = Math.floor((max - 1) / 2);
   return `${value.slice(0, head)}…${value.slice(value.length - tail)}`;
 }
+
+/**
+ * Dollars to the cent, for what AI review has spent and what a key has left:
+ * "$0.03", "$4.12". A spend under a cent is said as one, not rounded to a
+ * "$0.00" that reads as nothing spent at all.
+ */
+export function formatUsd(usd: number | null | undefined): string {
+  if (usd === null || usd === undefined || !Number.isFinite(usd)) return DASH;
+  if (usd > 0 && usd < 0.01) return "under $0.01";
+  return `$${usd.toFixed(2)}`;
+}
+
+/** A price or a limit as it is said aloud: "2¢", "10¢", "$1", "$1.50". */
+export function formatCents(usd: number | null | undefined): string {
+  if (usd === null || usd === undefined || !Number.isFinite(usd)) return DASH;
+  if (usd > 0 && usd < 0.01) return "less than 1¢";
+  if (usd < 1) return `${Math.round(usd * 100)}¢`;
+  return Number.isInteger(usd) ? `$${usd}` : `$${usd.toFixed(2)}`;
+}
+
+/**
+ * An estimate, rounded to two significant figures so it is not read as a
+ * count: 4,762 is "about 4,800". The caller says "about".
+ */
+export function formatEstimate(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0";
+  if (value < 100) return formatCount(Math.round(value));
+  const step = 10 ** (Math.floor(Math.log10(value)) - 1);
+  return formatCount(Math.round(value / step) * step);
+}
+
+/** A model's confidence as a percentage: always the model's, never Cogwheel's. */
+export function formatSure(confidence: number | null | undefined): string {
+  if (confidence === null || confidence === undefined || !Number.isFinite(confidence)) return DASH;
+  return `${Math.round(confidence * 100)}%`;
+}

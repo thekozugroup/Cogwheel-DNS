@@ -4,7 +4,7 @@ import { api, type Device, type DeviceInput, type ListSource, type RuleAction } 
 import { chosenEnabledLists, domainProblem, isIpAddress, isRuleDomain, normalizeDomain } from "@/lib/derive";
 import { formatCount, pluralize } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import { useCogwheelActions, useCogwheelStatus } from "@/data/context";
+import { useCogwheelActions, useCogwheelStatus, useSnapshot } from "@/data/context";
 import { Button } from "@/components/ui/button";
 import { IconButton } from "@/components/ui/icon-button";
 import { Input } from "@/components/ui/input";
@@ -393,7 +393,7 @@ export function DeviceEditor({
             ) : null}
             <Radio
               checked={draft.mode === "none"}
-              detail="Only rules apply. Nothing on a list is blocked for this device."
+              detail={<NoListsDetail />}
               label="No lists"
               name="device-lists"
               onSelect={() => chooseMode("none")}
@@ -523,6 +523,19 @@ function ruleSummary(added: number, changed: number, removed: number): string {
 }
 
 /** Native radio: the app has no radio primitive, and this is three options. */
+/**
+ * What "No lists" leaves a device with. The AI list sits above every list and
+ * applies to every filtered device, this one included, so while it is applying
+ * the sentence says so. Its own component, so the overview poll it reads
+ * re-renders one line rather than the form.
+ */
+function NoListsDetail() {
+  const applying = useSnapshot("overview").ai.applying;
+  return applying
+    ? "Only your rules and the AI list apply. Nothing on a subscribed list is blocked for this device."
+    : "Only rules apply. Nothing on a list is blocked for this device.";
+}
+
 function Radio({
   checked,
   label,
@@ -532,7 +545,7 @@ function Radio({
 }: {
   checked: boolean;
   label: string;
-  detail?: string;
+  detail?: React.ReactNode;
   name: string;
   onSelect: () => void;
 }) {

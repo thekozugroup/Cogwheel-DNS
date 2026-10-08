@@ -1,9 +1,10 @@
 import React from "react";
+import { Link } from "react-router-dom";
 import { ChevronDownIcon, Trash2Icon } from "lucide-react";
 import { api, type Settings } from "@/lib/api";
 import { emptySettings } from "@/lib/constants";
 import { formatBytes, formatCount, formatInterval, pluralize } from "@/lib/format";
-import { blockModeLabel } from "@/lib/derive";
+import { aiStateWord, blockModeLabel } from "@/lib/derive";
 import { cn } from "@/lib/utils";
 import { useCogwheelActions, useCogwheelStatus, useSnapshot } from "@/data/context";
 import { Button } from "@/components/ui/button";
@@ -72,7 +73,16 @@ export function SettingsScreen() {
 
       <ConfirmDialog
         confirmLabel="Clear log"
-        consequence="The 24-hour counters are kept — they are stored separately from the log."
+        consequence={[
+          "The 24-hour counters are kept — they are stored separately from the log.",
+          // Only once AI review has been set up: before that there is no AI
+          // list to forget anything.
+          ...(aiSetUp(settings)
+            ? [
+                "The AI list also forgets which websites its verdicts were judged for, and the names it left to your lists; those are judged, and paid for, again when next seen. Its blocks and allows stay.",
+              ]
+            : []),
+        ]}
         description="Every stored query row is deleted. This cannot be undone."
         tone="bad"
         onConfirm={async () => {
@@ -226,7 +236,9 @@ function Loaded({ settings, onClear }: { settings: Settings; onClear: () => void
         </Row>
       </ConfigCard>
 
-      {/* The third disclosure sits where the other two do, at the end of its
+      <AiReviewCard settings={settings} />
+
+      {/* The fourth disclosure sits where the other three do, at the end of its
           card's title row. It used to sit under the paragraph at the start
           edge, so the page had two places to look for "show me more". */}
       <SectionCard
@@ -244,9 +256,9 @@ function Loaded({ settings, onClear }: { settings: Settings; onClear: () => void
         title="Protected domains"
       >
         <p className={cn(MEASURE, "text-muted-foreground text-sm")}>
-          These {settings.protected_suffixes.length} suffixes are never blocked by a subscribed list —
-          they carry updates, captive portals and certificate checks. Your own rules still outrank
-          them.
+          These {settings.protected_suffixes.length} suffixes are never blocked by a subscribed list or
+          the AI list — they carry updates, captive portals and certificate checks. Your own rules still
+          outrank them.
         </p>
         {/* Rendered closed rather than not at all, so the button's
             aria-controls always names an element that exists. The names are
@@ -282,6 +294,89 @@ function Loaded({ settings, onClear }: { settings: Settings; onClear: () => void
       </SectionCard>
     </PageSections>
   );
+}
+
+/** Whether AI review has ever been set up here: a key, a model, or switched on. */
+function aiSetUp(settings: Settings): boolean {
+  const { ai } = settings;
+  return ai.enabled || ai.key_source !== "none" || ai.model !== null;
+}
+
+const AI_DEFAULT_BASE = "https://openrouter.ai";
+
+/**
+ * AI review, read-only like the rest of this page. It is the one feature set
+ * up in the UI rather than the environment — its key, model and daily limit
+ * are a household's choices, made beside the AI list on Lists — so this card
+ * only shows them, and points there.
+ */
+function AiReviewCard({ settings }: { settings: Settings }) {
+  const { ai } = settings;
+  const host = hostOf(ai.base_url);
+  return (
+    <ConfigCard
+      footer={
+        <p className={cn(MEASURE, "min-w-0 text-muted-foreground text-sm")}>
+          Set up on the{" "}
+          <Link className="rounded-sm text-foreground underline underline-offset-4" to="/lists">
+            Lists page
+          </Link>
+          , beside the AI list.
+        </p>
+      }
+      title="AI review"
+    >
+      <Row env="COGWHEEL_AI__AVAILABLE" label="Status">
+        <AiStatusValue settings={settings} />
+      </Row>
+      <Row label="Model">{ai.model ? <Mono>{ai.model}</Mono> : "None picked"}</Row>
+      <Row env="COGWHEEL_AI__OPENROUTER_API_KEY" label="Key">
+        {ai.key_source === "environment"
+          ? "Set in the environment"
+          : ai.key_source === "saved"
+            ? "Saved on this appliance"
+            : "None"}
+      </Row>
+      <Row label="Daily limit">{dailyLimitLabel(ai.daily_limit_usd)}</Row>
+      <Row env="COGWHEEL_AI__ZERO_RETENTION" label="Providers">
+        {ai.zero_retention ? "Zero data retention only" : "Any that do not collect data"}
+      </Row>
+      <Row env="COGWHEEL_AI__BASE_URL" label="Sends to">
+        <Mono>{!ai.base_url || ai.base_url.replace(/\/$/, "") === AI_DEFAULT_BASE ? "openrouter.ai" : host}</Mono>
+      </Row>
+    </ConfigCard>
+  );
+}
+
+/**
+ * The state as a dot and a word. Its own component because the word comes
+ * from the overview, which is polled every five seconds: read here, a poll
+ * re-renders one value rather than the page.
+ */
+function AiStatusValue({ settings }: { settings: Settings }) {
+  const { ai } = useSnapshot("overview");
+  if (!settings.ai.available) {
+    const why =
+      settings.ai.unavailable_reason === "history_off"
+        ? "the activity log is off"
+        : "switched off by the operator";
+    return <StatusPill label={`Unavailable · ${why}`} tone="idle" />;
+  }
+  const { tone, word } = aiStateWord(ai.state);
+  return <StatusPill label={word} tone={tone} />;
+}
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
+
+/** "10¢ a day", "$1 a day": the four limits the server accepts, as the set-up form words them. */
+function dailyLimitLabel(usd: number): string {
+  return usd >= 1 ? `$${usd.toFixed(usd % 1 === 0 ? 0 : 2)} a day` : `${Math.round(usd * 100)}¢ a day`;
 }
 
 /**

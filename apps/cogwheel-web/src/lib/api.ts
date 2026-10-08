@@ -1,7 +1,7 @@
 /**
  * The Cogwheel control-plane HTTP contract, as the web app uses it.
  *
- * Twenty-two routes, no more: two health probes, one SSE stream and nineteen
+ * Twenty-nine routes, no more: two health probes, one SSE stream and twenty-six
  * JSON calls. Field names mirror the wire exactly (snake_case everywhere
  * except the SSE frame, which is camelCase), so nothing here has to translate
  * between two vocabularies — the UI layer does its own naming at the use site.
@@ -98,7 +98,8 @@ export type Reason =
   | "list"
   | "cname"
   | "paused"
-  | "unfiltered";
+  | "unfiltered"
+  | "ai";
 
 export type ListKind = "hosts" | "domains" | "adblock";
 export type RuleAction = "allow" | "block";
@@ -151,6 +152,8 @@ export type Overview = {
   top_blocked: DomainCount[];
   top_queried: DomainCount[];
   connect: { targets: string[]; port: number };
+  /** From memory only, so the five-second poll stays cheap. */
+  ai: AiOverview;
 };
 
 export type DomainCount = { domain: string; count: number };
@@ -288,6 +291,8 @@ export type CheckResult = {
   list: string | null;
   scope: "household" | "device" | "unfiltered" | "paused";
   device_name: string | null;
+  /** Present whenever the AI list holds a row for the name, whether or not it decided. */
+  ai: AiExplanation | null;
 };
 
 type Upstream = { spec: string; protocol: string; encrypted: boolean };
@@ -308,6 +313,153 @@ export type Settings = {
   lists_dir: string;
   protected_suffixes: string[];
   schema_version: number;
+  ai: AiSettings;
+};
+
+/* ------------------------------------------------------------------------- */
+/* AI review (ADR 0002). No type here has a field for the key, or any part of  */
+/* it: the key only ever goes in, in AiPatch and the Test's staged input.      */
+/* ------------------------------------------------------------------------- */
+
+export type AiState =
+  | "unavailable"
+  | "off"
+  | "no_key"
+  | "reviewing"
+  | "paused_budget"
+  | "retrying"
+  | "key_refused"
+  | "out_of_credit"
+  | "model_refused"
+  | "stopped";
+
+/** What the household's lists do with a name: block it, except it (`@@`), or nothing. */
+export type AiListState = "nothing" | "block" | "exception";
+
+export type AiStatus = {
+  available: boolean;
+  unavailable_reason: "operator_off" | "history_off" | null;
+  enabled: boolean;
+  state: AiState;
+  /**
+   * Only the key's credit limit and what is left of it. There is no label, ever:
+   * OpenRouter's label for a key is a masked copy of the key (D10).
+   */
+  key: {
+    source: "none" | "saved" | "environment";
+    limit_usd: number | null;
+    limit_remaining_usd: number | null;
+    checked_at: number | null;
+  };
+  /** Null until picked; `name` is null if the model list was never fetched. */
+  model: { id: string; name: string | null; prompt_usd_per_million: number | null } | null;
+  daily_limit_usd: number;
+  today: { spent_usd: number; requests: number; overrides: number; resets_at: number };
+  /** Rows by verdict, and what DNS is actually using. */
+  verdicts: { block: number; allow: number; ignore: number; applied_block: number; applied_allow: number };
+  queue: { waiting: number; dropped: number };
+  zero_retention: boolean;
+  sends_to: string;
+  last_review_at: number | null;
+  last_error: string | null;
+};
+
+export type AiOverview = { state: AiState; applying: boolean; applied_block: number; applied_allow: number };
+
+type AiSettings = {
+  available: boolean;
+  unavailable_reason: "operator_off" | "history_off" | null;
+  enabled: boolean;
+  key_source: "none" | "saved" | "environment";
+  model: string | null;
+  daily_limit_usd: number;
+  zero_retention: boolean;
+  base_url: string;
+};
+
+export type AiModel = {
+  id: string;
+  name: string;
+  description: string;
+  context_length: number;
+  prompt_usd_per_million: number | null;
+  /** An estimate: the listed price at about 500 tokens a name. */
+  usd_per_thousand_names: number | null;
+  /** Null when the zero-retention listing could not be fetched. */
+  zero_retention: boolean | null;
+  /** The last Test of this model since the appliance started. */
+  tested: "passed" | "failed" | null;
+};
+
+export type AiModelList = { fetched_at: number; zero_retention_required: boolean; models: AiModel[] };
+
+/** The four daily limits the server accepts. */
+export type AiDailyLimit = 0.05 | 0.1 | 0.25 | 1;
+
+/** `key`: absent keeps the saved key, null removes it, a string replaces it. */
+export type AiPatch = { enabled?: boolean; model?: string; key?: string | null; daily_limit_usd?: AiDailyLimit };
+
+export type AiTestResult = {
+  ok: boolean;
+  model: string;
+  provider: string | null;
+  latency_ms: number;
+  cost_usd: number;
+  answer: {
+    website: string;
+    candidate: string;
+    choice: string;
+    confidence: number | null;
+    effect: string | null;
+    effect_confidence: number | null;
+  };
+  sentence: string;
+};
+
+export type AiVerdictRow = {
+  domain: string;
+  verdict: "block" | "allow" | "ignore";
+  why: "agrees" | "unsure" | "limit" | "contested" | null;
+  choice: string;
+  confidence: number | null;
+  effect: "breaks" | "works" | "unsure" | null;
+  effect_confidence: number | null;
+  /** The lists when it was judged, and now. */
+  lists: AiListState;
+  lists_now: AiListState;
+  applied: boolean;
+  not_applied: "off" | "lists_changed" | "lists_agree" | "below_bar" | null;
+  outranked_by: "household_rule" | "protected" | null;
+  /** The website it was judged for; null once that history is scrubbed. */
+  site: string | null;
+  conflict_site: string | null;
+  model: string;
+  judged_at: number;
+  review_after: number;
+};
+
+export type AiVerdictPage = {
+  total: number;
+  counts: { block: number; allow: number; ignore: number };
+  rows: AiVerdictRow[];
+};
+
+export type AiVerdictFilters = { view?: "changes" | "all"; verdict?: string; q?: string; limit?: number };
+
+/** /check's AI provenance. In the race case (§10, Changed routes) every field but verdict and applied is null. */
+export type AiExplanation = {
+  verdict: "block" | "allow" | "ignore";
+  applied: boolean;
+  why: AiVerdictRow["why"];
+  choice: string | null;
+  confidence: number | null;
+  effect: AiVerdictRow["effect"];
+  effect_confidence: number | null;
+  lists: AiListState | null;
+  site: string | null;
+  conflict_site: string | null;
+  model: string | null;
+  judged_at: number | null;
 };
 
 /* ------------------------------------------------------------------------- */
@@ -360,4 +512,16 @@ export const api = {
   check: (domain: string, client?: string, options?: RequestOptions) =>
     json<CheckResult>(`/api/v1/check${query({ domain, client })}`, {}, options),
   settings: (options?: RequestOptions) => json<Settings>("/api/v1/settings", {}, options),
+
+  /* 23–29 AI review */
+  ai: (options?: RequestOptions) => json<AiStatus>("/api/v1/ai", {}, options),
+  updateAi: (patch: AiPatch) => json<AiStatus>("/api/v1/ai", { method: "PUT", body: body(patch) }),
+  aiModels: (options?: RequestOptions) => json<AiModelList>("/api/v1/ai/models", {}, options),
+  testAi: (input: { model?: string; key?: string } = {}) =>
+    json<AiTestResult>("/api/v1/ai/test", { method: "POST", body: body(input) }),
+  aiVerdicts: (filters: AiVerdictFilters = {}, options?: RequestOptions) =>
+    json<AiVerdictPage>(`/api/v1/ai/verdicts${query(filters)}`, {}, options),
+  clearAiVerdicts: () => json<{ deleted: number }>("/api/v1/ai/verdicts", { method: "DELETE" }),
+  forgetAiVerdict: (domain: string) =>
+    json<{ deleted: boolean }>(`/api/v1/ai/verdicts/${encodeURIComponent(domain)}`, { method: "DELETE" }),
 };

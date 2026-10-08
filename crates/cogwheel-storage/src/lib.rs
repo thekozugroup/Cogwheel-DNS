@@ -1,9 +1,9 @@
 //! SQLite persistence for Cogwheel.
 //!
 //! This is a leaf crate: it depends on nothing else in the workspace, and it knows nothing about
-//! DNS, blocklist syntax or HTTP. It owns one database file and the seven tables of the v1 schema
-//! (§2.1), and it hands the server plain records to build a `Policy` from and to serve the API
-//! with.
+//! DNS, blocklist syntax or HTTP. It owns one database file and the eight tables of the v2 schema
+//! (§2.1, plus ADR 0002's `ai_verdicts`), and it hands the server plain records to build a `Policy`
+//! from and to serve the API with.
 //!
 //! # One connection, always off the runtime
 //!
@@ -36,10 +36,12 @@ use thiserror::Error;
 
 #[macro_use]
 mod record;
+mod ai_verdicts;
 mod migrate;
 mod query_log;
 mod repo;
 
+pub use ai_verdicts::{AiCounts, AiPruned, AiVerdict, AiVerdictFilter, AiVerdictPage};
 pub use query_log::{
     DomainCount, PruneOutcome, QueryFilter, QueryLogEntry, QueryLogRow, QueryPage, TopDomains,
 };
@@ -49,10 +51,14 @@ pub use repo::{
 };
 
 /// Schema version this build writes, reads and refuses to go above.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
-/// The whole v1 schema, executed verbatim on a fresh database.
+/// The whole v1 schema, executed verbatim on a fresh database and by the v0 upgrade. Frozen: a
+/// later version is a step file beside it, never an edit to it.
 const SCHEMA_V1: &str = include_str!("schema_v1.sql");
+
+/// The v1 -> v2 step (ADR 0002), executed by fresh installs and v1 upgrades alike.
+pub(crate) const SCHEMA_V2: &str = include_str!("schema_v2.sql");
 
 /// The one list a fresh install subscribes to (§2.4).
 const SEED_SOURCE: (&str, &str, &str) = ("oisd small", "https://small.oisd.nl", "adblock");
@@ -99,13 +105,14 @@ pub enum StorageError {
         path: PathBuf,
     },
 
-    /// The legacy upgrade failed and was rolled back. The v0 file is untouched, and a copy of it
-    /// taken before the attempt is at `backup`.
+    /// A schema upgrade failed and was rolled back. The file is untouched, and a copy of it taken
+    /// before the attempt is at `backup`.
     #[error(
-        "upgrade from the legacy schema failed and was rolled back; the database is unchanged and a copy taken before the attempt is at {backup}: {message}"
+        "upgrading the database schema failed and was rolled back; the database is unchanged and a copy taken before the attempt is at {backup}: {message}"
     )]
     Migration {
-        /// The `.pre-v1` copy taken by `VACUUM INTO` before the transaction opened.
+        /// The `.pre-vN` copy taken by `VACUUM INTO` before the transaction opened, named for the
+        /// version the failed step was going to.
         backup: PathBuf,
         /// What actually failed.
         message: String,
@@ -159,19 +166,22 @@ pub struct Storage {
 }
 
 impl Storage {
-    /// Open (creating if needed), bring the schema to v1, and seed a fresh install.
+    /// Open (creating if needed), bring the schema to v2, and seed a fresh install.
     ///
     /// `database_url` may carry the `sqlite://` prefix the config uses. The sequence is §2.2:
-    /// PRAGMAs, then `user_version` — 1 is ready to use, 0 with no `sources` table is a fresh file
-    /// that gets `schema_v1.sql`, 0 with a `rulesets` table is a legacy database that gets the
-    /// guarded upgrade in `migrate.rs`, and anything else is refused.
+    /// PRAGMAs, then `user_version`, one step at a time until it reads [`SCHEMA_VERSION`] — 0 with
+    /// no `sources` table is a fresh file that gets `schema_v1.sql`, 0 with a `rulesets` table is a
+    /// legacy database that gets the guarded upgrade in `migrate.rs`, 1 gets the additive v2 step,
+    /// and anything else is refused. So the eight tables of the v2 schema are built the same way
+    /// whatever the file started as. Only a file that was v1 when it was opened gets a `.pre-v2`
+    /// copy; a fresh file, a v0 file (already copied as `.pre-v1`) and `:memory:` get none.
     ///
     /// # Errors
     ///
     /// [`StorageError::NewerSchema`] for a database from a later build,
     /// [`StorageError::UnknownSchema`] for a v0 file this crate does not recognise, and
-    /// [`StorageError::Migration`] if the legacy upgrade rolled back — that one names the backup
-    /// the operator can fall back to.
+    /// [`StorageError::Migration`] if an upgrade rolled back — that one names the backup the
+    /// operator can fall back to.
     pub async fn open(database_url: &str) -> Result<Self, StorageError> {
         let database_url = database_url.to_owned();
         spawn_blocking(move || Self::open_blocking(&database_url)).await
@@ -194,28 +204,46 @@ impl Storage {
         let mut connection = Connection::open(&path)?;
         apply_pragmas(&connection)?;
 
-        let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        match version {
-            SCHEMA_VERSION => {}
-            0 if table_exists(&connection, "rulesets")? => {
-                migrate::upgrade_v0_to_v1(&mut connection, &path)?;
+        // A chain rather than one jump per starting version: each step takes the file exactly one
+        // version up and commits, so a crash between steps leaves a valid older file that the next
+        // open carries on from.
+        let opened_at = user_version(&connection)?;
+        let mut version = opened_at;
+        loop {
+            match version {
+                SCHEMA_VERSION => break,
+                0 if table_exists(&connection, "rulesets")? => {
+                    migrate::upgrade_v0_to_v1(&mut connection, &path)?;
+                }
+                0 if table_exists(&connection, "sources")? => {
+                    return Err(StorageError::UnknownSchema { path });
+                }
+                // One transaction, so a half-built v1 can never be left behind.
+                0 => {
+                    let transaction = connection.unchecked_transaction()?;
+                    transaction.execute_batch(SCHEMA_V1)?;
+                    transaction.commit()?;
+                }
+                // The backup is for a real v1 file only: a fresh file, a v0 file already backed up
+                // as .pre-v1, and `:memory:` have nothing worth a copy (and `:memory:.pre-v2` would
+                // litter the working directory and race between parallel tests).
+                1 => migrate::upgrade_v1_to_v2(&mut connection, &path, opened_at == 1)?,
+                found => {
+                    return Err(StorageError::NewerSchema {
+                        path,
+                        found,
+                        supported: SCHEMA_VERSION,
+                    });
+                }
             }
-            0 if table_exists(&connection, "sources")? => {
-                return Err(StorageError::UnknownSchema { path });
+            // A step that committed without moving `user_version` would loop here for ever.
+            let next = user_version(&connection)?;
+            if next <= version {
+                return Err(StorageError::Internal(format!(
+                    "schema step from v{version} did not advance"
+                )));
             }
-            // One transaction, so a half-built schema can never be left behind.
-            0 => {
-                let transaction = connection.unchecked_transaction()?;
-                transaction.execute_batch(SCHEMA_V1)?;
-                transaction.commit()?;
-            }
-            found => {
-                return Err(StorageError::NewerSchema {
-                    path,
-                    found,
-                    supported: SCHEMA_VERSION,
-                });
-            }
+            version = next;
         }
 
         seed_if_empty(&connection)?;
@@ -300,6 +328,11 @@ fn apply_pragmas(connection: &Connection) -> Result<(), StorageError> {
     connection.pragma_update(None, "busy_timeout", 5000)?;
     connection.pragma_update(None, "cache_size", PAGE_CACHE_KIB)?;
     Ok(())
+}
+
+/// `PRAGMA user_version`: the schema version the file says it is at.
+fn user_version(connection: &Connection) -> Result<i64, StorageError> {
+    Ok(connection.pragma_query_value(None, "user_version", |row| row.get(0))?)
 }
 
 fn table_exists(connection: &Connection, name: &str) -> Result<bool, StorageError> {

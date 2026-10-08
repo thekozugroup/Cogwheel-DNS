@@ -1,7 +1,7 @@
 import React from "react";
 import { Link } from "react-router-dom";
 import { PlayIcon, RotateCwIcon } from "lucide-react";
-import { api, type Overview } from "@/lib/api";
+import { api, type AiState, type Overview } from "@/lib/api";
 import type { Tone } from "@/components/app/status-indicator";
 import { formatCount, formatDuration, formatRelative, formatShare, pluralize } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -64,7 +64,7 @@ export function OverviewScreen() {
       key: `rule-${domain}`,
       action: () => api.createRule({ domain, action }),
       successTitle: action === "allow" ? "Allowed for everyone" : "Blocked for everyone",
-      successDetail: `${domain} — the rule beats every list.`,
+      successDetail: `${domain} — the rule beats every list and the AI list.`,
       failureTitle: "Could not save the rule",
     });
 
@@ -162,6 +162,9 @@ const DOT: Record<Tone, "success" | "warning" | "destructive" | "default"> = {
 
 const names = new Intl.ListFormat(undefined, { style: "long", type: "conjunction" });
 
+/** The states in which AI review has stopped judging new names on its own. */
+const STOPPED = new Set<AiState>(["key_refused", "out_of_credit", "model_refused", "stopped"]);
+
 type AnswerParts = { tone: Tone; headline: React.ReactNode; support: React.ReactNode; action?: React.ReactNode };
 
 /**
@@ -197,7 +200,13 @@ function Answer() {
     );
   }
 
-  const { lists, last_24h: day } = overview;
+  const { lists, last_24h: day, ai } = overview;
+  // Only the AI list's blocks change who is blocking anything: an AI list of
+  // allows blocks nothing, and is not named as though it did.
+  const blockers = ai.applied_block > 0 ? "your own rules and the AI list are" : "your own rules are";
+  // Its verdicts keep applying when review stops, so the answer stays good and
+  // says so, rather than turning yellow over a household that is still filtered.
+  const reviewStopped = ai.applying && STOPPED.has(ai.state);
 
   const refreshLists = () =>
     void mutate({
@@ -263,14 +272,14 @@ function Answer() {
           ? {
               tone: "warn",
               headline: lists.total === 0 ? "No blocklists yet" : "Every blocklist is switched off",
-              support: "Only your own rules are blocking anything.",
+              support: `Only ${blockers} blocking anything.`,
               action: toLists,
             }
           : !lists.downloaded
             ? {
                 tone: "warn",
                 headline: "Your blocklists have not downloaded yet",
-                support: "Until one does, only your own rules are blocking anything.",
+                support: `Until one does, only ${blockers} blocking anything.`,
                 action: (
                   <Button isLoading={busy === "list-refresh-all"} onClick={refreshLists} variant="outline">
                     <RotateCwIcon aria-hidden />
@@ -301,11 +310,26 @@ function Answer() {
                       </span>
                     </>
                   ),
-                  support: filteredSentence(
-                    devices.filter((device) => !device.filtering).map((device) => device.name),
-                    devices
-                      .filter((device) => device.filtering && usesNoLists(device, enabledLists))
-                      .map((device) => device.name),
+                  support: (
+                    <>
+                      {filteredSentence(
+                        devices.filter((device) => !device.filtering).map((device) => device.name),
+                        devices
+                          .filter((device) => device.filtering && usesNoLists(device, enabledLists))
+                          .map((device) => device.name),
+                        ai.applying,
+                      )}
+                      {reviewStopped ? (
+                        <>
+                          {" "}
+                          AI review has stopped; its verdicts still apply.{" "}
+                          <Link className="text-foreground underline underline-offset-4" to="/lists">
+                            See the Lists page
+                          </Link>
+                          .
+                        </>
+                      ) : null}
+                    </>
                   ),
                 };
 
@@ -351,16 +375,24 @@ function Answer() {
  * Counting only the filtering-off devices had this line call such a device
  * filtered directly under a headline that promises the household is protected.
  */
-function filteredSentence(off: string[], noLists: string[]): string {
+function filteredSentence(off: string[], noLists: string[], aiApplying: boolean): string {
   const total = off.length + noLists.length;
   if (total === 0) return "Every device using Cogwheel is filtered.";
+  // The AI list applies to a device on no lists too (ADR 0002 puts it above
+  // every list), so while it is applying "no lists" is not the whole story.
+  const noListsWord = aiApplying ? "no lists; AI list only" : "no lists";
   if (total <= 3) {
-    const named = [...off.map((name) => `${name} (filtering off)`), ...noLists.map((name) => `${name} (no lists)`)];
+    const named = [
+      ...off.map((name) => `${name} (filtering off)`),
+      ...noLists.map((name) => `${name} (${noListsWord})`),
+    ];
     return `Every device using Cogwheel is filtered except ${names.format(named)}.`;
   }
   const counts = [
     off.length > 0 ? `${formatCount(off.length)} with filtering off` : null,
-    noLists.length > 0 ? `${formatCount(noLists.length)} with no lists` : null,
+    noLists.length > 0
+      ? `${formatCount(noLists.length)} with no lists${aiApplying ? " (AI list only)" : ""}`
+      : null,
   ].filter((part): part is string => part !== null);
   return `Every device using Cogwheel is filtered except ${names.format(counts)}.`;
 }

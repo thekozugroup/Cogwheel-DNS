@@ -1,4 +1,5 @@
-//! Opening a database, and the one-way v0 -> v1 upgrade (spec sections 2.2 and 2.3).
+//! Opening a database, the one-way v0 -> v1 upgrade (spec sections 2.2 and 2.3), and the additive
+//! v1 -> v2 step (ADR 0002).
 //!
 //! These run against real files rather than `:memory:` because that is where the behaviour lives:
 //! `VACUUM INTO` writes a sibling file, WAL mode changes what a second opener sees, and a failed
@@ -7,6 +8,7 @@
 mod common;
 
 use common::*;
+use std::path::Path;
 
 // ---------------------------------------------------------------- open and schema
 
@@ -23,7 +25,7 @@ async fn opening_twice_changes_nothing() {
     assert_eq!(first.len(), 1, "the fresh open seeds exactly one list");
     assert_eq!(second.len(), 1, "the second open seeds nothing further");
     assert_eq!(first[0].id, second[0].id, "and keeps the same row");
-    assert_eq!(user_version(&dir.database()), 1);
+    assert_eq!(user_version(&dir.database()), SCHEMA_VERSION);
 }
 
 #[tokio::test]
@@ -45,6 +47,33 @@ async fn an_in_memory_database_opens() {
     // and no file for the upgrade paths to look at.
     let storage = Storage::open(":memory:").await.expect("open in memory");
     assert_eq!(storage.list_sources().await.expect("list").len(), 1);
+    assert!(
+        storage
+            .list_ai_verdicts()
+            .await
+            .expect("v2 table")
+            .is_empty()
+    );
+    // An in-memory database goes v0 -> v1 -> v2 like a fresh file, and takes no copy on the way:
+    // one would land in the working directory and race between parallel tests.
+    for version in [1, 2] {
+        let litter = backup_of(Path::new(":memory:"), version);
+        assert!(!litter.exists(), "{} was written", litter.display());
+    }
+}
+
+#[tokio::test]
+async fn a_fresh_database_takes_no_backup() {
+    let (dir, storage) = fresh("fresh-no-backup").await;
+    drop(storage);
+    let path = dir.database();
+    assert_eq!(user_version(&path), SCHEMA_VERSION);
+    for version in [1, 2] {
+        assert!(
+            !backup_of(&path, version).exists(),
+            "a fresh file has nothing worth a .pre-v{version}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -53,7 +82,7 @@ async fn a_newer_schema_is_refused() {
     {
         let connection = Connection::open(dir.database()).expect("create");
         connection
-            .pragma_update(None, "user_version", 9)
+            .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
             .expect("set version");
     }
 
@@ -61,8 +90,19 @@ async fn a_newer_schema_is_refused() {
         .await
         .expect_err("a newer database must be refused");
     let message = error.to_string();
-    assert!(message.contains('9'), "names the version found: {message}");
+    assert!(
+        message.contains(&format!(
+            "schema version is {}, and this build understands {SCHEMA_VERSION}",
+            SCHEMA_VERSION + 1
+        )),
+        "names the version found and the one supported: {message}"
+    );
     assert!(message.contains("newer Cogwheel"), "{message}");
+    assert_eq!(
+        user_version(&dir.database()),
+        SCHEMA_VERSION + 1,
+        "and is left alone"
+    );
 }
 
 #[tokio::test]
@@ -88,7 +128,7 @@ async fn an_unrecognised_v0_layout_is_refused() {
 // ---------------------------------------------------------------- the legacy upgrade
 
 #[tokio::test]
-async fn a_v0_database_upgrades_to_v1() {
+async fn a_v0_database_upgrades_to_the_current_schema() {
     let dir = TempDir::new("upgrade");
     let path = dir.database();
     build_v0_fixture(&path);
@@ -96,12 +136,16 @@ async fn a_v0_database_upgrades_to_v1() {
 
     let storage = open(&path).await;
 
-    let backup = backup_of(&path);
+    let backup = backup_of(&path, 1);
     assert!(backup.exists(), "the pre-upgrade copy is kept");
     assert_eq!(user_version(&backup), 0, "and is still the v0 file");
     assert!(has_table(&backup, "rulesets"), "legacy tables and all");
+    assert!(
+        !backup_of(&path, 2).exists(),
+        "v0 -> v2 is one jump with one copy: the .pre-v1 file already holds the state to go back to"
+    );
 
-    assert_eq!(user_version(&path), 1);
+    assert_eq!(user_version(&path), SCHEMA_VERSION);
 
     let sources = storage.list_sources().await.expect("list sources");
     assert_eq!(sources.len(), 1, "the baseline data: URL is not a list");
@@ -199,6 +243,7 @@ async fn a_v0_database_upgrades_to_v1() {
         "rules",
         "query_log",
         "query_stats_hourly",
+        "ai_verdicts",
     ] {
         assert!(has_table(&path, current), "{current} should be there");
     }
@@ -219,7 +264,7 @@ async fn a_second_open_takes_no_new_backup() {
 
     // Replacing the backup with a sentinel is the only way to tell "not overwritten" from
     // "overwritten with identical bytes".
-    let backup = backup_of(&path);
+    let backup = backup_of(&path, 1);
     std::fs::write(&backup, b"sentinel").expect("overwrite backup");
 
     drop(open(&path).await);
@@ -227,26 +272,41 @@ async fn a_second_open_takes_no_new_backup() {
     assert_eq!(
         std::fs::read(&backup).expect("read backup"),
         b"sentinel",
-        "an already-v1 database is opened without touching the backup"
+        "an already-current database is opened without touching the backup"
+    );
+    assert!(
+        !backup_of(&path, 2).exists(),
+        "and without taking a new one"
     );
 }
 
 #[tokio::test]
 async fn an_upgraded_schema_matches_a_fresh_one() {
-    let upgraded_dir = TempDir::new("upgraded-shape");
-    let upgraded = upgraded_dir.database();
-    build_v0_fixture(&upgraded);
-    drop(open(&upgraded).await);
+    let from_v0_dir = TempDir::new("upgraded-shape-v0");
+    let from_v0 = from_v0_dir.database();
+    build_v0_fixture(&from_v0);
+    drop(open(&from_v0).await);
+
+    let from_v1_dir = TempDir::new("upgraded-shape-v1");
+    let from_v1 = from_v1_dir.database();
+    build_v1_fixture(&from_v1);
+    drop(open(&from_v1).await);
 
     let fresh_dir = TempDir::new("fresh-shape");
     let fresh_path = fresh_dir.database();
     drop(open(&fresh_path).await);
 
-    assert_eq!(
-        schema_fingerprint(&upgraded),
-        schema_fingerprint(&fresh_path),
-        "the upgrade must leave the same schema schema_v1.sql produces, and nothing beside it"
+    let fresh = schema_fingerprint(&fresh_path);
+    assert!(
+        fresh.iter().any(|line| line == "table ai_verdicts"),
+        "a fresh file is built to v2"
     );
+    assert_eq!(
+        schema_fingerprint(&from_v0),
+        fresh,
+        "v0 -> v2 must leave the schema a fresh install has, and nothing beside it"
+    );
+    assert_eq!(schema_fingerprint(&from_v1), fresh, "and so must v1 -> v2");
 }
 
 #[tokio::test]
@@ -268,7 +328,7 @@ async fn a_failed_upgrade_rolls_back_and_names_the_backup() {
     let error = Storage::open(&path.to_string_lossy())
         .await
         .expect_err("the upgrade must fail");
-    let backup = backup_of(&path);
+    let backup = backup_of(&path, 1);
     let message = error.to_string();
     assert!(
         message.contains(&backup.to_string_lossy().to_string()),
@@ -295,7 +355,118 @@ async fn a_failed_upgrade_rolls_back_and_names_the_backup() {
     }
 
     let storage = open(&path).await;
-    assert_eq!(user_version(&path), 1, "the retry succeeds");
+    assert_eq!(user_version(&path), SCHEMA_VERSION, "the retry succeeds");
     assert_eq!(user_version(&backup), 0, "on a freshly taken backup");
+    assert_eq!(storage.list_sources().await.expect("list").len(), 1);
+}
+
+// ---------------------------------------------------------------- the v1 -> v2 step
+
+#[tokio::test]
+async fn a_v1_database_upgrades_to_v2_with_a_backup() {
+    let dir = TempDir::new("v1-upgrade");
+    let path = dir.database();
+    build_v1_fixture(&path);
+    assert_eq!(user_version(&path), 1);
+
+    let storage = open(&path).await;
+
+    assert_eq!(user_version(&path), SCHEMA_VERSION);
+    assert!(has_table(&path, "ai_verdicts"));
+    let backup = backup_of(&path, 2);
+    assert!(backup.exists(), "a real v1 file is copied before the step");
+    assert_eq!(user_version(&backup), 1, "and the copy is still v1");
+    assert!(!has_table(&backup, "ai_verdicts"), "from before the step");
+    assert!(
+        !backup_of(&path, 1).exists(),
+        "a v1 file takes no .pre-v1: it was never v0"
+    );
+
+    // Every row survives, and a list-holding file is not re-seeded.
+    let sources = storage.list_sources().await.expect("sources");
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].id, V1_SOURCE_ID);
+    assert_eq!(sources[0].rule_count, 4200);
+    let devices = storage.list_devices().await.expect("devices");
+    assert_eq!(devices.len(), 1);
+    assert_eq!(devices[0].id, V1_DEVICE_ID);
+    assert!(!devices[0].all_lists);
+    let lists = storage.list_device_lists(None).await.expect("device lists");
+    assert_eq!(lists.len(), 1);
+    assert_eq!(lists[0].source_id, V1_SOURCE_ID);
+    let rules = storage.list_rules(None).await.expect("rules");
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0].domain, "ads.example.com");
+    assert_eq!(
+        storage.pause_until().await.expect("pause"),
+        Some(NOW + 1800)
+    );
+    let page = storage
+        .query_page(QueryFilter {
+            limit: 10,
+            ..QueryFilter::default()
+        })
+        .await
+        .expect("query log");
+    assert_eq!(page.rows.len(), 1);
+    assert_eq!(page.rows[0].domain, "ads.example.com");
+    let hours = storage.hourly_24h(NOW).await.expect("rollups");
+    assert_eq!(hours.last().expect("24 buckets").queries, 1);
+    assert!(storage.list_ai_verdicts().await.expect("ai").is_empty());
+    drop(storage);
+
+    // The next open is a v2 open: the copy is neither retaken nor touched.
+    std::fs::write(&backup, b"sentinel").expect("overwrite backup");
+    drop(open(&path).await);
+    assert_eq!(std::fs::read(&backup).expect("read backup"), b"sentinel");
+}
+
+#[tokio::test]
+async fn a_failed_v1_upgrade_rolls_back_and_names_the_backup() {
+    let dir = TempDir::new("v1-poisoned");
+    let path = dir.database();
+    build_v1_fixture(&path);
+    // A table already holding the name v2 creates is the simplest way to make the step fail.
+    {
+        let connection = Connection::open(&path).expect("open fixture");
+        connection
+            .execute_batch("CREATE TABLE ai_verdicts (squatter TEXT)")
+            .expect("squat on the v2 table name");
+    }
+
+    let error = Storage::open(&path.to_string_lossy())
+        .await
+        .expect_err("the step must fail");
+    let backup = backup_of(&path, 2);
+    assert!(
+        matches!(&error, StorageError::Migration { backup: named, .. } if *named == backup),
+        "the error is a migration failure naming .pre-v2: {error:?}"
+    );
+    assert!(
+        error.to_string().contains(&*backup.to_string_lossy()),
+        "and says where it is: {error}"
+    );
+    assert_eq!(user_version(&path), 1, "the database is still v1");
+    let connection = Connection::open(&path).expect("open after failure");
+    assert_eq!(
+        pragma_rows(&connection, "table_info", "ai_verdicts").len(),
+        1,
+        "and the squatting table is as it was"
+    );
+    drop(connection);
+    assert!(backup.exists());
+    assert_eq!(user_version(&backup), 1);
+
+    // Clearing the obstruction lets the next open through, on a freshly taken copy.
+    std::fs::write(&backup, b"stale").expect("stale the backup");
+    {
+        let connection = Connection::open(&path).expect("open fixture");
+        connection
+            .execute_batch("DROP TABLE ai_verdicts")
+            .expect("remove the squatter");
+    }
+    let storage = open(&path).await;
+    assert_eq!(user_version(&path), SCHEMA_VERSION, "the retry succeeds");
+    assert_eq!(user_version(&backup), 1, "on a freshly taken backup");
     assert_eq!(storage.list_sources().await.expect("list").len(), 1);
 }

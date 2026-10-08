@@ -90,7 +90,7 @@ export function RulesCard() {
 
   return (
     <SectionCard
-      description="Your own decisions. They beat every list."
+      description="Your own decisions. They beat every list and the AI list."
       footer={<p className="text-muted-foreground text-sm">Allow beats block. A domain covers its subdomains.</p>}
       title="Rules"
     >
