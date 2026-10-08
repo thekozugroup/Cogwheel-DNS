@@ -5,6 +5,7 @@
 //! do touch the log — come from one bounded pass over it, memoized for a minute and shared by
 //! every caller.
 
+use crate::ai::AiOverview;
 use crate::api::runtime::paused_until;
 use crate::http::{ApiResult, ok};
 use crate::state::{ServerState, now_secs};
@@ -68,6 +69,8 @@ pub struct Overview {
     pub top_blocked: Vec<DomainCount>,
     pub top_queried: Vec<DomainCount>,
     pub connect: Connect,
+    /// AI review's state and what the AI list applies, from memory alone.
+    pub ai: AiOverview,
 }
 
 /// Route 3: the whole Overview in one call.
@@ -107,6 +110,7 @@ pub async fn overview(State(state): State<ServerState>) -> ApiResult<Overview> {
             targets: connect_targets(&state).await,
             port: state.config.advertised_dns_port,
         },
+        ai: state.ai.overview(&policy),
     })
 }
 

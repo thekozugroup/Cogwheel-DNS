@@ -206,7 +206,13 @@ where
 /// The sentence a malformed body answers with. The rejection itself goes to the log.
 fn unreadable_body(rejection: JsonRejection) -> ApiError {
     tracing::debug!(%rejection, "rejected a request body");
-    ApiError::bad_request(match rejection {
+    ApiError::bad_request(rejection_sentence(&rejection))
+}
+
+/// The sentence for a body axum could not read. Shared with `api::ai::QuietJson`, which answers
+/// the same but never logs the rejection: serde's text can quote the key.
+pub(crate) const fn rejection_sentence(rejection: &JsonRejection) -> &'static str {
+    match rejection {
         JsonRejection::MissingJsonContentType(_) => {
             "Send the body as JSON, with Content-Type: application/json."
         }
@@ -215,7 +221,7 @@ fn unreadable_body(rejection: JsonRejection) -> ApiError {
             "That request body is missing a field, or one of them is the wrong type."
         }
         _ => "That request body could not be read.",
-    })
+    }
 }
 
 /// Tracks whether each subsystem required to answer real traffic has come up.
@@ -232,7 +238,7 @@ pub struct Readiness {
 }
 
 impl Readiness {
-    /// Storage is open and at schema v1.
+    /// Storage is open and at [`cogwheel_storage::SCHEMA_VERSION`].
     pub fn mark_storage_ready(&self) {
         self.storage.store(true, Ordering::Release);
     }
@@ -310,7 +316,7 @@ async fn ready(State(state): State<ServerState>) -> Response {
     (code, body).into_response()
 }
 
-/// The twenty JSON routes plus the two probes, in §3 order.
+/// The twenty-seven routes plus the two probes, in §3 order.
 pub fn api_router() -> Router<ServerState> {
     Router::new()
         .route("/health/live", get(live))
@@ -347,6 +353,14 @@ pub fn api_router() -> Router<ServerState> {
         )
         .route("/api/v1/check", get(api::check::check))
         .route("/api/v1/settings", get(api::settings::settings))
+        .route("/api/v1/ai", get(api::ai::status).put(api::ai::update))
+        .route("/api/v1/ai/models", get(api::ai::models))
+        .route("/api/v1/ai/test", post(api::ai::test))
+        .route(
+            "/api/v1/ai/verdicts",
+            get(api::ai::verdicts).delete(api::ai::clear),
+        )
+        .route("/api/v1/ai/verdicts/{domain}", delete(api::ai::forget))
 }
 
 /// The whole application: the API, the bundled web assets, compression and tracing.

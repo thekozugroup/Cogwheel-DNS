@@ -130,12 +130,21 @@ pub async fn list(
 
 /// Route 7: clear the log. The hourly rollups stay: they are counts, and every figure in the UI
 /// is read from them, so clearing browsing history must not zero the dashboard.
+///
+/// The AI list's browsing history goes with it (§12): which website each verdict was judged for,
+/// the ordinary ignores (a record of what the household's websites loaded, and nothing more), and
+/// the reviewer's in-memory site data. Its blocks and allows are policy, and stay.
 pub async fn clear(State(state): State<ServerState>) -> ApiResult<Cleared> {
     let deleted = state.storage.clear_query_log().await?;
     // The Overview's top-domain tables are scanned from the log, so a cleared log has to clear
     // the memo with it or the page shows domains that are no longer anywhere on the appliance.
     state.top_domains.clear();
-    tracing::info!(deleted, "query log cleared");
+    // Memory first: an answer in flight then lands with no site, whenever it lands.
+    state.ai.forget_sites();
+    state.storage.scrub_ai_sites(None).await?;
+    let forgotten = state.storage.forget_ai_negatives().await?;
+    state.ai.forget_known(&forgotten);
+    tracing::info!(deleted, ai_forgotten = forgotten.len(), "query log cleared");
     ok(Cleared { deleted })
 }
 

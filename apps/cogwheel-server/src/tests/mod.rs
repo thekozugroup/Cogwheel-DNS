@@ -1,7 +1,10 @@
 //! Tests for the server crate: the harness the handler tests run against, plus the few checks
 //! that are about the shape of the workspace rather than about a route.
 
+mod ai;
+mod ai_e2e;
 mod handlers;
+mod openrouter_stub;
 mod reads;
 
 use crate::api::{check, devices, lists, rules};
@@ -365,6 +368,7 @@ fn the_source_tree_keeps_the_shape_the_spec_fixes() {
     assert_eq!(
         modules,
         [
+            "ai.rs",
             "check.rs",
             "devices.rs",
             "lists.rs",
@@ -512,6 +516,14 @@ async fn the_router_answers_every_route_in_the_contract() {
             StatusCode::OK,
         ),
         ("GET", "/api/v1/settings", "", StatusCode::OK),
+        ("GET", "/api/v1/ai", "", StatusCode::OK),
+        ("PUT", "/api/v1/ai", "{}", StatusCode::OK),
+        // The harness points OpenRouter at a closed port.
+        ("GET", AI_MODELS, "", StatusCode::SERVICE_UNAVAILABLE),
+        ("POST", "/api/v1/ai/test", "{}", StatusCode::CONFLICT),
+        ("GET", "/api/v1/ai/verdicts", "", StatusCode::OK),
+        ("DELETE", "/api/v1/ai/verdicts", "", StatusCode::OK),
+        ("DELETE", AI_FORGET, "", StatusCode::NOT_FOUND),
         // An unmatched api path is a genuine 404, never the SPA shell.
         ("GET", "/api/v1/nonsense", "", StatusCode::NOT_FOUND),
     ];
@@ -530,6 +542,10 @@ async fn the_router_answers_every_route_in_the_contract() {
         assert_eq!(response.status(), expected, "{method} {uri}");
     }
 }
+
+/// Two of the contract's paths, named so that their cases each fit on one line.
+const AI_MODELS: &str = "/api/v1/ai/models";
+const AI_FORGET: &str = "/api/v1/ai/verdicts/ads.example.com";
 
 /// §3 promises `{"error": …}` for every failure, and a typo'd endpoint is a failure.
 ///
@@ -578,6 +594,8 @@ async fn malformed_input_answers_one_of_the_contract_errors() {
         ("POST", "/api/v1/devices", JSON, "{\"name\":\"Tablet\"}"),
         // The optional body of "refresh all" is still a body when it is sent.
         ("POST", "/api/v1/lists/refresh", JSON, "{\"id\":7}"),
+        ("PUT", "/api/v1/ai", JSON, "{\"enabled\":\"yes\"}"),
+        ("PUT", "/api/v1/ai", None, "{\"enabled\":true}"),
     ];
 
     for (method, uri, content_type, body) in cases {

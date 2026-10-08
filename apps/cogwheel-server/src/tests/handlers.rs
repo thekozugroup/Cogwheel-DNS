@@ -506,7 +506,13 @@ async fn the_catalogue_carries_the_presets_and_the_due_flag() {
 /// The precedence table of §6, step by step, through the route that reports it.
 #[tokio::test]
 async fn check_reports_which_step_decided() {
-    let harness = Harness::new().await;
+    // AI review on, so that the AI list applies: step 9.
+    let key = super::openrouter_stub::realistic_key();
+    let harness = Harness::with_ai(
+        super::openrouter_stub::keyed(&key),
+        &super::openrouter_stub::CONSENT,
+    )
+    .await;
     let state = harness.state.clone();
     // An ABP list, seeded into the cache and compiled the way a boot compiles it: a block, an
     // exception for a name the same list blocks, and a protected name the list is wrong about.
@@ -524,8 +530,30 @@ async fn check_reports_which_step_decided() {
     super::cache_body(
         &harness,
         &source.id,
-        "[Adblock Plus 2.0]\n! a comment\n||ads.example.com^\n||shop.example.com^\n@@||shop.example.com^\n||promo.example.com^\n||time.apple.com^\n",
+        "[Adblock Plus 2.0]\n! a comment\n||ads.example.com^\n||shop.example.com^\n@@||shop.example.com^\n||promo.example.com^\n||time.apple.com^\n||video.example.com^\n",
     );
+    // The AI list: a block no list makes, an allow over a list block (it cleared the override
+    // bars), and a block on a protected name, which never compiles.
+    let now = crate::state::now_secs();
+    let judged = |domain: &str, verdict: &str, lists: &str| cogwheel_storage::AiVerdict {
+        effect: (verdict == "allow").then(|| "breaks".to_owned()),
+        effect_confidence: (verdict == "allow").then_some(0.95),
+        lists: lists.to_owned(),
+        ..super::ai::row(domain, verdict, 0.95, now)
+    };
+    state
+        .ai
+        .settle(
+            &state.storage,
+            crate::ai::Cost::default(),
+            vec![
+                judged("beacon.example.net", "block", "nothing"),
+                judged("video.example.com", "allow", "block"),
+                judged("time.apple.com", "block", "nothing"),
+            ],
+        )
+        .await
+        .expect("commit AI verdicts");
     rebuild(&state, Rebuild::Lists)
         .await
         .expect("compile the cached body");
@@ -604,14 +632,28 @@ async fn check_reports_which_step_decided() {
     );
     assert_eq!(decided.scope, "household");
 
-    // 8. Protected names outrank the subscribed list that blocks them.
+    // 8. Protected names outrank the subscribed list that blocks them, and the AI list too.
     let decided = verdict(&harness, "time.apple.com", None).await;
     assert_eq!(
         (decided.verdict, decided.reason),
         ("allow", Reason::Protected)
     );
+    assert!(decided.ai.is_some_and(|ai| !ai.applied));
 
-    // 9. A list exception outranks the block in the same list, and names the list that
+    // 9. The AI list, exact names only: a block no list makes, for a device as for the household,
+    // and an allow that lifts a list's block. Neither names a list.
+    for client in [None, Some("192.168.1.20")] {
+        let decided = verdict(&harness, "beacon.example.net", client).await;
+        assert_eq!((decided.verdict, decided.reason), ("block", Reason::Ai));
+        assert_eq!(decided.list, None);
+        assert!(decided.ai.is_some_and(|ai| ai.applied));
+    }
+    let decided = verdict(&harness, "video.example.com", None).await;
+    assert_eq!((decided.verdict, decided.reason), ("allow", Reason::Ai));
+    let decided = verdict(&harness, "cdn.beacon.example.net", None).await;
+    assert_eq!(decided.reason, Reason::NoMatch, "never a suffix");
+
+    // 10. A list exception outranks the block in the same list, and names the list that
     // carried it — "why is this allowed?" is only useful when it says which list decided.
     let decided = verdict(&harness, "shop.example.com", None).await;
     assert_eq!(
@@ -620,12 +662,12 @@ async fn check_reports_which_step_decided() {
     );
     assert_eq!(decided.list.as_deref(), Some("ads"));
 
-    // 10. A list block, attributed to the list that carried it, and on a subdomain too.
+    // 11. A list block, attributed to the list that carried it, and on a subdomain too.
     let decided = verdict(&harness, "tracker.ads.example.com", None).await;
     assert_eq!((decided.verdict, decided.reason), ("block", Reason::List));
     assert_eq!(decided.list.as_deref(), Some("ads"));
 
-    // 11. The CNAME re-check is the one step this route cannot report: it reads the answer the
+    // 12. The CNAME re-check is the one step this route cannot report: it reads the answer the
     // upstream returned, which `/check` never asks for. It is covered end to end against a stub
     // upstream in cogwheel-dns-core, by `a_cname_to_a_blocked_target_is_blocked_with_reason_cname`
     // and `the_cname_recheck_runs_only_below_the_steps_above_it`.
@@ -638,7 +680,7 @@ async fn check_reports_which_step_decided() {
     );
     assert_eq!(decided.scope, "unfiltered");
 
-    // 12. Nothing matched.
+    // 13. Nothing matched.
     let decided = verdict(&harness, "example.org", None).await;
     assert_eq!(
         (decided.verdict, decided.reason),

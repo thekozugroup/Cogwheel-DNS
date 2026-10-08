@@ -25,3 +25,8 @@ cogwheel-dns-core = { path = "../../crates/cogwheel-dns-core" }
 cogwheel-lists = { path = "../../crates/cogwheel-lists" }
 cogwheel-policy = { path = "../../crates/cogwheel-policy" }
 cogwheel-storage = { path = "../../crates/cogwheel-storage" }
+
+[dev-dependencies]
+# Paused time, for the installer test that steps through its five-second debounce. A feature,
+# not a crate: the lockfile does not change.
+tokio = { workspace = true, features = ["test-util"] }

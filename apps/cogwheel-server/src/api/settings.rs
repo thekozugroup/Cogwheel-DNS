@@ -4,6 +4,7 @@
 //! actually running with" without an SSH session — including the two numbers that are otherwise
 //! invisible, the database size and the protected-suffix list the evaluator enforces.
 
+use crate::ai::AiSettingsView;
 use crate::http::{ApiResult, ok};
 use crate::state::ServerState;
 use axum::extract::State;
@@ -47,6 +48,8 @@ pub struct Settings {
     pub lists_dir: String,
     pub protected_suffixes: Vec<&'static str>,
     pub schema_version: i64,
+    /// AI review, read-only here like everything else: it is set up on Lists.
+    pub ai: AiSettingsView,
 }
 
 /// Route 22: the configuration this process is running with.
@@ -88,5 +91,6 @@ pub async fn settings(State(state): State<ServerState>) -> ApiResult<Settings> {
         lists_dir: state.lists_dir.display().to_string(),
         protected_suffixes: PROTECTED_SUFFIXES.to_vec(),
         schema_version: cogwheel_storage::SCHEMA_VERSION,
+        ai: state.ai.settings_view(),
     })
 }

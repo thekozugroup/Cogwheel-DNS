@@ -1,15 +1,17 @@
 //! "Why is this blocked?" (§3 route 21).
 //!
 //! Runs the real evaluator against the policy the resolver is using right now, for the scope the
-//! named client resolves under. It is the one place a person can see which of the twelve
+//! named client resolves under. It is the one place a person can see which of the thirteen
 //! precedence steps of §6 decided a name, which is the difference between trusting the appliance
-//! and guessing at it.
+//! and guessing at it. Whenever the AI list holds a row for the name, the answer carries it too,
+//! so "why?" can say what the model thought even where a rule or the lists decided.
 
+use crate::api::ai::{AiExplanation, explain};
 use crate::api::runtime::paused_until;
 use crate::http::{ApiError, ApiQuery, ApiResult, ok};
 use crate::state::ServerState;
 use axum::extract::State;
-use cogwheel_policy::{Reason, evaluate, is_domain_shaped, normalize_domain};
+use cogwheel_policy::{Action, Reason, evaluate, is_domain_shaped, normalize_domain};
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
@@ -33,6 +35,8 @@ pub struct CheckResult {
     /// Which set of settings answered: `household`, `device`, `unfiltered` or `paused`.
     pub scope: &'static str,
     pub device_name: Option<String>,
+    /// The AI list's row for the name, whether or not it decided.
+    pub ai: Option<AiExplanation>,
 }
 
 /// Route 21: evaluate one name as one client.
@@ -74,6 +78,7 @@ pub async fn check(
     // Pause is the first step of §6 and is not part of the policy, so it is answered here the
     // same way the hot path answers it: as the unfiltered scope, with the reason rewritten.
     if paused_until(&state).is_some() {
+        let ai = explain(&state, &policy, &domain, None).await?;
         return ok(CheckResult {
             domain,
             verdict: "allow",
@@ -81,6 +86,7 @@ pub async fn check(
             list: None,
             scope: "paused",
             device_name,
+            ai,
         });
     }
 
@@ -94,6 +100,14 @@ pub async fn check(
         .slot()
         .and_then(|slot| policy.index.name(slot))
         .map(|name| name.to_string());
+    let decided = (verdict.reason() == Reason::Ai).then(|| {
+        if verdict.is_blocked() {
+            Action::Block
+        } else {
+            Action::Allow
+        }
+    });
+    let ai = explain(&state, &policy, &domain, decided).await?;
 
     ok(CheckResult {
         domain,
@@ -110,5 +124,6 @@ pub async fn check(
             (false, true) => "household",
         },
         device_name,
+        ai,
     })
 }

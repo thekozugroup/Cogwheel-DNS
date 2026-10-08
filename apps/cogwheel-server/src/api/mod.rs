@@ -1,5 +1,6 @@
-//! The handlers behind the twenty JSON routes of §3, one module per resource.
+//! The handlers behind the twenty-seven JSON routes of §3, one module per resource.
 
+pub mod ai;
 pub mod check;
 pub mod devices;
 pub mod lists;

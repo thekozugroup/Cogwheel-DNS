@@ -298,6 +298,14 @@ async fn the_settings_dump_describes_this_process() {
     assert!(page.upstreams.iter().all(|upstream| !upstream.encrypted));
     assert!(page.db_size_bytes > 0);
     assert_eq!(page.lists_dir, harness.lists.path().display().to_string());
+    // AI review, read-only here: off, keyless, and pointed at the harness's closed port.
+    let ai = serde_json::to_value(&page.ai).expect("serialise");
+    assert_eq!(
+        ai,
+        serde_json::json!({"available": true, "unavailable_reason": null, "enabled": false,
+                           "key_source": "none", "model": null, "daily_limit_usd": 0.1,
+                           "zero_retention": true, "base_url": "http://127.0.0.1:1"})
+    );
 }
 
 // --------------------------------------------------------------------- policy rebuilds
