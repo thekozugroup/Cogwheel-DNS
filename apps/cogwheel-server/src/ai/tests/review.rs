@@ -46,13 +46,12 @@ pub(super) async fn rig_on(storage: Storage, config: AppConfig) -> Rig {
     }
 }
 
-/// Noon UTC, today by the wall clock. `AiState::settle` rolls today's spend over by the wall
-/// clock, so a synthetic clock that meets spend has to be on the same day.
-pub(super) fn noon() -> i64 {
+/// Noon UTC, today by the wall clock: the synthetic clock the pipeline and its spend run on.
+pub(crate) fn noon() -> i64 {
     i64::from(utc_day(now_secs())) * DAY + DAY / 2
 }
 
-pub(super) fn at(secs: i64) -> Now {
+pub(crate) fn at(secs: i64) -> Now {
     Now::from_secs(secs)
 }
 
@@ -61,11 +60,11 @@ pub(super) fn device(n: u32) -> IpAddr {
 }
 
 /// A third-party name with a site key of its own.
-pub(super) fn name(n: usize) -> String {
+pub(crate) fn name(n: usize) -> String {
     format!("t{n}.site{n}.com")
 }
 
-pub(super) fn names(range: std::ops::Range<usize>) -> Vec<String> {
+pub(crate) fn names(range: std::ops::Range<usize>) -> Vec<String> {
     range.map(name).collect()
 }
 
@@ -229,7 +228,7 @@ async fn the_daily_request_cap_pauses_until_utc_midnight() {
         overrides: 0,
     };
     rig.ai
-        .settle(&rig.storage, earlier, Vec::new())
+        .settle(&rig.storage, t, earlier, Vec::new())
         .await
         .expect("record earlier requests");
     visit(
@@ -249,7 +248,7 @@ async fn the_daily_request_cap_pauses_until_utc_midnight() {
         .pipeline
         .settle(at(t + 11), last.id, answered("ignore", Some(0.6), 0.00002));
     rig.ai
-        .settle(&rig.storage, settled.cost, settled.rows)
+        .settle(&rig.storage, t + 11, settled.cost, settled.rows)
         .await
         .expect("settle the 2,000th");
     assert_eq!(rig.ai.today(t + 11).requests, 2_000);
@@ -299,7 +298,7 @@ async fn the_daily_limit_pauses_until_utc_midnight() {
     // Room for one more reservation only if the one in flight did not count.
     let spent = rig.ai.daily_limit_micro() - reserve - reserve / 2;
     rig.ai
-        .settle(&rig.storage, Cost::request(spent), Vec::new())
+        .settle(&rig.storage, t + 11, Cost::request(spent), Vec::new())
         .await
         .expect("record the day's spend");
 
@@ -602,4 +601,120 @@ async fn an_aborted_request_is_charged_its_reservation() {
         .pipeline
         .settle(at(t + 12), start.id, Outcome::Withdrawn);
     assert_eq!(settled.cost, Cost::default());
+}
+
+/// The 2,000-a-day cap counts the requests in flight: with 1,999 settled and one on the wire, no
+/// second one starts, even though the gap and the in-flight bound would allow it.
+#[tokio::test]
+async fn the_daily_request_cap_counts_requests_in_flight() {
+    let mut rig = rig().await;
+    let t = noon();
+    let earlier = Cost {
+        micro_usd: 100,
+        requests: 1_999,
+        overrides: 0,
+    };
+    rig.ai
+        .settle(&rig.storage, t, earlier, Vec::new())
+        .await
+        .expect("record earlier requests");
+    visit(
+        &mut rig.pipeline,
+        &empty(),
+        device(1),
+        t,
+        "www.news-site.com",
+        &names(0..3),
+    );
+    rig.pipeline
+        .next_start(at(t + 10))
+        .expect("the 2,000th request");
+    assert!(
+        rig.pipeline.next_start(at(t + 11)).is_none(),
+        "a 2,001st would start while the 2,000th is on the wire"
+    );
+    assert_eq!(rig.ai.state(), State::PausedBudget);
+}
+
+/// A 200 that clears both override bars for a list-blocked name.
+fn overriding_allow() -> Outcome {
+    reply(json!({
+        "model": "typesafe/jev-1.13-20260917",
+        "answers": {
+            "role": { "type": "choice", "choice": "allow", "confidence": 0.99 },
+            "effect": { "type": "choice", "choice": "breaks", "confidence": 0.99 },
+        },
+        "usage": { "input_tokens": 480, "output_tokens": 70, "cost": 0.00002 },
+    }))
+}
+
+/// D6 through the pipeline: a hostile page whose list-blocked names all come back as confident
+/// allows whitelists three of them, not the batch; and the twentieth of the day is the last.
+#[tokio::test]
+async fn allows_over_a_list_are_capped_per_load_and_per_day() {
+    let mut rig = rig().await;
+    let t = noon();
+    let (members, later) = (names(0..5), names(10..12));
+    let all: Vec<&str> = members.iter().chain(&later).map(String::as_str).collect();
+    let listed = blocking(&all);
+    visit(
+        &mut rig.pipeline,
+        &listed,
+        device(1),
+        t,
+        "www.hostile-site.com",
+        &members,
+    );
+    let mut verdicts = Vec::new();
+    let mut clock = t + 10;
+    for _ in 0..5 {
+        let start = rig.pipeline.next_start(at(clock)).expect("a start");
+        let settled = rig.pipeline.settle(at(clock), start.id, overriding_allow());
+        verdicts.extend(
+            settled
+                .rows
+                .iter()
+                .map(|row| (row.verdict.clone(), row.why.clone())),
+        );
+        rig.ai
+            .settle(&rig.storage, clock, settled.cost, settled.rows)
+            .await
+            .expect("settle");
+        clock += 2;
+    }
+    let allows = verdicts.iter().filter(|(verdict, _)| verdict == "allow");
+    let limited = verdicts
+        .iter()
+        .filter(|(verdict, why)| verdict == "ignore" && why.as_deref() == Some("limit"));
+    assert_eq!((allows.count(), limited.count()), (3, 2), "three a load");
+    assert_eq!(rig.ai.today(clock).overrides, 3);
+
+    // Seventeen more earlier today: the day's twentieth was the last.
+    let earlier = Cost {
+        micro_usd: 0,
+        requests: 0,
+        overrides: 17,
+    };
+    rig.ai
+        .settle(&rig.storage, clock, earlier, Vec::new())
+        .await
+        .expect("earlier overrides");
+    visit(
+        &mut rig.pipeline,
+        &listed,
+        device(2),
+        clock,
+        "www.other-site.com",
+        &later,
+    );
+    let start = rig.pipeline.next_start(at(clock + 10)).expect("a start");
+    let settled = rig
+        .pipeline
+        .settle(at(clock + 10), start.id, overriding_allow());
+    let row = settled.rows.first().expect("a fresh row");
+    assert_eq!(
+        (row.verdict.as_str(), row.why.as_deref()),
+        ("ignore", Some("limit")),
+        "twenty a day"
+    );
 }

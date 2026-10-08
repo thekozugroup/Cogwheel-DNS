@@ -41,7 +41,7 @@ mod migrate;
 mod query_log;
 mod repo;
 
-pub use ai_verdicts::{AiCounts, AiPruned, AiVerdict, AiVerdictFilter, AiVerdictPage};
+pub use ai_verdicts::{AiCounts, AiDecision, AiPruned, AiVerdict, AiVerdictFilter, AiVerdictPage};
 pub use query_log::{
     DomainCount, PruneOutcome, QueryFilter, QueryLogEntry, QueryLogRow, QueryPage, TopDomains,
 };

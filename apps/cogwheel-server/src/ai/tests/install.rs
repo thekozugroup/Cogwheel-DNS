@@ -2,10 +2,12 @@
 //! reach the policy by every install that keeps the cache, and leave it with the table.
 
 use super::verdict;
-use super::{MODEL, env_key, fixture};
+use super::{KEY, MODEL};
 use crate::ai::{Cost, Known, ListState, apply_patch, install};
 use crate::policy_build::{Rebuild, rebuild};
 use crate::state::now_secs;
+use crate::tests::Harness;
+use crate::tests::openrouter_stub::keyed;
 use cogwheel_policy::Action;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -16,13 +18,14 @@ const DAY: i64 = 86_400;
 
 #[tokio::test]
 async fn every_install_that_keeps_the_cache_installs_the_committed_verdicts() {
-    let fixture = fixture(env_key, &[ON, MODEL]).await;
+    let fixture = Harness::with_ai(keyed(KEY), &[ON, MODEL]).await;
     let (state, ai) = (&fixture.state, &fixture.state.ai);
     assert!(ai.applying());
     let now = now_secs();
     // Committed the way the reviewer commits, and nobody told the installer.
     ai.settle(
         &state.storage,
+        now,
         Cost::default(),
         vec![
             verdict("ads.example.net", "block", now),
@@ -76,11 +79,12 @@ async fn every_install_that_keeps_the_cache_installs_the_committed_verdicts() {
 
 #[tokio::test]
 async fn the_installer_installs_what_was_committed_after_a_notify() {
-    let fixture = fixture(env_key, &[ON, MODEL]).await;
+    let fixture = Harness::with_ai(keyed(KEY), &[ON, MODEL]).await;
     let (state, ai) = (&fixture.state, &fixture.state.ai);
     let installer = tokio::spawn(install::task(state.clone()));
     ai.settle(
         &state.storage,
+        now_secs(),
         Cost::default(),
         vec![verdict("ads.example.net", "block", now_secs())],
     )
@@ -121,7 +125,7 @@ fn remembered(ai: &crate::ai::AiState, domain: &str, judged_at: i64) {
 
 #[tokio::test]
 async fn pruning_the_ai_list_shrinks_the_known_map_and_scrubs_old_sites() {
-    let fixture = fixture(env_key, &[ON, MODEL]).await;
+    let fixture = Harness::with_ai(keyed(KEY), &[ON, MODEL]).await;
     let (state, ai) = (&fixture.state, &fixture.state.ai);
     let now = now_secs();
     let rows = [
@@ -134,6 +138,7 @@ async fn pruning_the_ai_list_shrinks_the_known_map_and_scrubs_old_sites() {
     ];
     ai.settle(
         &state.storage,
+        now,
         Cost::default(),
         rows.iter()
             .map(|(domain, kind, at)| verdict(domain, kind, *at))

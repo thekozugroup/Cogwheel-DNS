@@ -130,9 +130,17 @@ impl AiState {
     /// a key change, a passing Test. Ends any terminal state and its sentence. The gate opens only
     /// if everything review needs is present and the reviewer is alive.
     pub fn resume(&self) {
+        self.resume_from(&[]);
+    }
+
+    /// [`Self::resume`], only from one of the states in `from` (any but `stopped` when empty), as
+    /// one step under the machine lock. The UTC rollover holds no lock a PUT takes, so a `PUT off`
+    /// that halts between its read of the state and its resume must leave review off. Returns
+    /// whether it resumed.
+    pub fn resume_from(&self, from: &[State]) -> bool {
         let mut machine = lock(&self.machine);
-        if machine.state == State::Stopped {
-            return;
+        if machine.state == State::Stopped || !(from.is_empty() || from.contains(&machine.state)) {
+            return false;
         }
         self.generation.fetch_add(1, Ordering::AcqRel);
         machine.state = State::Reviewing;
@@ -140,6 +148,7 @@ impl AiState {
         self.regate(&machine);
         drop(machine);
         self.halted.notify_one();
+        true
     }
 
     /// Open or close the gate to match the state, under the machine lock.

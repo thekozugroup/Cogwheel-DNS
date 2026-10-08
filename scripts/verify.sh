@@ -166,6 +166,7 @@ if [ "$WEB" = yes ]; then
         step web-deps npm --prefix apps/cogwheel-web ci
     fi
     step web-lint  npm --prefix apps/cogwheel-web run lint
+    step web-test  npm --prefix apps/cogwheel-web test
     step web-build npm --prefix apps/cogwheel-web run build
 else
     skip web '--no-web'

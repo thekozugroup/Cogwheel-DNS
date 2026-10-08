@@ -45,6 +45,25 @@ async fn the_gate_opens_only_while_reviewing_with_a_live_reviewer() {
     drop(alive);
 }
 
+/// The UTC rollover resumes only from the pause it is ending, in one step under the machine lock:
+/// a Turn off that halted after it read the state stays off, and the gate stays closed.
+#[tokio::test]
+async fn a_rollover_resume_never_reopens_review_turned_off_meanwhile() {
+    let ai = reviewing().await;
+    let _alive = ai.reviewer_alive();
+    let paused = [State::PausedBudget, State::OutOfCredit];
+    ai.halt(Halt::Budget);
+    assert!(ai.resume_from(&paused), "a new day ends the pause");
+    assert!(ai.tap().is_some());
+
+    ai.halt(Halt::Budget);
+    // `PUT {enabled:false}` halts before it writes the switch.
+    ai.halt(Halt::Off);
+    assert!(!ai.resume_from(&paused));
+    assert_eq!(ai.machine_state(), State::Off);
+    assert!(ai.tap().is_none());
+}
+
 #[tokio::test]
 async fn halting_closes_the_gate_and_aborts_in_flight_requests() {
     let ai = reviewing().await;

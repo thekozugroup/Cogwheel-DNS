@@ -33,7 +33,7 @@ async fn reviewing() -> Harness {
 async fn commit(state: &ServerState, rows: Vec<AiVerdict>) {
     state
         .ai
-        .settle(&state.storage, Cost::default(), rows)
+        .settle(&state.storage, now_secs(), Cost::default(), rows)
         .await
         .expect("committed");
 }
@@ -320,7 +320,7 @@ async fn clearing_the_log_forgets_sites_and_negative_verdicts() {
     assert_eq!(
         state.ai.sites_epoch(),
         epoch + 1,
-        "an answer in flight lands with no site"
+        "the reviewer is told to forget its sites (an answer in flight: candidates.rs)"
     );
     pipeline.catch_up();
     assert_eq!((pipeline.waiting(), pipeline.bursts()), (0, 0));
@@ -542,6 +542,24 @@ async fn verdict_rows_report_applied_and_outranked_from_the_live_policy() {
     .await;
     assert_eq!(parsed(&text)["data"]["total"], 3);
 
+    // Stored and clearing its bar, but not installed yet: pending, never "not sure enough".
+    commit(
+        state,
+        vec![row("fresh.example.net", "block", 0.95, now - 6)],
+    )
+    .await;
+    let (_, text) = call(state, "GET", "/api/v1/ai/verdicts?q=fresh", None).await;
+    assert_eq!(
+        rows(&text),
+        [at(
+            "fresh.example.net",
+            &no,
+            json!("pending"),
+            null.clone(),
+            "nothing"
+        )]
+    );
+
     // Off: nothing applies, and each row says why.
     let (status, _) = call(state, "PUT", "/api/v1/ai", Some(r#"{"enabled":false}"#)).await;
     assert_eq!(status, StatusCode::OK);
@@ -569,8 +587,8 @@ async fn verdict_rows_report_applied_and_outranked_from_the_live_policy() {
 
 /// D9, the Devices trap: rows committed with no notify reach the policy through a device rebuild,
 /// which keeps the cache, so it must take the invalidating path for exactly those names. That the
-/// names' cached answers are then dropped is dns-core's
-/// `an_invalidating_swap_drops_only_the_changed_names`: this crate cannot plant a cache entry.
+/// names' cached answers are then dropped, over real DNS, is
+/// `isolation::an_ai_install_drops_the_cached_answers_of_the_names_it_changed`.
 #[tokio::test]
 async fn a_devices_rebuild_installs_committed_verdicts_without_a_notify() {
     let harness = reviewing().await;

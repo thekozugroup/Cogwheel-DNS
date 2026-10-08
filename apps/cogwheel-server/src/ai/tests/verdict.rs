@@ -3,12 +3,12 @@
 
 use crate::ai::prompt::{self, Answer, Choice, Outcome};
 use crate::ai::verdict::{
-    ALLOWS_PER_DAY, ALLOWS_PER_LOAD, Allowed, Decision, Judgement, Recheck, Why, compile, contest,
+    self, ALLOWS_PER_DAY, ALLOWS_PER_LOAD, Allowed, Decision, Judgement, Recheck, Why, contest,
     decide, recheck_due, review_after,
 };
 use crate::ai::{DAY, Known, ListState};
-use cogwheel_policy::{Action, ListIndex, Pattern};
-use cogwheel_storage::AiVerdict;
+use cogwheel_policy::{Action, AiList, ListIndex, Pattern};
+use cogwheel_storage::{AiDecision, AiVerdict};
 
 /// 2026-10-08 00:00 UTC.
 const T: i64 = 1_791_417_600;
@@ -52,6 +52,12 @@ fn with_effect(mut row: AiVerdict, effect: &str, confidence: Option<f64>) -> AiV
     row.effect = Some(effect.to_owned());
     row.effect_confidence = confidence;
     row
+}
+
+/// `verdict::compile` over what a policy build reads of `rows`.
+fn compile(rows: &[AiVerdict], index: &ListIndex, mask: u64) -> AiList {
+    let decisions: Vec<AiDecision> = rows.iter().map(AiDecision::from).collect();
+    verdict::compile(&decisions, index, mask)
 }
 
 fn compiled(rows: &[AiVerdict], index: &ListIndex, mask: u64) -> Vec<(String, Action)> {

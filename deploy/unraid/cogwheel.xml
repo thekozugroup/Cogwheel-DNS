@@ -90,7 +90,10 @@
     If AI review is set up in the web UI, its OpenRouter key is saved beside
     the database as openrouter.key, readable only by Cogwheel, and a backup of
     the folder carries it. Put the key in the OpenRouter API key field below
-    instead if your backups should not.
+    instead if your backups should not. Setting that field does not delete a
+    key already saved in the UI: remove it there first (Remove key...), or
+    delete openrouter.key from the folder, or it stays in backups and is used
+    again if the field is ever emptied.
 
     UPDATES: the Docker tab's update check works against the :latest tag above.
     An upgrade that changes the database schema migrates it in place and leaves
@@ -151,7 +154,7 @@
           Description="AI review is off until someone in the household sets it up on the Lists page with their own OpenRouter key; while it is on, the names your household's websites load are sent to OpenRouter to be judged. false switches it off for this appliance: the reviewer never starts, the AI list is not applied, and it stays off until someone turns it on again.">true</Config>
 
   <Config Name="OpenRouter API key" Target="COGWHEEL_AI__OPENROUTER_API_KEY" Default="" Mode="" Type="Variable" Display="advanced" Required="false" Mask="true"
-          Description="Optional. A key for AI review. Set here, it wins over one saved in the web UI, which then cannot change it; left empty, a key saved in the UI is kept in the data volume as openrouter.key, readable only by Cogwheel. Give the key its own credit limit at OpenRouter."></Config>
+          Description="Optional. A key for AI review. Set here, it wins over one saved in the web UI, which then cannot change it, and it does not delete that one: remove a saved key in the UI first, or delete openrouter.key, or it stays in backups and comes back if this is emptied. Left empty, a key saved in the UI is kept in the data volume as openrouter.key, readable only by Cogwheel. Give the key its own credit limit at OpenRouter."></Config>
 
   <Config Name="Profile" Target="COGWHEEL_PROFILE" Default="home" Mode="" Type="Variable" Display="advanced" Required="false" Mask="false"
           Description="home is the household default. dev binds loopback on high ports and is for local hacking only.">home</Config>

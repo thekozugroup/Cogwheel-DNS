@@ -76,9 +76,16 @@ OpenRouter key and turns it on:
 - **What leaves.** For each name a website loads that has not been judged recently, one request
   to OpenRouter — and through it to the company that runs the chosen model — carrying that name,
   the website the load is taken to be for, and up to 24 other names from the same load. Never a
-  client address, a device name, a query type or a timestamp, and never a name a household rule
-  covers, a local or private name, the appliance's own names, or a name with an embedded address
-  or an identifier-like label. Every request asks for providers that do not collect data, and by
+  client address, the name a device has in Cogwheel, a query type or a timestamp, and never a name
+  a household rule covers, the appliance's own names, a name under a private-use or router suffix
+  (`.lan`, `.local`, `.home.arpa`, `fritz.box`, `speedport.ip` and the rest of
+  `site::PRIVATE_SUFFIXES`), a name under a wildcard-address, tailnet or dynamic-DNS service
+  (`nip.io`, `sslip.io`, `ts.net`, `duckdns.org`, `synology.me` and the rest of
+  `site::HOME_SUFFIXES`), or a name with a dotted or dashed IPv4 address or an identifier-like
+  label in it. A name under any other domain is sent whether or not it resolved, so a household
+  domain Cogwheel cannot recognise — a router's own local domain, a split-horizon name, a
+  dynamic-DNS name of another provider — goes out unless a household rule covers it; give it one
+  (allow is the usual). Every request asks for providers that do not collect data, and by
   default for zero data retention; Cogwheel cannot check that they comply. Turning review off, or
   removing the key, closes the send gate before the request that did it answers.
 - **The key.** It lives in `openrouter.key` beside the database, mode 0600 — never in SQLite, so
@@ -119,7 +126,9 @@ OpenRouter key and turns it on:
   household's websites loaded and, until `HISTORY_DAYS` passes, which website loaded them. Like
   the query log, anyone who can reach the control plane can read it. Rows that only left a name
   to the lists live `min(30 days, HISTORY_DAYS)`, blocks and allows up to 90 days, and Clear log
-  forgets the websites and the left-to-the-lists rows with the log.
+  forgets the websites and the left-to-the-lists rows with the log. The exception is a name two
+  websites disagreed about (contested): it is kept like a block or allow, up to 90 days after it
+  was judged, and Clear log removes its websites but not the row.
 
 ## In scope, and genuinely wanted
 

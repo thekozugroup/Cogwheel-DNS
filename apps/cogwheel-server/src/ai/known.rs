@@ -1,15 +1,18 @@
 //! The `known` map (§6.6): every name already judged, so a repeat visit sends nothing.
 //!
 //! It supplies the "first seen" notion dns-core lacks, and it is what decides whether a name is
-//! due to be judged again. Loaded from the table when the process starts, then kept in step by
-//! every path that writes the table: the reviewer's answers, Forget, Clear, Clear log and the
-//! prune. Capped, because the table it mirrors is: eviction only costs a possible re-judgement,
-//! since an evicted row is still stored and still compiled.
+//! due to be judged again. Loaded from the table while review is on (at boot, or when it is
+//! turned on), then kept in step by every path that writes the table: the reviewer's answers,
+//! Forget, Clear, Clear log and the prune. Off, nothing reads it, so it is not kept: ADR 0002
+//! lets RSS grow by nothing while review is off. Capped, because the table it mirrors is:
+//! eviction only costs a possible re-judgement, since an evicted row is still stored and still
+//! compiled.
 
 use super::{AiState, KNOWN_CAP, ListState, site};
 use crate::state::lock;
 use cogwheel_policy::Action;
-use cogwheel_storage::AiVerdict;
+use cogwheel_storage::{AiVerdict, Storage, StorageError};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -60,8 +63,40 @@ impl AiState {
     }
 
     /// How many names are known.
+    #[cfg(test)]
     pub fn known_len(&self) -> usize {
         lock(&self.known).len()
+    }
+
+    /// Fill the map from the table: at boot while review is on, and when it is turned on. Read
+    /// again if a Forget, a Clear, a prune or Clear log changed the map meanwhile, so a name
+    /// forgotten while the table was being read does not come back.
+    ///
+    /// # Errors
+    ///
+    /// The table could not be read; the map is left as it was.
+    pub async fn load_known(&self, storage: &Storage) -> Result<(), StorageError> {
+        loop {
+            let epoch = self.known_epoch.load(Ordering::Acquire);
+            let rows = storage.list_ai_verdicts().await?;
+            let mut loaded = HashMap::with_capacity(rows.len());
+            for row in &rows {
+                loaded.insert(Arc::from(row.domain.as_str()), Known::of(row));
+            }
+            drop(rows);
+            let mut known = lock(&self.known);
+            if self.known_epoch.load(Ordering::Acquire) == epoch {
+                *known = loaded;
+                return Ok(());
+            }
+        }
+    }
+
+    /// Review was turned off: nothing reads the map until it is turned on again, which reloads it.
+    pub fn unload_known(&self) {
+        let mut known = lock(&self.known);
+        *known = HashMap::new();
+        self.known_epoch.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Record a judged name. Past [`KNOWN_CAP`] the oldest tenth by `judged_at` is evicted, in
@@ -87,20 +122,26 @@ impl AiState {
         for domain in domains {
             known.remove(domain.as_str());
         }
+        self.known_epoch.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Forget every name (Clear AI list).
     pub fn forget_all_known(&self) {
-        lock(&self.known).clear();
+        let mut known = lock(&self.known);
+        known.clear();
+        self.known_epoch.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Clear log: forget which website every name was judged for, and bump the sites epoch, which
     /// tells the reviewer to empty its opened sites, bursts, queue, pending set and site caps, and
     /// an answer already in flight to land with no site. The gate stays open: review stays on.
     pub fn forget_sites(&self) {
-        for entry in lock(&self.known).values_mut() {
+        let mut known = lock(&self.known);
+        for entry in known.values_mut() {
             entry.site_key = None;
         }
+        self.known_epoch.fetch_add(1, Ordering::AcqRel);
+        drop(known);
         self.sites_epoch.fetch_add(1, Ordering::AcqRel);
         self.halted.notify_one();
     }

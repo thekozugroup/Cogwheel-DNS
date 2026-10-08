@@ -169,9 +169,11 @@ pub struct DnsRuntime {
     /// Unix seconds; 0 when not paused.
     pause_until: AtomicU64,
     cache: WireCache,
-    /// Bumped by every swap that drops cached answers, so a miss decided under the policy being
+    /// Bumped by every swap that empties the cache, so a miss decided under the policy being
     /// replaced can tell that its answer came back too late to be cached.
     cache_epoch: AtomicU64,
+    /// The same for an AI-list install, which changes only some names' verdicts (`invalidate.rs`).
+    ai_epoch: AtomicU64,
     miss_permits: Arc<Semaphore>,
     log_tx: mpsc::Sender<LogEntry>,
     stats: DnsRuntimeStats,
@@ -258,6 +260,8 @@ struct Admitted {
     policy: Arc<Policy>,
     /// The cache epoch `policy` was read under.
     epoch: u64,
+    /// The AI epoch `policy` was read under.
+    ai_epoch: u64,
     client: IpAddr,
     /// Whether the scope was reached through the household pause rather than a bypassed device;
     /// the two share [`SCOPE_UNFILTERED`] and only the log tells them apart.
@@ -371,6 +375,7 @@ impl DnsRuntime {
             pause_until: AtomicU64::new(0),
             cache: WireCache::new(CACHE_CAPACITY),
             cache_epoch: AtomicU64::new(0),
+            ai_epoch: AtomicU64::new(0),
             miss_permits: Arc::new(Semaphore::new(MISS_PERMITS)),
             log_tx,
             stats: DnsRuntimeStats::default(),
@@ -510,9 +515,10 @@ impl DnsRuntime {
         let qtype = u16::from(query.query_type());
         let edns_max = usize::from(request.max_payload());
 
-        // Epoch before policy: a swap that lands between the two is then seen as a new epoch
+        // Epochs before policy: a swap that lands between the two is then seen as a new epoch
         // with the new policy, never as the old policy under the new epoch.
         let epoch = self.cache_epoch.load(Ordering::Acquire);
+        let ai_epoch = self.ai_epoch.load(Ordering::Acquire);
         let policy = read_recover(&self.policy).clone();
         let now = unix_now();
         let pause_until = self.pause_until.load(Ordering::Relaxed);
@@ -537,6 +543,7 @@ impl DnsRuntime {
             },
             policy,
             epoch,
+            ai_epoch,
             client,
             paused,
             edns_max,
@@ -670,14 +677,16 @@ impl DnsRuntime {
     }
 
     /// Cache an answer, unless the policy it was decided under was replaced while it was in
-    /// flight.
+    /// flight: by a swap that emptied the cache, or by an AI install that changed this name.
     ///
     /// Checked after the insert rather than before so there is no window: a swap that bumps
-    /// the epoch after this check runs its sweep after this insert, and the sweep takes the
+    /// an epoch after this check runs its sweep after this insert, and the sweep takes the
     /// entry; a swap that bumped before is seen here, and the entry is taken back.
     fn insert(&self, admitted: &Admitted, wire: Arc<CachedWire>) {
         self.cache.insert(admitted.key.clone(), wire);
-        if self.cache_epoch.load(Ordering::Acquire) != admitted.epoch {
+        if self.cache_epoch.load(Ordering::Acquire) != admitted.epoch
+            || self.ai_verdict_moved(admitted)
+        {
             self.cache.invalidate(&admitted.key);
         }
     }

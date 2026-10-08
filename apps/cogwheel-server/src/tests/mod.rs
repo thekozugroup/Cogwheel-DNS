@@ -4,7 +4,7 @@
 mod ai;
 mod ai_e2e;
 mod handlers;
-mod openrouter_stub;
+pub(crate) mod openrouter_stub;
 mod reads;
 
 use crate::api::{check, devices, lists, rules};
@@ -32,7 +32,7 @@ use tokio::sync::{mpsc, watch};
 pub struct TempDir(PathBuf);
 
 impl TempDir {
-    fn new(label: &str) -> Self {
+    pub(crate) fn new(label: &str) -> Self {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let path = std::env::temp_dir().join(format!(
             "cogwheel-{label}-{}-{}",

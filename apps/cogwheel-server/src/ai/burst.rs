@@ -147,6 +147,7 @@ impl Bursts {
         self.open.len() + self.closed.len()
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

@@ -105,17 +105,19 @@ async fn settling_writes_the_spend_with_the_rows_and_survives_a_restart() {
 
     ai.settle(
         &storage,
+        now,
         Cost::request(56),
         vec![verdict("ads.example.net", "block", now)],
     )
     .await
     .expect("settled with a row");
     // A billed response with nothing to store, and an aborted request: spend, no rows.
-    ai.settle(&storage, Cost::request(112), Vec::new())
+    ai.settle(&storage, now, Cost::request(112), Vec::new())
         .await
         .expect("settled without rows");
     ai.settle(
         &storage,
+        now,
         Cost {
             micro_usd: 0,
             requests: 0,
@@ -156,7 +158,10 @@ async fn concurrent_settlements_never_store_an_older_total() {
     for micro in 1..=40u64 {
         let ai = Arc::clone(&ai);
         let storage = storage.clone();
-        settling.spawn(async move { ai.settle(&storage, Cost::request(micro), Vec::new()).await });
+        settling.spawn(async move {
+            ai.settle(&storage, now_secs(), Cost::request(micro), Vec::new())
+                .await
+        });
     }
     while let Some(done) = settling.join_next().await {
         done.expect("joined").expect("settled");

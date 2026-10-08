@@ -41,6 +41,9 @@ pub struct Settlement {
     pub rows: Vec<AiVerdict>,
     /// A cross-site re-check, applied to the row as it is stored when it is written.
     pub recheck: Option<Rechecked>,
+    /// The Clear log epoch the question was asked under: if Clear log runs before this is
+    /// written, it is written with no website (`AiState::commit`).
+    pub sites_epoch: u64,
 }
 
 /// A cross-site re-check's result (§6.10).
@@ -68,7 +71,8 @@ impl Pipeline {
             return Settlement::default();
         };
         let current = job.generation == self.ai.generation();
-        let settlement = match outcome {
+        let sites_epoch = job.sites_epoch;
+        let mut settlement = match outcome {
             Outcome::Withdrawn => {
                 self.release(&job);
                 Settlement::default()
@@ -90,6 +94,7 @@ impl Pipeline {
             }
             Outcome::Answered(reply) => self.answered(now, &job, reply, current),
         };
+        settlement.sites_epoch = sites_epoch;
         self.report();
         settlement
     }
@@ -162,7 +167,7 @@ impl Pipeline {
                     model: parsed.model_or(&job.model),
                     judged_at: now.secs(),
                 }
-                .row(self.ai.history_days());
+                .row(self.ai.history_days);
                 let known = Known {
                     verdict: applied(decision),
                     lists: job.lists,

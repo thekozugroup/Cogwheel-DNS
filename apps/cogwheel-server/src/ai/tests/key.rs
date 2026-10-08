@@ -1,11 +1,10 @@
 //! `key.rs`: the key's shape, where it lives, and how it is saved and removed (§8).
 
-use super::Scratch;
+use super::KEY;
 use crate::ai::key::{self, Saved, SecretKey};
 use crate::config::{AppConfig, Profile};
+use crate::tests::TempDir;
 use std::path::{Path, PathBuf};
-
-const KEY: &str = "sk-or-v1-fake-test-key-qwzx-mnbv-plok-ijuh-ygtf-rdes";
 
 fn config_at(database_url: &str) -> AppConfig {
     let mut config = AppConfig::for_profile(Profile::Home);
@@ -13,7 +12,7 @@ fn config_at(database_url: &str) -> AppConfig {
     config
 }
 
-fn saved_key(dir: &Scratch) -> PathBuf {
+fn saved_key(dir: &TempDir) -> PathBuf {
     dir.path().join("openrouter.key")
 }
 
@@ -31,7 +30,7 @@ fn mode(path: &Path) -> u32 {
 #[test]
 fn a_saved_key_file_is_owner_only() {
     use std::os::unix::fs::PermissionsExt;
-    let dir = Scratch::new("key-mode");
+    let dir = TempDir::new("key-mode");
     let path = saved_key(&dir);
     let secret = SecretKey::from_ui(KEY).expect("a key");
     key::store(&path, &secret).expect("the key saves");
@@ -61,7 +60,7 @@ fn a_saved_key_file_is_owner_only() {
 #[cfg(unix)]
 #[test]
 fn removing_the_key_zeroes_and_unlinks_the_file() {
-    let dir = Scratch::new("key-remove");
+    let dir = TempDir::new("key-remove");
     let path = saved_key(&dir);
     key::store(&path, &SecretKey::from_ui(KEY).expect("a key")).expect("the key saves");
     // A second name for the same inode sees what `remove` wrote before it unlinked.
@@ -135,7 +134,7 @@ fn a_key_of_the_wrong_shape_is_refused() {
     assert_eq!(format!("{secret:?}"), "SecretKey(..)");
 
     // A saved file that is not a key is reported unreadable and left where it is.
-    let dir = Scratch::new("key-shape");
+    let dir = TempDir::new("key-shape");
     let path = saved_key(&dir);
     std::fs::write(&path, "not a key").expect("plant a bad key file");
     assert!(matches!(key::load(&path), Saved::Unreadable));

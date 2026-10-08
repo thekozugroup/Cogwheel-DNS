@@ -375,6 +375,8 @@ type AiSettings = {
   daily_limit_usd: number;
   zero_retention: boolean;
   base_url: string;
+  /** The host names are sent to, as `AiStatus.sends_to` names it. */
+  sends_to: string;
 };
 
 export type AiModel = {
@@ -428,7 +430,8 @@ export type AiVerdictRow = {
   lists: AiListState;
   lists_now: AiListState;
   applied: boolean;
-  not_applied: "off" | "lists_changed" | "lists_agree" | "below_bar" | null;
+  /** `pending`: it clears its bar and the next install, seconds away, applies it. */
+  not_applied: "off" | "lists_changed" | "lists_agree" | "below_bar" | "pending" | null;
   outranked_by: "household_rule" | "protected" | null;
   /** The website it was judged for; null once that history is scrubbed. */
   site: string | null;

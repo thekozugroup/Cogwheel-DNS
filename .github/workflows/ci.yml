@@ -108,6 +108,10 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      # The pure modules in src/lib under Node's own runner: no package added.
+      - name: Unit tests
+        run: npm test
+
       # `npm run build` is `tsc --noEmit -p tsconfig.app.json && vite build`,
       # so this one step covers both typecheck and bundle.
       - name: Typecheck and build

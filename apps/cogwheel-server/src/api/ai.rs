@@ -6,7 +6,9 @@
 //! carry the key read it through [`QuietJson`], which never logs a rejection. None of these
 //! answers contains any part of the key: no type here has a field that could hold it.
 
-use crate::ai::{self, AiPatch, AiStatus, AiTestInput, AiTestResult, ListState, ModelsView};
+use crate::ai::{
+    self, AiPatch, AiStatus, AiTestInput, AiTestResult, ListState, ModelsView, verdict,
+};
 use crate::api::Deleted;
 use crate::api::queries::Cleared;
 use crate::config::AppConfig;
@@ -289,6 +291,8 @@ pub enum NotApplied {
     ListsAgree,
     /// It no longer clears its bar against the lists as they are.
     BelowBar,
+    /// It clears its bar and is waiting for the next install, a few seconds after it was stored.
+    Pending,
 }
 
 /// What outranks the AI list on a name.
@@ -365,6 +369,17 @@ impl VerdictRow {
                 Some(NotApplied::ListsChanged)
             }
             Some(Action::Block) if lists_now == ListState::Block => Some(NotApplied::ListsAgree),
+            // Committed, and clearing its bar: the installer has not put it in yet.
+            Some(action)
+                if !is_protected(&row.domain)
+                    && verdict::clears(
+                        action,
+                        lists_now,
+                        (row.confidence, row.effect.as_deref(), row.effect_confidence),
+                    ) =>
+            {
+                Some(NotApplied::Pending)
+            }
             Some(_) => Some(NotApplied::BelowBar),
         };
         let outranked_by = if policy.household.get_at_boundaries(&row.domain).is_some() {
@@ -415,6 +430,9 @@ pub async fn clear(
     guard_local(&headers, &uri, &state.config)?;
     let deleted = state.storage.clear_ai_verdicts().await?;
     state.ai.forget_all_known();
+    // Told first: if this request is dropped, or the install fails, the installer withdraws the
+    // rows within seconds rather than leaving them applying (§5.3).
+    state.ai.notify_install();
     rebuild(&state, Rebuild::Ai).await?;
     tracing::info!(deleted, "AI list cleared");
     ok(Cleared { deleted })
@@ -441,6 +459,8 @@ pub async fn forget(
         .await?
         .ok_or_else(|| ApiError::not_found("No AI verdict for that name."))?;
     state.ai.forget_known(std::slice::from_ref(&domain));
+    // As in Clear: told first, so a dropped request or a failed install still withdraws it.
+    state.ai.notify_install();
     rebuild(&state, Rebuild::Ai).await?;
     ok(Deleted { deleted: true })
 }

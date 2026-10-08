@@ -6,18 +6,21 @@ use crate::ai::{Cost, State, TAP_DEPTH};
 use crate::policy_build::{Rebuild, rebuild};
 use crate::state::{ServerState, now_secs};
 use crate::tests::Harness;
+use crate::tests::ai::row;
 use crate::tests::openrouter_stub::{
     CONSENT, Canned, DECISIONS, JEV, call, capture, keyed, parsed, realistic_key, windows,
 };
 use axum::http::StatusCode;
-use cogwheel_dns_core::{DnsRuntimeConfig, LogEntry};
+use cogwheel_dns_core::{DnsRuntime, DnsRuntimeConfig, LogEntry, build_resolver};
 use cogwheel_policy::{Reason, Verdict};
 use serde_json::json;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
-use tokio::sync::{mpsc, watch};
+use tokio::net::UdpSocket;
+use tokio::sync::{mpsc, oneshot, watch};
+use tokio::task::JoinHandle;
 
 // --------------------------------------------------------------------- DNS never waits
 
@@ -49,6 +52,52 @@ fn free_port() -> SocketAddr {
     unreachable!("no free loopback port")
 }
 
+/// DNS listeners serving `state`'s runtime, ready. A port is only free a moment ago, and the
+/// tests in this binary bind loopback ports in parallel, so one taken in between is retried on
+/// another; one that never binds fails here, with the bind error, not later as a timeout.
+async fn serve_dns(state: &ServerState) -> (SocketAddr, watch::Sender<bool>, JoinHandle<()>) {
+    let mut failures = Vec::new();
+    for _ in 0..5 {
+        let address = free_port();
+        let (stop, shutdown) = watch::channel(false);
+        let (ready, bound) = oneshot::channel();
+        let dns = tokio::spawn(Arc::clone(&state.runtime).serve_with_ready_signal(
+            DnsRuntimeConfig {
+                udp_bind_addr: address,
+                tcp_bind_addr: address,
+            },
+            move || {
+                let _ = ready.send(());
+            },
+            shutdown,
+        ));
+        if bound.await.is_ok() {
+            let dns = tokio::spawn(async move {
+                dns.await.expect("joined").expect("served");
+            });
+            return (address, stop, dns);
+        }
+        failures.push(format!("{:?}", dns.await.expect("joined")));
+    }
+    unreachable!("the DNS listeners never bound: {failures:?}")
+}
+
+/// Ask `name` once and return the reply.
+async fn ask(socket: &UdpSocket, address: SocketAddr, id: u16, name: &str) -> Vec<u8> {
+    socket
+        .send_to(&query(id, name), address)
+        .await
+        .expect("send");
+    let mut buffer = [0u8; 512];
+    let (size, _) = tokio::time::timeout(Duration::from_secs(5), socket.recv_from(&mut buffer))
+        .await
+        .expect("answered")
+        .expect("received");
+    let reply = buffer[..size].to_vec();
+    assert_eq!(reply[..2], id.to_be_bytes(), "the answer to this question");
+    reply
+}
+
 /// With a request to OpenRouter hanging, DNS still answers from the policy (the AI list
 /// included) and the appliance reports ready: the model is never on the DNS path.
 #[tokio::test]
@@ -60,37 +109,18 @@ async fn dns_and_readiness_ignore_an_unreachable_openrouter() {
         .ai
         .settle(
             &state.storage,
+            now_secs(),
             Cost::default(),
-            vec![crate::tests::ai::row(
-                "ads.example.net",
-                "block",
-                0.95,
-                now_secs(),
-            )],
+            vec![row("ads.example.net", "block", 0.95, now_secs())],
         )
         .await
         .expect("committed");
     rebuild(&state, Rebuild::Ai).await.expect("installed");
 
-    let address = free_port();
-    let (stop, shutdown) = watch::channel(false);
+    let (address, stop, dns) = serve_dns(&state).await;
     state.readiness.mark_storage_ready();
     state.readiness.mark_policy_ready();
-    let readiness = Arc::clone(&state.readiness);
-    let dns = tokio::spawn(Arc::clone(&state.runtime).serve_with_ready_signal(
-        DnsRuntimeConfig {
-            udp_bind_addr: address,
-            tcp_bind_addr: address,
-        },
-        move || readiness.mark_dns_ready(),
-        shutdown,
-    ));
-    for _ in 0..400 {
-        if state.readiness.is_ready() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    state.readiness.mark_dns_ready();
 
     let t = noon();
     rig.visit(t, &names(0..2));
@@ -100,20 +130,11 @@ async fn dns_and_readiness_ignore_an_unreachable_openrouter() {
         "a request is hanging at OpenRouter"
     );
 
-    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+    let socket = UdpSocket::bind("127.0.0.1:0")
         .await
         .expect("a client socket");
-    socket
-        .send_to(&query(0x2b2b, "ads.example.net"), address)
-        .await
-        .expect("send");
-    let mut buffer = [0u8; 512];
-    let (size, _) = tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut buffer))
-        .await
-        .expect("answered while OpenRouter hangs")
-        .expect("received");
-    let reply = &buffer[..size];
-    assert_eq!(reply[..2], [0x2b, 0x2b]);
+    // Answered while OpenRouter hangs.
+    let reply = ask(&socket, address, 0x2b2b, "ads.example.net").await;
     assert_eq!(reply[3] & 0x0f, 0, "NOERROR");
     assert!(
         reply.ends_with(&[0, 0, 0, 0]),
@@ -132,12 +153,94 @@ async fn dns_and_readiness_ignore_an_unreachable_openrouter() {
     rig.stub.release();
     rig.settle(t + 11).await;
     let _ = stop.send(true);
-    if tokio::time::timeout(Duration::from_secs(5), dns)
+    tokio::time::timeout(Duration::from_secs(5), dns)
         .await
-        .is_err()
-    {
-        unreachable!("the DNS listeners did not stop");
+        .expect("the DNS listeners stopped")
+        .expect("and stopped cleanly");
+}
+
+/// §5.2: an AI install drops the cached answers of exactly the names it changed. A name the AI
+/// list stops blocking is not answered 0.0.0.0 from the cache, and one it still blocks keeps its
+/// cached answer.
+#[tokio::test]
+async fn an_ai_install_drops_the_cached_answers_of_the_names_it_changed() {
+    let harness = Harness::with_ai(keyed(&realistic_key()), &CONSENT).await;
+    // An upstream on a closed loopback port: nothing here leaves the machine.
+    let resolver = build_resolver(&["127.0.0.1:1".to_owned()]).expect("a resolver");
+    let (runtime, _log_rx) = DnsRuntime::new(resolver, harness.state.runtime.current_policy());
+    let state = ServerState {
+        runtime,
+        ..harness.state.clone()
+    };
+    let now = now_secs();
+    let rows = ["ads.example.net", "more.example.net"].map(|name| row(name, "block", 0.95, now));
+    state
+        .ai
+        .settle(&state.storage, now, Cost::default(), rows.to_vec())
+        .await
+        .expect("committed");
+    rebuild(&state, Rebuild::Ai).await.expect("installed");
+
+    let (address, stop, dns) = serve_dns(&state).await;
+    let socket = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("a client socket");
+    let hits = || state.runtime.snapshot().cache_hits_total;
+    for (id, name) in [(1, "ads.example.net"), (2, "more.example.net")] {
+        let reply = ask(&socket, address, id, name).await;
+        assert!(reply.ends_with(&[0, 0, 0, 0]), "{name} blocked, and cached");
     }
+
+    // Forgotten behind the route's back: the install drops that name's answer, and only that.
+    state
+        .storage
+        .delete_ai_verdict("ads.example.net".to_owned())
+        .await
+        .expect("forget");
+    state.ai.forget_known(&["ads.example.net".to_owned()]);
+    let stats = rebuild(&state, Rebuild::Ai).await.expect("reinstalled");
+    assert_eq!((stats.ai_changed, stats.ai_dropped), (1, 1));
+    let before = hits();
+    let reply = ask(&socket, address, 3, "more.example.net").await;
+    assert!(reply.ends_with(&[0, 0, 0, 0]));
+    assert_eq!(hits(), before + 1, "the unchanged name kept its answer");
+
+    // And through the route: Forget has dropped the answer by the time it responds.
+    let (status, text) = call(
+        &state,
+        "DELETE",
+        "/api/v1/ai/verdicts/more.example.net",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let before = hits();
+    socket
+        .send_to(&query(4, "more.example.net"), address)
+        .await
+        .expect("send");
+    // A cache hit answers at once; this one waits on the closed upstream instead.
+    let mut buffer = [0u8; 512];
+    if let Ok(received) =
+        tokio::time::timeout(Duration::from_millis(500), socket.recv_from(&mut buffer)).await
+    {
+        let (size, _) = received.expect("received");
+        assert!(
+            !buffer[..size].ends_with(&[0, 0, 0, 0]),
+            "no longer blocked"
+        );
+    }
+    assert_eq!(
+        hits(),
+        before,
+        "asked upstream, not answered from the cache"
+    );
+
+    let _ = stop.send(true);
+    tokio::time::timeout(Duration::from_secs(5), dns)
+        .await
+        .expect("the DNS listeners stopped")
+        .expect("and stopped cleanly");
 }
 
 // --------------------------------------------------------------------- logs

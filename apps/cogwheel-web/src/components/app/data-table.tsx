@@ -549,6 +549,7 @@ function renderStacked<Row>({
 export function NarrowRow({
   title,
   titleClassName,
+  wrapTitle = false,
   lead,
   meta,
   metaClassName,
@@ -558,10 +559,17 @@ export function NarrowRow({
   openLabel,
   className,
 }: {
-  /** The identifying value: a device name, a domain. Truncates. */
+  /** The identifying value: a device name, a domain. Truncates unless `wrapTitle`. */
   title: React.ReactNode;
   /** e.g. `font-mono` for a domain. */
   titleClassName?: string;
+  /**
+   * Wrap the title instead of truncating it, for rows told apart by a long
+   * name: on a phone every AI list row read "checkout-assets.…", and no
+   * tooltip reaches the rest. Pair it with <DomainName> so a domain breaks at
+   * its dots. `truncate` cannot be undone through `titleClassName`.
+   */
+  wrapTitle?: boolean;
   /** A leading status dot on the first line. */
   lead?: React.ReactNode;
   /** The first line's trailing value: a time, an address. Never truncates. */
@@ -590,12 +598,18 @@ export function NarrowRow({
     >
       <div className="min-w-0 flex-1">
         <p className="flex items-baseline gap-2">
-          {lead ? <span className="flex shrink-0 self-center">{lead}</span> : null}
+          {lead ? (
+            // On a wrapped title the dot stays on its first line, not between two.
+            <span className={cn("flex shrink-0", wrapTitle ? "h-5 items-center self-start" : "self-center")}>
+              {lead}
+            </span>
+          ) : null}
           {onOpen ? (
             <button
               aria-label={openLabel}
               className={cn(
-                "min-w-0 flex-1 truncate rounded-sm text-left font-medium text-foreground text-sm",
+                "min-w-0 flex-1 rounded-sm text-left font-medium text-foreground text-sm",
+                wrapTitle ? "[overflow-wrap:anywhere]" : "truncate",
                 "underline-offset-4 hover:underline",
                 titleClassName,
               )}
@@ -605,7 +619,15 @@ export function NarrowRow({
               {title}
             </button>
           ) : (
-            <span className={cn("min-w-0 flex-1 truncate text-foreground text-sm", titleClassName)}>{title}</span>
+            <span
+              className={cn(
+                "min-w-0 flex-1 text-foreground text-sm",
+                wrapTitle ? "[overflow-wrap:anywhere]" : "truncate",
+                titleClassName,
+              )}
+            >
+              {title}
+            </span>
           )}
           {meta ? (
             <span className={cn("tabular shrink-0 text-muted-foreground text-xs", metaClassName)}>{meta}</span>

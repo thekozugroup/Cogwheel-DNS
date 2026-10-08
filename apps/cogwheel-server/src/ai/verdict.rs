@@ -6,15 +6,15 @@
 //! another website's context is stored as `ignore`, which never compiles: the lists decide.
 //!
 //! [`compile`] is the single place stored rows become policy, and it applies every bar again
-//! against the *live* lists: a verdict judged against an older list state stops applying when the
-//! lists change under it, and the name is judged again on its next sighting.
+//! against the *live* lists: a verdict judged against an older list state applies only while it
+//! clears the bar for the lists as they are now, and the name is judged again on its next sighting.
 
 use super::prompt::{Answer, Choice, Outcome};
 use super::{DAY, Known, ListState};
 use cogwheel_policy::{
     Action, AiList, ListIndex, is_domain_shaped, is_protected, normalize_domain,
 };
-use cogwheel_storage::AiVerdict;
+use cogwheel_storage::{AiDecision, AiVerdict};
 
 /// A plain block, with no list involved. A wrong one is visible (Activity says "AI list") and one
 /// click to undo.
@@ -267,7 +267,7 @@ impl Recheck {
 
 /// The AI list a policy build installs: every stored block or allow that still clears its bar
 /// against the household's lists as they are now (`index` under `all_mask`).
-pub fn compile(rows: &[AiVerdict], index: &ListIndex, all_mask: u64) -> AiList {
+pub fn compile(rows: &[AiDecision], index: &ListIndex, all_mask: u64) -> AiList {
     rows.iter()
         .filter_map(|row| {
             let action = match row.verdict.as_str() {
@@ -279,30 +279,38 @@ pub fn compile(rows: &[AiVerdict], index: &ListIndex, all_mask: u64) -> AiList {
             if !is_domain_shaped(&domain) || is_protected(&domain) {
                 return None;
             }
-            let confidence = row
-                .confidence
-                .filter(|confidence| confidence.is_finite())
-                .unwrap_or(0.0);
-            let effect = |want: &str| {
-                row.effect.as_deref() == Some(want)
-                    && row.effect_confidence.is_some_and(|confidence| {
-                        confidence.is_finite() && confidence >= EFFECT_BAR
-                    })
-            };
-            let keep = match (action, ListState::of(index, all_mask, &domain)) {
-                (Action::Block, ListState::Nothing) => confidence >= BLOCK_BAR,
-                // The lists already block it, and keep the attribution.
-                (Action::Block, ListState::Block) => false,
-                (Action::Block, ListState::Exception) => {
-                    confidence >= OVERRIDE_BAR && effect("works")
-                }
-                (Action::Allow, ListState::Block) => confidence >= OVERRIDE_BAR && effect("breaks"),
-                // Nothing to whitelist; and never turn a list exception (which skips the CNAME
-                // re-check) into an AI allow (which runs it). That inversion is how a
-                // "whitelist" could block.
-                (Action::Allow, ListState::Nothing | ListState::Exception) => false,
-            };
-            keep.then_some((domain, action))
+            let lists = ListState::of(index, all_mask, &domain);
+            let bars = (row.confidence, row.effect.as_deref(), row.effect_confidence);
+            clears(action, lists, bars).then_some((domain, action))
         })
         .collect()
+}
+
+/// Whether a stored block or allow clears its bar against `lists`, the household's lists on the
+/// name as they are now: the one test [`compile`] applies, and what route 27 asks of a verdict it
+/// has not installed yet. `bars` is the row's confidence, effect and effect confidence.
+pub fn clears(
+    action: Action,
+    lists: ListState,
+    bars: (Option<f64>, Option<&str>, Option<f64>),
+) -> bool {
+    let (confidence, effect, effect_confidence) = bars;
+    let confidence = confidence
+        .filter(|confidence| confidence.is_finite())
+        .unwrap_or(0.0);
+    let effect = |want: &str| {
+        effect == Some(want)
+            && effect_confidence
+                .is_some_and(|confidence| confidence.is_finite() && confidence >= EFFECT_BAR)
+    };
+    match (action, lists) {
+        (Action::Block, ListState::Nothing) => confidence >= BLOCK_BAR,
+        // The lists already block it, and keep the attribution.
+        (Action::Block, ListState::Block) => false,
+        (Action::Block, ListState::Exception) => confidence >= OVERRIDE_BAR && effect("works"),
+        (Action::Allow, ListState::Block) => confidence >= OVERRIDE_BAR && effect("breaks"),
+        // Nothing to whitelist; and never turn a list exception (which skips the CNAME re-check)
+        // into an AI allow (which runs it). That inversion is how a "whitelist" could block.
+        (Action::Allow, ListState::Nothing | ListState::Exception) => false,
+    }
 }

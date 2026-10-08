@@ -5,8 +5,8 @@
 #![allow(dead_code, unused_imports)]
 
 pub use cogwheel_storage::{
-    AiCounts, AiPruned, AiVerdict, AiVerdictFilter, DeviceUpsert, FetchStatus, NewSource,
-    QueryFilter, QueryLogEntry, SCHEMA_VERSION, SourcePatch, Storage, StorageError,
+    AiCounts, AiDecision, AiPruned, AiVerdict, AiVerdictFilter, DeviceUpsert, FetchStatus,
+    NewSource, QueryFilter, QueryLogEntry, SCHEMA_VERSION, SourcePatch, Storage, StorageError,
 };
 pub use rusqlite::Connection;
 use std::path::{Path, PathBuf};

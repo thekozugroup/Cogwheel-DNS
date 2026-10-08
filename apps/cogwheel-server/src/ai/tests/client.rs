@@ -1,11 +1,11 @@
 //! `client.rs`: classification, `Retry-After`, backoff, and the client itself (D19).
 
-use super::stub::{Reply, Stub};
 use crate::ai::client::{
     self, BACKOFF_CAP, Class, KeyCheck, Reply as Answer, backoff, classify, parse_key_info,
     retry_after,
 };
 use crate::ai::key::SecretKey;
+use crate::tests::openrouter_stub::{Canned, LISTING, Stub, ZDR_LISTING};
 use std::collections::HashSet;
 use std::time::Duration;
 
@@ -57,7 +57,7 @@ async fn retry_classification_covers_every_documented_status() {
     assert_eq!(classify(402, chatty, None).limit_source, None);
 
     // A timeout: a listener that accepts and never answers, and a client that gives up first.
-    let hung = Stub::serve(vec![Reply::silent(Duration::from_secs(5))]);
+    let hung = Stub::serve(vec![("", Canned::json(200, "{}").held())]);
     let impatient = reqwest::Client::builder()
         .timeout(Duration::from_millis(200))
         .no_proxy()
@@ -130,11 +130,11 @@ fn backoff_is_capped_with_jitter() {
 
 #[tokio::test]
 async fn the_client_follows_no_redirect() {
-    let elsewhere = Stub::serve(vec![Reply::json(200, "{}")]);
+    let elsewhere = Stub::serve(vec![("", Canned::json(200, "{}"))]);
     let location = format!("{}api/alpha/decisions", elsewhere.base);
     let openrouter = Stub::serve(vec![
-        Reply::json(307, "").with_header("Location", &location),
-        Reply::json(308, "").with_header("Location", &location),
+        ("", Canned::json(307, "").header("Location", &location)),
+        ("", Canned::json(308, "").header("Location", &location)),
     ]);
     let ours = client::build(&openrouter.base, None).expect("the client builds");
 
@@ -164,7 +164,7 @@ async fn a_loopback_base_bypasses_the_proxy_variables() {
     let proxy = || reqwest::Proxy::all("http://127.0.0.1:1").expect("a proxy url");
 
     // A client that does use it cannot reach the stub at all, so the test is not vacuous.
-    let stub = Stub::serve(vec![Reply::json(200, r#"{"answers":{}}"#)]);
+    let stub = Stub::serve(vec![("", Canned::json(200, r#"{"answers":{}}"#))]);
     let proxied = reqwest::Client::builder()
         .proxy(proxy())
         .build()
@@ -192,7 +192,7 @@ async fn a_loopback_base_bypasses_the_proxy_variables() {
 
 #[tokio::test]
 async fn a_decision_request_carries_the_key_only_in_its_header() {
-    let stub = Stub::serve(vec![Reply::json(200, r#"{"answers":{}}"#)]);
+    let stub = Stub::serve(vec![("", Canned::json(200, r#"{"answers":{}}"#))]);
     let ours = client::build(&stub.base, None).expect("the client builds");
     client::decide(&ours, &stub.base, &key(), br#"{"model":"m"}"#.to_vec())
         .await
@@ -219,11 +219,39 @@ async fn a_decision_request_carries_the_key_only_in_its_header() {
 #[tokio::test]
 async fn an_oversized_answer_is_unreadable() {
     let huge = format!(r#"{{"pad":"{}"}}"#, "x".repeat(client::BODY_CAP));
-    let stub = Stub::serve(vec![Reply::json(200, huge)]);
+    let stub = Stub::serve(vec![("", Canned::json(200, huge))]);
     let ours = client::build(&stub.base, None).expect("the client builds");
     let answer = client::decide(&ours, &stub.base, &key(), b"{}".to_vec())
         .await
         .expect("a 200 is a reply, however large");
+    assert!(matches!(answer, Answer::Unreadable));
+}
+
+/// The cap holds for a body with no `Content-Length` to refuse it by, counted as it streams in;
+/// and a body that breaks off part-way is unreadable, not a short answer.
+#[tokio::test]
+async fn a_streamed_answer_is_capped_and_a_broken_one_is_unreadable() {
+    let decide = |stub: Stub| async move {
+        let ours = client::build(&stub.base, None).expect("the client builds");
+        client::decide(&ours, &stub.base, &key(), b"{}".to_vec())
+            .await
+            .expect("a 200 is a reply, however it reads")
+    };
+    let huge = "x".repeat(client::BODY_CAP + 1);
+    let answer = decide(Stub::serve(vec![("", Canned::json(200, huge).chunked())])).await;
+    assert!(matches!(answer, Answer::Unreadable));
+
+    let small = r#"{"answers":{}}"#;
+    let answer = decide(Stub::serve(vec![("", Canned::json(200, small).chunked())])).await;
+    assert!(
+        matches!(answer, Answer::Body(body) if body == small.as_bytes()),
+        "chunked is read whole"
+    );
+    let answer = decide(Stub::serve(vec![(
+        "",
+        Canned::json(200, small).truncated(),
+    )]))
+    .await;
     assert!(matches!(answer, Answer::Unreadable));
 }
 
@@ -261,7 +289,7 @@ async fn the_key_check_maps_every_status() {
         (503, Err(KeyCheck::Unreachable)),
     ];
     for (status, expected) in cases {
-        let stub = Stub::serve(vec![Reply::json(status, "{}")]);
+        let stub = Stub::serve(vec![("", Canned::json(status, "{}"))]);
         let ours = client::build(&stub.base, None).expect("the client builds");
         assert_eq!(
             client::key_info(&ours, &stub.base, &key()).await,
@@ -273,7 +301,7 @@ async fn the_key_check_maps_every_status() {
         assert_eq!(sent[0].target, "/api/v1/key");
     }
     // An unreadable 200, and nothing listening.
-    let stub = Stub::serve(vec![Reply::json(200, "not json")]);
+    let stub = Stub::serve(vec![("", Canned::json(200, "not json"))]);
     let ours = client::build(&stub.base, None).expect("the client builds");
     assert_eq!(
         client::key_info(&ours, &stub.base, &key()).await,
@@ -297,8 +325,8 @@ async fn the_model_listings_merge_by_price_and_zero_retention() {
         {"id":"respan/span-01","name":"Span","pricing":{"prompt":"-1"}}]}"#;
     let zero_retention = r#"{"data":[{"id":"typesafe/jev-1.13"},{"id":"cloudflare/clef"}]}"#;
     let stub = Stub::serve(vec![
-        Reply::json(200, all),
-        Reply::json(200, zero_retention),
+        (ZDR_LISTING, Canned::json(200, zero_retention)),
+        (LISTING, Canned::json(200, all)),
     ]);
     let ours = client::build(&stub.base, None).expect("the client builds");
     let list = client::models(&ours, &stub.base, 1_791_400_000)
@@ -337,7 +365,10 @@ async fn the_model_listings_merge_by_price_and_zero_retention() {
     );
 
     // Only the zero-retention listing fails: every model's mark is unknown, not false.
-    let stub = Stub::serve(vec![Reply::json(200, all), Reply::json(500, "")]);
+    let stub = Stub::serve(vec![
+        (ZDR_LISTING, Canned::json(500, "")),
+        (LISTING, Canned::json(200, all)),
+    ]);
     let ours = client::build(&stub.base, None).expect("the client builds");
     let list = client::models(&ours, &stub.base, 0)
         .await
@@ -349,7 +380,7 @@ async fn the_model_listings_merge_by_price_and_zero_retention() {
     );
 
     // The main one fails: no list.
-    let stub = Stub::serve(vec![Reply::json(503, "")]);
+    let stub = Stub::serve(vec![("", Canned::json(503, ""))]);
     let ours = client::build(&stub.base, None).expect("the client builds");
     assert!(client::models(&ours, &stub.base, 0).await.is_none());
 }

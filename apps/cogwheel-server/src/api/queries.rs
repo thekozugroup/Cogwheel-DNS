@@ -139,12 +139,9 @@ pub async fn clear(State(state): State<ServerState>) -> ApiResult<Cleared> {
     // The Overview's top-domain tables are scanned from the log, so a cleared log has to clear
     // the memo with it or the page shows domains that are no longer anywhere on the appliance.
     state.top_domains.clear();
-    // Memory first: an answer in flight then lands with no site, whenever it lands.
-    state.ai.forget_sites();
-    state.storage.scrub_ai_sites(None).await?;
-    let forgotten = state.storage.forget_ai_negatives().await?;
-    state.ai.forget_known(&forgotten);
-    tracing::info!(deleted, ai_forgotten = forgotten.len(), "query log cleared");
+    // Under the lock settlements are written under: one made before this lands with no site.
+    let forgotten = state.ai.forget_history(&state.storage).await?;
+    tracing::info!(deleted, ai_forgotten = forgotten, "query log cleared");
     ok(Cleared { deleted })
 }
 

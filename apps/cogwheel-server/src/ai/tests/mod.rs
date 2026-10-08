@@ -1,10 +1,6 @@
 //! Unit tests for AI review, one file per module (§16). All offline: the client tests talk to a
 //! listener on loopback, and nothing here can reach OpenRouter.
 
-// The parent allows unused imports while the routes it re-exports for are not written yet; that
-// allowance is not for the tests.
-#![warn(unused_imports)]
-
 mod burst;
 mod candidates;
 mod client;
@@ -14,23 +10,20 @@ mod key;
 mod load;
 mod patch;
 mod prompt;
-mod review;
+pub(crate) mod review;
 mod site;
 mod spend;
-mod stub;
 mod test_run;
 mod verdict;
 mod worker;
 
-use crate::ai::key::SecretKey;
-use crate::ai::{AiState, Seen};
+use crate::ai::{AiPatch, AiState, Seen};
 use crate::config::{AppConfig, Profile};
-use crate::state::ServerState;
-use crate::tests::Harness;
+use crate::http::ApiError;
+use crate::tests::openrouter_stub::keyed;
+use axum::http::StatusCode;
 use cogwheel_storage::{AiVerdict, Storage};
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
 use tokio::sync::mpsc;
 
 /// A recognisable fake. Not OpenRouter's real shape (`sk-or-v1-` and 64 hex digits), which secret
@@ -46,8 +39,9 @@ pub fn config() -> AppConfig {
     config
 }
 
+/// `config` with [`KEY`] in `COGWHEEL_AI__OPENROUTER_API_KEY`.
 pub fn with_env_key(mut config: AppConfig) -> AppConfig {
-    config.ai_api_key = SecretKey::from_env(KEY).expect("a header-safe key");
+    keyed(KEY)(&mut config);
     config
 }
 
@@ -95,71 +89,21 @@ pub fn verdict(domain: &str, verdict: &str, judged_at: i64) -> AiVerdict {
 /// A model a household picked, as `settings` stores it.
 pub const MODEL: (&str, &str) = ("ai_model", "typesafe/jev-1.13");
 
-/// A harness whose AI review was loaded from a configuration of the test's choosing, over
-/// settings stored first, the way a restart would load them.
-pub struct Fixture {
-    _harness: Harness,
-    pub state: ServerState,
-    _tap: mpsc::Receiver<Seen>,
+/// A `PUT /api/v1/ai` body.
+pub fn patch(body: &str) -> AiPatch {
+    serde_json::from_str(body).expect("a patch body")
 }
 
-pub async fn fixture(
-    configure: impl FnOnce(&mut AppConfig),
-    stored: &[(&'static str, &str)],
-) -> Fixture {
-    let harness = Harness::new().await;
-    for (key, value) in stored {
-        harness
-            .state
-            .storage
-            .set_setting(key, Some((*value).to_owned()))
-            .await
-            .expect("store a setting");
-    }
-    let mut config = (*harness.state.config).clone();
-    configure(&mut config);
-    let (ai, tap) = AiState::load(&config, &harness.state.storage)
-        .await
-        .expect("AI review's state loads");
-    let state = ServerState {
-        config: Arc::new(config),
-        ai,
-        ..harness.state.clone()
-    };
-    Fixture {
-        _harness: harness,
-        state,
-        _tap: tap,
-    }
+/// `error` is this status with exactly this sentence.
+pub fn refused(error: &ApiError, status: StatusCode, sentence: &str) {
+    assert_eq!(
+        (error.status(), error.to_string().as_str()),
+        (status, sentence)
+    );
 }
 
-/// `COGWHEEL_AI__OPENROUTER_API_KEY`, set.
-pub fn env_key(config: &mut AppConfig) {
-    config.ai_api_key = SecretKey::from_env(KEY).expect("a header-safe key");
-}
-
-/// A directory under the system temp dir, removed when the test that made it ends.
-pub struct Scratch(PathBuf);
-
-impl Scratch {
-    pub fn new(label: &str) -> Self {
-        static COUNTER: AtomicU32 = AtomicU32::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "cogwheel-ai-{label}-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&path).expect("create a scratch directory");
-        Self(path)
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+/// A passing Test's answer.
+pub const ANSWER: &str = r#"{"id":"gen-dec-1","model":"typesafe/jev-1.13-20260917","provider":"TypeSafe",
+  "answers":{"role":{"type":"choice","choice":"block","confidence":0.91},
+             "effect":{"type":"choice","choice":"works","confidence":0.94}},
+  "usage":{"input_tokens":510,"output_tokens":70,"cost":0.0000213}}"#;

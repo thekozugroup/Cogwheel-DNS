@@ -74,6 +74,12 @@ impl<T: Clone> Cached<T> {
             .map(|(_, value)| value.clone())
     }
 
+    /// The stored value however old, for what a stale value still answers (a model's name). Gone
+    /// after [`Self::clear`].
+    pub fn last(&self) -> Option<T> {
+        lock(&self.slot).as_ref().map(|(_, value)| value.clone())
+    }
+
     /// Store a freshly computed value.
     pub fn set(&self, value: T) {
         *lock(&self.slot) = Some((Instant::now(), value));

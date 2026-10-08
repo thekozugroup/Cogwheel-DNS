@@ -11,17 +11,6 @@
 //! This module is the state all of that shares: the gate and its generation, the state machine,
 //! the settings and the key, today's spend, and the `known` map of names already judged.
 
-// The AI routes (`api/ai.rs`) land after this, and they are what call most of what is left, through
-// the re-exports below. Expected rather than allowed, so this goes the moment nothing is unused.
-#![cfg_attr(
-    not(test),
-    expect(dead_code, unused_imports, reason = "the AI routes land next")
-)]
-#![cfg_attr(
-    test,
-    allow(dead_code, unused_imports, reason = "the AI routes land next")
-)]
-
 pub mod burst;
 pub mod client;
 mod gate;
@@ -38,16 +27,19 @@ mod spend;
 mod status;
 mod test_run;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 pub mod verdict;
 pub mod worker;
 
+#[cfg(test)]
+pub use gate::AliveGuard;
+pub use gate::Halt;
 use gate::Machine;
-pub use gate::{AliveGuard, Halt};
 pub use known::Known;
-pub use models::{ModelView, ModelsView, model_list};
+pub use models::{ModelsView, model_list};
 pub use patch::apply_patch;
 pub use settings::{AiPatch, AiTestInput};
+#[cfg(test)]
 pub use spend::Cost;
 pub use status::{AiOverview, AiSettingsView, AiStatus};
 pub use test_run::{AiTestResult, run_test};
@@ -289,13 +281,18 @@ pub struct AiState {
     pub writes: tokio::sync::Mutex<()>,
     pub counters: AiCounters,
 
+    /// Why AI review cannot run here, if it cannot.
     unavailable: Option<Unavailable>,
+    /// `COGWHEEL_RETENTION__HISTORY_DAYS`, for an ordinary ignore's `review_after`.
     history_days: u32,
+    /// Whether to ask for zero-retention providers only.
     zero_retention: bool,
+    /// Where OpenRouter is (`COGWHEEL_AI__BASE_URL`).
     base: Url,
     key_path: Option<PathBuf>,
-    /// The appliance's own names (§6.3 rule 8): never sent.
+    /// The appliance's own names, normalised (§6.3 rule 8): never sent.
     own_names: Vec<String>,
+    /// The only client that talks to OpenRouter.
     client: reqwest::Client,
 
     // The send gate (D18).
@@ -324,12 +321,15 @@ pub struct AiState {
     tested: Mutex<HashMap<String, bool>>,
     passed: Mutex<Option<Passed>>,
     last_test: Mutex<Option<Instant>>,
+    /// The model list, reused for an hour; its last value, however old, names the model.
     models: Cached<Arc<ModelList>>,
-    /// The last list fetched, however old, for the model's display name.
-    last_models: RwLock<Option<Arc<ModelList>>>,
     models_fetch: tokio::sync::Mutex<()>,
 
+    /// Empty while review is off.
     known: Mutex<HashMap<Arc<str>, Known>>,
+    /// Bumped by every change to `known` but the reviewer's own, so a reload can tell that it
+    /// raced one.
+    known_epoch: AtomicU64,
     /// Bumped by Clear log: an answer in flight under an older one is stored with no site.
     sites_epoch: AtomicU64,
     last_review_at: AtomicI64,
@@ -345,10 +345,11 @@ impl std::fmt::Debug for AiState {
 }
 
 impl AiState {
-    /// Builds the OpenRouter client (D19), and loads the settings, today's spend, the key and the
-    /// known map. Whenever AI review is unavailable it deletes `ai_enabled` first, so review never
-    /// resumes without a fresh Turn on, and `HISTORY_DAYS=0` empties the AI list (D13). `main`
-    /// calls it before the boot rebuild, so that rebuild already sees the result.
+    /// Builds the OpenRouter client (D19), and loads the settings, today's spend, the key and,
+    /// while review is on, the known map. Whenever AI review is unavailable it deletes
+    /// `ai_enabled` first, so review never resumes without a fresh Turn on, and `HISTORY_DAYS=0`
+    /// empties the AI list (D13). `main` calls it before the boot rebuild, so that rebuild already
+    /// sees the result.
     ///
     /// # Errors
     ///
@@ -384,7 +385,20 @@ impl AiState {
 
         let key_path = key::key_path(config);
         let (slot, key_error) = match (&config.ai_api_key, &key_path) {
-            (Some(key), _) => (Some((key.clone(), KeySource::Environment)), None),
+            (Some(key), saved) => {
+                // The environment wins, and does not delete a key saved earlier in the UI: it
+                // stays on disk and in backups, and is used again if the variable is unset.
+                if let Some(path) = saved
+                    && tokio::fs::try_exists(path).await.unwrap_or(false)
+                {
+                    tracing::warn!(
+                        path = %path.display(),
+                        "COGWHEEL_AI__OPENROUTER_API_KEY is set, and a key saved earlier in the UI \
+                         is still in this file; delete it if it should not be kept"
+                    );
+                }
+                (Some((key.clone(), KeySource::Environment)), None)
+            }
             (None, Some(path)) => {
                 let path = path.clone();
                 match tokio::task::spawn_blocking(move || key::load(&path))
@@ -399,15 +413,9 @@ impl AiState {
             (None, None) => (None, None),
         };
 
-        let known = storage
-            .list_ai_verdicts()
-            .await
-            .context("read the AI list")?
-            .iter()
-            .map(|row| (Arc::from(row.domain.as_str()), Known::of(row)))
-            .collect();
-
-        let ready = unavailable.is_none() && settings.enabled && settings.model.is_some();
+        // Off, or unavailable, nothing reads the known map: it is read when review is turned on.
+        let on = unavailable.is_none() && settings.enabled;
+        let ready = on && settings.model.is_some();
         let state = match (ready, slot.is_some()) {
             (_, false) => State::NoKey,
             (true, true) => State::Reviewing,
@@ -460,12 +468,15 @@ impl AiState {
             passed: Mutex::new(None),
             last_test: Mutex::new(None),
             models: Cached::new(MODEL_LIST_TTL),
-            last_models: RwLock::new(None),
             models_fetch: tokio::sync::Mutex::new(()),
-            known: Mutex::new(known),
+            known: Mutex::new(HashMap::new()),
+            known_epoch: AtomicU64::new(0),
             sites_epoch: AtomicU64::new(0),
             last_review_at: AtomicI64::new(0),
         };
+        if on {
+            ai.load_known(storage).await.context("read the AI list")?;
+        }
         Ok((Arc::new(ai), tap_rx))
     }
 
@@ -482,26 +493,6 @@ impl AiState {
     }
 
     // ----------------------------------------------------------------- what the reviewer reads
-
-    /// The only client that talks to OpenRouter.
-    pub fn client(&self) -> &reqwest::Client {
-        &self.client
-    }
-
-    /// Where OpenRouter is (`COGWHEEL_AI__BASE_URL`).
-    pub fn base(&self) -> &Url {
-        &self.base
-    }
-
-    /// Why AI review cannot run here, if it cannot.
-    pub fn unavailable(&self) -> Option<Unavailable> {
-        self.unavailable
-    }
-
-    /// The appliance's own names, normalised: never sent (§6.3 rule 8).
-    pub fn own_names(&self) -> &[String] {
-        &self.own_names
-    }
 
     /// The key in force, if any.
     pub fn key(&self) -> Option<KeySlot> {
@@ -520,16 +511,6 @@ impl AiState {
     /// Today's spend limit, in micro-USD.
     pub fn daily_limit_micro(&self) -> u64 {
         u64::from(read(&self.settings).daily_limit_cents) * 10_000
-    }
-
-    /// Whether to ask for zero-retention providers only.
-    pub const fn zero_retention(&self) -> bool {
-        self.zero_retention
-    }
-
-    /// `COGWHEEL_RETENTION__HISTORY_DAYS`, for an ordinary ignore's `review_after`.
-    pub const fn history_days(&self) -> u32 {
-        self.history_days
     }
 
     /// Record a fresh `GET /api/v1/key` answer for the status.

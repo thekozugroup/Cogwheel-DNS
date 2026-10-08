@@ -23,9 +23,11 @@ pub const MAX_NAME: usize = 120;
 pub const MAX_LABEL: usize = 40;
 
 /// Names that are never a public website, at or under any of these on a label boundary:
-/// special-use and private-use suffixes, and the homegrown ones routers hand out. All of `arpa`
-/// is here, so reverse lookups, `home.arpa` and `resolver.arpa` are too.
-pub const PRIVATE_SUFFIXES: [&str; 15] = [
+/// special-use and private-use suffixes, the homegrown ones routers hand out, and the local
+/// domains router vendors ship, under which a household's devices are named after their owners
+/// (`jonas-macbook.fritz.box`). All of `arpa` is here, so reverse lookups, `home.arpa` and
+/// `resolver.arpa` are too.
+pub const PRIVATE_SUFFIXES: [&str; 22] = [
     "arpa",
     "local",
     "lan",
@@ -41,6 +43,38 @@ pub const PRIVATE_SUFFIXES: [&str; 15] = [
     "invalid",
     "onion",
     "alt",
+    "router",
+    "gateway",
+    "domain",
+    "workgroup",
+    // Telekom's `speedport.ip`, and AVM's FRITZ!Box.
+    "ip",
+    "fritz.box",
+    "fritz.nas",
+];
+
+/// Public suffixes whose names each lead to one home, never to a website the household opened:
+/// wildcard-address services, which spell an address in the name in any notation
+/// (`c0a80105.nip.io`, `fd00--1.sslip.io`), and the remote-access and dynamic-DNS services a
+/// household reaches its own devices through (`nas.tail1a2b.ts.net`, `smith.duckdns.org`). A
+/// household's own domain is not here, and no list could hold them all: a household rule keeps
+/// it out (USING.md).
+pub const HOME_SUFFIXES: [&str; 15] = [
+    "nip.io",
+    "sslip.io",
+    "xip.io",
+    "traefik.me",
+    "localtest.me",
+    "lvh.me",
+    "plex.direct",
+    "ts.net",
+    "myfritz.net",
+    "synology.me",
+    "quickconnect.to",
+    "duckdns.org",
+    "ddns.net",
+    "no-ip.org",
+    "dyndns.org",
 ];
 
 // Identifier-like labels (§6.3 rule 7). A session, device or account id in a name would tie a
@@ -78,6 +112,7 @@ pub fn sendable(name: &str, own: &OwnNames) -> bool {
     }
     !PRIVATE_SUFFIXES
         .iter()
+        .chain(&HOME_SUFFIXES)
         .any(|suffix| at_or_under(name, suffix))
         && !is_protected(name)
         && !embeds_ipv4(name)
