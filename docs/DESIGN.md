@@ -380,8 +380,8 @@ search field, where it has one, on every platform.
 | **Overview** | Leads with the answer — is the household protected right now — in words, with the one action that changes it. Then the day behind it: four tiles, the queries by hour, the top blocked and top queried names, and the exact addresses to type into a router. |
 | **Activity** | Every query as it happens, with the device that asked and the verdict. It stays live, but never moves under someone's hand: while they are in the list, new rows wait above it. Each row's menu, grouped by scope, can allow or block that name for everyone or for that device, name the device that asked, or answer "Why?". |
 | **Devices** | Give an address a name, and optionally its own settings: filtering off, every household list, a chosen subset or none, and rules that apply to it alone. |
-| **Lists** | The subscribed blocklists, a picker that adds one by strength, the household rules alongside every device's own, and a box that answers what would happen to a name right now. |
-| **Settings** | A **read-only** summary of what is stored. Upstreams, binds and retention are set by the operator in the environment, and the UI says so rather than offering a control that will not stick. |
+| **Lists** | The subscribed blocklists, a picker that adds one by strength, the AI list and its set-up, the household rules alongside every device's own, and a box that answers what would happen to a name right now. The cards are in precedence order: the AI list sits between the subscribed lists and the rules because that is where it ranks. |
+| **Settings** | A **read-only** summary of what is stored, and a read-only summary of AI review. Upstreams, binds and retention are set by the operator in the environment, and the UI says so rather than offering a control that will not stick. |
 
 **Overview's first line is the answer.** It is an `h2` with a status dot, one
 supporting sentence, and at most one action:
@@ -443,6 +443,15 @@ Pro*.
 
 Settings being read-only is a design decision, not an unfinished screen. A
 setting in two places is a setting that will disagree with itself.
+
+The AI list's set-up lives on Lists, beside what it ranks above; Settings shows
+it read-only like everything else. Its key is the one secret the UI accepts, and
+it only ever goes in: a password field cleared after every submit, never in the
+snapshot, `localStorage` or an optimistic patch, and shown afterwards only as
+*Saved key* and the credit it has left — never any part of it. The card's
+switch is optimistic and rolls back visibly, like a list's Enabled, but the
+first Turn on is a dialog, because it is the moment names start leaving the
+house and the household's account starts paying.
 
 ---
 
@@ -532,3 +541,12 @@ The interface says what happened, in the fewest words that are still true.
   27 seconds"* — a fact and a number, not "Too many requests".
 - **No exclamation marks, and no congratulating the user** for configuring a DNS
   server.
+- **A confidence is always the model's.** *The model was 93% sure*, and a column
+  headed *Model's confidence* — never Cogwheel's confidence, and never
+  "certain". The two answers behind an override come from the same model, so
+  they are called a second question, never an independent check.
+- **AI review's timing is "usually within a minute"**, never "a few seconds":
+  a name is judged after its site load closes, at one request a second, and
+  installed after a short pause.
+- **An ignore verdict is "Lists decide"**, in muted text — not a fourth hue
+  beside block and allow, because it is the model deferring, not a decision.

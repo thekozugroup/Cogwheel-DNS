@@ -18,7 +18,10 @@ tag verbatim as the release body, so it is worth writing while the reasoning is 
 [docs/RELEASING.md](docs/RELEASING.md) has the steps that turn this heading into a tagged
 release.
 
-**Database schema: v1.** A fresh install creates it; there is nothing to migrate from.
+**Database schema: v2.** A fresh install creates it. A database written by an earlier build of
+this release (v1) is upgraded in place on first start, after a `cogwheel.db.pre-v2` snapshot; one
+from the pre-release v0 layout is upgraded straight to v2 with a single `cogwheel.db.pre-v1`
+snapshot. An image built before v2 refuses an upgraded file.
 
 Because everything here is new, this entry describes what Cogwheel _is_ rather than what moved.
 
@@ -40,7 +43,7 @@ Because everything here is new, this entry describes what Cogwheel _is_ rather t
   ready immediately, instead of waiting to become useful.
 - Measured on a 4-vCPU x86_64 sandbox — **not** a Raspberry Pi, and no Pi 5 measurement exists
   yet: a cache hit costs about 2.3 µs of server time, four workers sustain around 64,000 queries
-  per second, and the binary is 11 MB stripped. Resident memory is about 17 MB once an appliance
+  per second, and the binary is 12 MB stripped. Resident memory is about 17 MB once an appliance
   has settled after booting from its cached lists, and about 30 MB at the peak of adding a
   56,000-entry list to a policy that is already live — the second number is the one an appliance
   has to survive, which is why it is the one quoted.
@@ -59,13 +62,25 @@ Because everything here is new, this entry describes what Cogwheel _is_ rather t
   accepted and harmless, and the names it hit are recorded against it.
 - **A rule you wrote outranks everything**, including the protected set, because a rule is a
   choice somebody made on purpose and a list entry covering `pool.ntp.org` is almost always an
-  accident upstream. The full order is device rule, household rule, protected set, list exception,
-  list block — and inside any one of those, an allow beats a block.
+  accident upstream. The full order is device rule, household rule, protected set, AI list, list
+  exception, list block — and inside any one of those, an allow beats a block.
 - **CNAME-cloaked trackers are caught.** The names in an upstream answer's CNAME chain are
   re-checked against the lists, so a tracker reached through a first-party alias is blocked and the
   log says it was redirected to a domain on that list.
 - A blocked name is answered four ways, your choice: `null_ip` (the default), `nxdomain`, `nodata`
   or `refused`.
+- **An optional AI list**, off by default. Bring your own OpenRouter key, pick a decision model
+  (Jev, Clef and the like answer with a choice and a confidence, not with text), pass a Test and
+  turn it on, and Cogwheel asks the model about the names each website loads — after the page has
+  loaded, never on the DNS path — and keeps the answers that disagree with your lists: blocks the
+  lists missed, and allows that lift a list's block that broke a site, past a higher bar, a second
+  question and a cap of 20 a day. Exact names only. It sits below your rules and the protected set
+  and above every subscribed list, applies to every filtered device, and is reported as `Reason`
+  code 9, `ai` on the wire, so Activity and "Why?" say *AI list* when it decided. Every verdict is
+  a row you can read with the model's confidence, and forget; a daily spending limit of 5¢ to $1
+  caps what it costs, and turning it off stops it at once. Without
+  `COGWHEEL_RETENTION__HISTORY_DAYS` of at least one, it is unavailable.
+  [ADR 0002](docs/adr/0002-ai-review-tier.md) records the decision.
 
 ### Per-device policy
 
@@ -95,6 +110,12 @@ Because everything here is new, this entry describes what Cogwheel _is_ rather t
   with no route to the internet.
 - Colour is never the only signal — a verdict is a word as well as a dot, and red, yellow and
   green are reserved for status rather than used for decoration.
+- AI review is set up on Lists, in an AI list card between the subscribed lists and the rules,
+  through seven routes under `/api/v1/ai` — its status, the set-up, the live model list, a Test,
+  and the AI list with Forget and Clear. The ones that change anything, spend or make the appliance
+  fetch refuse requests from anywhere but the appliance's own address or a local name
+  (`COGWHEEL_SERVER__ALLOWED_HOSTS` admits a reverse proxy). Settings stays read-only and gains a
+  read-only AI review card.
 
 ### Installing, operating and updating
 
@@ -111,8 +132,10 @@ Because everything here is new, this entry describes what Cogwheel _is_ rather t
   `/etc/cogwheel/.env` is yours — a second run fills in keys that are missing and never rewrites
   one you set.
 - **Nothing phones home.** Cogwheel makes no update check and opens no connection you did not ask
-  for. `/etc/cogwheel/check-update.sh` answers "is there anything newer?" on demand, by asking the
-  same registry the host already pulls from, and exits 10 when there is. Nothing runs it for you.
+  for. The one optional exception is AI review: off until you add an OpenRouter key and turn it
+  on, and then only domain names leave — never which device asked. `/etc/cogwheel/check-update.sh`
+  answers "is there anything newer?" on demand, by asking the same registry the host already pulls
+  from, and exits 10 when there is. Nothing runs it for you.
 - **Three tags for this release** — `:latest`, `:0.1` and `:0.1.0`. A fourth, `:1`, starts being
   published once there is a stable major line to point at; a `0` tag would promise one that `0.x`
   explicitly does not have. `latest` is the default deliberately: a moving tag is what makes
@@ -147,6 +170,13 @@ Because everything here is new, this entry describes what Cogwheel _is_ rather t
   doing DNS-over-HTTPS on its own, never sends Cogwheel the query — so it is never filtered and
   never appears in the log. Per-device control and a device that ignores the network entirely are
   two halves of the same sentence.
+- **AI review guesses the website.** DNS carries no referrer, so the site a name was loaded for
+  is inferred from the burst of lookups around it, and can be wrong; the model is told so. Behind
+  NAT, or under Docker bridge networking, several devices share one address and their lookups
+  merge into one stream, which makes the guess worse.
+- **An AI block does not follow CNAME aliases.** The AI list judges the names devices asked for;
+  a name reached only as the target of another name's CNAME is checked against the lists alone.
+  And an AI allow lifts a list's block on that name, not on a name it redirects to.
 - **No Raspberry Pi measurement yet.** Every number above was taken on a 4-vCPU x86_64 sandbox.
   They are reference points, not Pi 5 figures.
 

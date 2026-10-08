@@ -478,6 +478,7 @@ answer, not the index.
 | The container restarts in a loop; the log mentions permissions, or `Operation not permitted` | [8.11](#811-the-container-restarts-in-a-loop-and-the-log-mentions-permissions) |
 | The dashboard says *Lists not downloaded yet* | [8.5](#85-blocklists-will-not-update) |
 | One site is broken | [USING.md](USING.md#when-a-site-breaks) — allow it from the Activity row |
+| The AI list card says *Stopped*, *Paused*, *retrying*, or cannot load models | [8.12](#812-ai-review-says-stopped-paused-or-shows-no-models) |
 
 ### 8.1 Port 53 is already in use
 
@@ -744,6 +745,26 @@ Unraid template — so this means it was removed by hand.
 
 ---
 
+### 8.12 AI review says Stopped, Paused, or shows no models
+
+AI review never touches DNS: whatever its card says, lookups keep being
+answered, and the verdicts already in the AI list keep applying while review is
+on. Read the card's status line on Lists:
+
+| The card says | What it means, and what to do |
+|---|---|
+| *Not available while the activity log is off* | `COGWHEEL_RETENTION__HISTORY_DAYS=0`. AI review needs the log; set at least `1`, restart, and turn it on again. |
+| *AI review is switched off on this appliance* | `COGWHEEL_AI__AVAILABLE=false`. Remove it or set `true`, restart, and turn it on again. |
+| *Waiting for a key* | No key is saved, or a saved one could not be read at startup. Add it under *Change set-up*. |
+| *Daily limit reached · resumes at …* | Working as intended. It resumes at 00:00 UTC; a higher limit is under *Change set-up*. |
+| *OpenRouter is not answering · retrying* | Egress, OpenRouter itself, or rate limiting. It backs off and keeps trying. Check the route out: `docker exec cogwheel curl -fsSI https://openrouter.ai \| head -1`. |
+| *Stopped · OpenRouter refused the key* | The key was revoked or mistyped. Replace it under *Change set-up*. |
+| *Stopped · the OpenRouter account or this key is out of credit* | Add credit, or raise the key's limit at OpenRouter. It resumes at 00:00 UTC, on a new key, or after a passing *Test now*. |
+| *Stopped · OpenRouter would not run this model* | No provider meets the privacy and price limits, or the model is gone. Pick another model, or set `COGWHEEL_AI__ZERO_RETENTION=false` ([§9.4](#94-ai-review)) and restart. A passing Test resumes it. |
+| *Stopped · AI review hit an internal error; restart the appliance* | The reviewer task died. Restart the container and send the log from before the restart with a bug report. |
+| *Could not load models from OpenRouter* | The model list is fetched live, without the key; it is the same egress check as *retrying* above. |
+| A change is refused with *Change AI review from Cogwheel's own address or a local name* | The UI was opened under a name the guard does not trust — usually a reverse proxy. Add that name to `COGWHEEL_SERVER__ALLOWED_HOSTS` ([§9.4](#94-ai-review)) and restart. |
+
 ## 9. Configuration reference
 
 Every variable is read by the server itself. Names are exact — a typo is
@@ -763,7 +784,12 @@ silently ignored rather than reported.
 | `COGWHEEL_BLOCKING__MODE` | `null_ip` | `null_ip`, `nxdomain`, `nodata` or `refused`. See [§9.2](#92-how-blocked-names-are-answered). |
 | `COGWHEEL_RETENTION__HISTORY_DAYS` | `7` | Days of query-log rows to keep. `0` stops writing the query log entirely; the hourly rollups behind the Overview and Devices pages are kept either way. |
 | `COGWHEEL_RETENTION__QUERY_LOG_MAX_ROWS` | `250000` | Hard cap on query-log rows, enforced by the same prune. |
-| `COGWHEEL_RETENTION__PRUNE_INTERVAL_SECS` | `3600` | How often the prune runs. Floored at 60 s. |
+| `COGWHEEL_RETENTION__PRUNE_INTERVAL_SECS` | `3600` | How often the prune runs. Floored at 60 s. The same pass prunes the AI list ([§9.4](#94-ai-review)). |
+| `COGWHEEL_SERVER__ALLOWED_HOSTS` | *(empty)* | Comma-separated extra hostnames, without ports, that AI review's set-up routes accept requests under — a reverse proxy's name. IP addresses, single-label names and `.local`/`.lan`/`.home`/`.home.arpa`/`.internal`/`.localdomain` names need no entry. See [§9.4](#94-ai-review). |
+| `COGWHEEL_AI__AVAILABLE` | `true` | `false` switches AI review off for this appliance: the reviewer never starts, the AI list is not applied, and its set-up answers 409. It also forgets the household's consent, so review stays off until someone turns it on again. Spelled `true`/`false`, `1`/`0`, `yes`/`no` or `on`/`off`. |
+| `COGWHEEL_AI__OPENROUTER_API_KEY` | *(unset)* | An OpenRouter key for AI review. Wins over one saved in the UI, which then cannot change it. Empty counts as unset; a value with a space, a control character or a non-ASCII byte, or over 512 characters, stops startup — and the error prints it as `(hidden)`. |
+| `COGWHEEL_AI__ZERO_RETENTION` | `true` | Ask OpenRouter only for providers with zero data retention (`provider.zdr`). See the tradeoff in [§9.4](#94-ai-review). |
+| `COGWHEEL_AI__BASE_URL` | `https://openrouter.ai` | Where AI review sends. Must be `https://`, or `http://` to this machine; no path, query or credentials. Environment-only, so nobody on the network can point the key elsewhere. A bad value stops startup. |
 | `COGWHEEL_WEB_DIST_DIR` | *(search path)* | Directory containing `index.html`. |
 | `RUST_LOG` | `info` | tracing/`EnvFilter` syntax. Used as-is when set — it replaces the `info` default rather than layering on top of it, so it can narrow the level too (e.g. `RUST_LOG=error`), not only widen it. |
 
@@ -826,7 +852,9 @@ keeps working on a host whose `/etc/ssl` is missing or broken.)
 **What this does and does not hide.** Your ISP stops seeing the domains. The
 upstream operator still sees all of them — encryption changes *who* you trust,
 it does not remove the need to trust someone. Queries Cogwheel answers from its
-blocklists or cache never leave the house at all, encrypted or not.
+blocklists or cache never leave the house at all, encrypted or not — unless AI
+review is on, when the names (not the lookups) go to OpenRouter to be judged
+([§9.4](#94-ai-review)).
 
 ### 9.2 How blocked names are answered
 
@@ -910,6 +938,67 @@ those lookups actually happen. It is deliberately short — 21 suffixes — and 
 not reach broad domains like OS vendors or banks: a blocklist entry covering
 those is a choice someone made, and silently overruling it would be its own
 surprise.
+
+### 9.4 AI review
+
+AI review is off by default and set up by the household, on the Lists page, with
+their own OpenRouter key — the reasoning, the thresholds and exactly what is sent
+are [ADR 0002](adr/0002-ai-review-tier.md). What the operator controls, and needs
+to know:
+
+**Egress.** While it is on, the appliance makes HTTPS requests to
+`openrouter.ai:443` (`COGWHEEL_AI__BASE_URL`), and nothing else new. The set-up
+form also reaches it when someone uses it: to list the models, to check a key
+before saving it, and for a Test. A host with no route out simply has AI review
+say *retrying*; DNS is unaffected and readiness never depends on it. Behind an
+outbound proxy, `HTTPS_PROXY` is honoured for any base URL that is not this
+machine (a loopback base, the test stub, never goes through a proxy). Redirects
+are never followed, so a 3xx can never carry the key or the names anywhere else.
+
+**The kill switch.** `COGWHEEL_AI__AVAILABLE=false` and a restart: the reviewer
+never starts, the AI list stops applying (its rows are kept), and the set-up
+routes answer 409. Consent is forgotten at that start, so switching it back on
+leaves review off until someone turns it on again in the UI.
+
+**The key.** A key saved in the UI is written to `openrouter.key` beside the
+database (`/app/data/openrouter.key` in the image, `$DATA_DIR/openrouter.key`
+natively), mode 0600, and never into SQLite. `COGWHEEL_AI__OPENROUTER_API_KEY`
+wins over it, and the UI then cannot change or remove the key. Removing a saved
+key overwrites the file with zeros before deleting it; on an SD card or SSD that
+is best effort, because wear levelling may keep the old block. Give the key its
+own credit limit at OpenRouter: that limit holds even if something in Cogwheel
+goes wrong.
+
+**Zero retention.** Every request asks OpenRouter for providers that do not
+collect what they are sent (`data_collection: "deny"`), and by default also for
+providers with zero data retention (`COGWHEEL_AI__ZERO_RETENTION=true`). That
+narrows the models: when checked on 2026-10-08, 9 of the 15 decision models
+OpenRouter listed had a zero-retention provider — Jev 1.13, Clef and Clef Flash
+among them — and the model picker greys out the rest. Setting it to `false`
+opens those up, at the cost of providers that may keep the names they are sent
+for a time; `data_collection: "deny"` still excludes the ones that say they
+collect them. Cogwheel cannot check that any provider complies.
+
+**Behind a reverse proxy.** The AI routes that change anything, spend credit or
+make the appliance fetch something refuse a request addressed to a name that is
+not local, or sent from another site, with *"Change AI review from Cogwheel's own
+address or a local name…"*. That is what stops a DNS-rebinding page from saving
+its own key through a household browser. A proxy published under a public-style
+name needs that name in `COGWHEEL_SERVER__ALLOWED_HOSTS`.
+
+**The activity log.** AI review needs it. `COGWHEEL_RETENTION__HISTORY_DAYS=0`
+makes AI review unavailable, empties the AI list at startup, and leaves review
+off until someone turns it on again after the log is back. With a log, the AI
+list follows its retention: the website a verdict was judged for is forgotten
+after `HISTORY_DAYS`, and the names the AI list left to the household's lists
+live `min(30 days, HISTORY_DAYS)`. A short `HISTORY_DAYS` therefore has those
+names judged — and paid for — again sooner, within the same daily limit. Blocks
+and allows live up to 90 days whatever it says, and the table holds at most
+10,000 rows.
+
+**Spend.** The household picks a daily limit of 5¢, 10¢ (the default), 25¢ or
+$1, and review pauses until 00:00 UTC once it is reached. There are also at most
+2,000 requests a day, two at a time, a second apart.
 
 ---
 
@@ -1004,7 +1093,8 @@ failure — see [§7](#7-post-install-verification-checklist) for what it covers
 Cogwheel does not tell you. That is deliberate: the first thing a privacy appliance
 should not do is open an unannounced connection on first boot, even a harmless
 one, and even to answer a useful question. **Cogwheel makes no update check and
-no outbound request of its own.**
+no outbound request of its own** — the one exception is AI review, which is off
+until someone adds an OpenRouter key and turns it on ([§9.4](#94-ai-review)).
 
 So the check is something you run, and which one depends on the install:
 
@@ -1136,8 +1226,9 @@ sudo sed -i 's|^COGWHEEL_IMAGE=.*|COGWHEEL_IMAGE=ghcr.io/thekozugroup/cogwheel-d
 sudo docker compose up -d
 ```
 
-Substitute `N` (the schema version that was migrated *to*, which is the suffix
-on the file already sitting in the volume) and `PREVIOUS` (the tag you were on).
+Substitute `N` (the suffix on the file already sitting in the volume: the first
+schema version the upgrade stepped to — `2` going back from the AI list's schema
+to a v1 build) and `PREVIOUS` (the tag you were on).
 
 **Use the Cogwheel image for the restore and not a general-purpose one.** It
 runs as uid 10001, so the restored file comes out owned by the user that has to
@@ -1146,8 +1237,9 @@ and a container that will not start, with an error about permissions rather
 than about what you just did.
 
 What it costs: everything logged since the upgrade — query history, and any
-device, rule or list change you made in between. Verify afterwards with the
-command for your install under [Then verify](#then-verify).
+device, rule or list change you made in between, and the AI list when going back
+from v2 to v1. Verify afterwards with the command for your install under
+[Then verify](#then-verify).
 
 Always take a backup before an upgrade ([§11](#11-backup-and-restore)) and run
 the verification checklist afterwards ([§7](#7-post-install-verification-checklist)).
@@ -1158,14 +1250,16 @@ the verification checklist afterwards ([§7](#7-post-install-verification-checkl
 
 ### What is actually in there
 
-Four things, and a backup that captures only the first is not a backup:
+Four things, and a backup that captures only the first is not a backup — plus
+a fifth, if AI review has ever been set up with a key saved in the UI:
 
 | | |
 |---|---|
-| `cogwheel.db` | the database — settings, lists, devices, rules, query log |
+| `cogwheel.db` | the database — settings, lists, devices, rules, query log, and the AI list |
 | `cogwheel.db-wal`, `cogwheel.db-shm` | the write-ahead log and its index. SQLite runs in WAL mode, so **everything since the last checkpoint lives here and nowhere else** |
 | `lists/` | the cached body of every subscribed blocklist, one file per list |
-| `cogwheel.db.pre-vN` | a pre-upgrade snapshot, if a schema migration has ever run |
+| `cogwheel.db.pre-vN` | a pre-upgrade snapshot, if a schema migration has ever run. `cogwheel.db.pre-v2` is made only when upgrading a real v1 file |
+| `openrouter.key` | the household's OpenRouter key, mode 0600 — **the one secret in the data directory**. Leave it out of a backup you share or store anywhere less trusted than the appliance; after a restore without it, AI review waits for the key to be added again |
 
 Two consequences follow, and they are why the procedure below stops the
 container and archives the whole directory rather than copying one file:
@@ -1180,7 +1274,15 @@ container and archives the whole directory rather than copying one file:
 Config is not in here at all. It is environment-only
 ([§9](#9-configuration-reference)) and lives in `/etc/cogwheel/.env` or
 `/etc/cogwheel/cogwheel.env`, which you should keep in whatever you already use
-for machine configuration.
+for machine configuration. (So does `COGWHEEL_AI__OPENROUTER_API_KEY`, if the
+key is set there rather than in the UI.)
+
+AI review's state is in `cogwheel.db` with everything else: whether it is on,
+the model, the daily limit and today's spend, and the AI list itself. Restoring
+a backup restores those as they were. With
+`COGWHEEL_RETENTION__HISTORY_DAYS=0` the AI list is emptied, and review switched
+off until someone turns it on again, at the next start — a backup taken from
+such an appliance has no AI list in it.
 
 ### Recommended: back up the data directory
 
@@ -1220,10 +1322,13 @@ you have never restored is a hypothesis, not a backup.
 ### Restoring the pre-upgrade snapshot
 
 When a release migrates the database, the upgrade takes its own copy first —
-`cogwheel.db.pre-vN`, beside the database in the same volume, where `N` is the
-schema version being migrated *to*. It is written with `VACUUM INTO`, so it is a
-consistent file rather than a copy of a moving one, and it is taken before
-anything is touched.
+`cogwheel.db.pre-vN`, beside the database in the same volume, named for the
+first schema version the upgrade steps to: a v1 database gets
+`cogwheel.db.pre-v2`; a pre-release v0 database gets `cogwheel.db.pre-v1` and
+goes on to v2 in the same start without a second copy, so restoring it means
+restoring a v0 file. A fresh database gets no copy at all. It is written with
+`VACUUM INTO`, so it is a consistent file rather than a copy of a moving one,
+and it is taken before anything is touched.
 
 It guards exactly one upgrade. It is not a substitute for the backups above, and
 it is overwritten by the next migration.
@@ -1255,8 +1360,12 @@ Run it with the **Cogwheel image**, not a general-purpose one: it runs as uid
 10001, so the restored file comes out owned by the user that has to open it.
 
 **What it costs:** everything since the upgrade. The query log, and any device,
-rule or list change made in between. If that matters more than getting the old
-version back, take a copy of the current `cogwheel.db` first.
+rule or list change made in between — and, going back to a v1 image from
+`cogwheel.db.pre-v2`, the whole AI list, which a v1 build has no table for. An
+image built before v2 refuses an upgraded file outright, naming both versions,
+so there is no way back without the snapshot. If what changed since matters
+more than getting the old version back, take a copy of the current
+`cogwheel.db` first.
 
 ---
 

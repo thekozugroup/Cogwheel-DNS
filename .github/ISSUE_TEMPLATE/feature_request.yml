@@ -7,11 +7,14 @@ body:
       value: |
         Cogwheel has a deliberately narrow
         [scope boundary](https://github.com/thekozugroup/Cogwheel-DNS/blob/main/docs/ARCHITECTURE.md#1-scope-boundary--what-cogwheel-is-not):
-        it is a DNS filter for one household network, and it does not do machine-learning
-        classification, threat feeds, multi-node sync, VPN or exit-node integration,
-        notifications, a backup API or a metrics exporter. A request that needs one of those
-        is likely out of scope — but say it anyway, because the boundary is worth arguing
-        about and sometimes the answer is a configuration change rather than a no.
+        it is a DNS filter for one household network, and it does not do threat feeds,
+        multi-node sync, VPN or exit-node integration, notifications, a backup API or a
+        metrics exporter. It does no model classification on the DNS path, and the one
+        opt-in exception off it, AI review, is bounded by
+        [ADR 0002](https://github.com/thekozugroup/Cogwheel-DNS/blob/main/docs/adr/0002-ai-review-tier.md):
+        a new AI idea extends that record or argues a new one. A request that needs one of
+        those is likely out of scope — but say it anyway, because the boundary is worth
+        arguing about and sometimes the answer is a configuration change rather than a no.
 
         **"Support this blocklist" is almost never a feature request.** Any list URL already
         works, in `hosts`, `domains` or Adblock syntax — add it on the Lists page. The preset
@@ -56,6 +59,7 @@ body:
         - Rules and the protected set
         - Devices and per-device policy
         - Query log and Activity
+        - AI review and the AI list
         - Web UI
         - Deployment, Docker and networking
         - Configuration

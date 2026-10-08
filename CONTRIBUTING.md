@@ -151,18 +151,20 @@ versions.
 
 ### About the tests
 
-**173 of them, and they are real** — no mocked resolver, no fake database.
+**353 of them, and they are real** — no mocked resolver, no fake database, and
+no route to the internet: AI review is tested against a stub OpenRouter on
+loopback.
 
 | Crate | Tests | What they are |
 |---|---|---|
-| `cogwheel-server` | 69 | routes driven through the real router against a real SQLite file |
-| `cogwheel-dns-core` | 40 | wire parsing, the cache and its TTL clamps, CNAME re-check, upstream selection |
-| `cogwheel-storage` | 30 | the schema, the v0→v1 upgrade, paging, retention bounds |
-| `cogwheel-policy` | 21 | the precedence order, the protected-suffix net, normalisation |
+| `cogwheel-server` | 218 | routes driven through the real router against a real SQLite file; AI review's units, its guard and handlers, and end to end against the stub |
+| `cogwheel-dns-core` | 48 | wire parsing, the cache and its TTL clamps, CNAME re-check, upstream selection, per-name invalidation |
+| `cogwheel-storage` | 46 | the schema, the v0→v1 upgrade and the v1→v2 step, paging, retention bounds, the AI list's table |
+| `cogwheel-policy` | 28 | the precedence order with the AI tier, the protected-suffix net, normalisation |
 | `cogwheel-lists` | 13 | the three list grammars, conditional GET, verification |
 
-The whole suite finishes in under a second of test time. There is no excuse for
-not running it.
+The whole suite finishes in about seven seconds of test time, most of it the
+server's. There is no excuse for not running it.
 
 A new feature comes with tests. A bug fix comes with the test that fails without
 it. Two kinds of test in here are guards rather than coverage, and they fail on
@@ -181,10 +183,11 @@ If one of those fails, the fix is usually not the test.
 ## The repository
 
 ```
-crates/cogwheel-policy    The rule model and `evaluate` — the seven-tier precedence,
-                          the 64-slot list bitmask, domain normalisation, and the
-                          21 protected suffixes. Pure: no I/O, no path dependencies.
-                          Everything that filters is built on this.
+crates/cogwheel-policy    The rule model and `evaluate` — the eight-tier precedence,
+                          the 64-slot list bitmask, the exact-name AI list, domain
+                          normalisation, and the 21 protected suffixes. Pure: no
+                          I/O, no path dependencies. Everything that filters is
+                          built on this.
 crates/cogwheel-dns-core  The UDP and TCP listeners, request parsing, the TTL-aware
                           response cache, CNAME uncloaking, upstream forwarding
                           (cleartext, DoT, DoH), the pause switch, the counters.
@@ -192,13 +195,14 @@ crates/cogwheel-dns-core  The UDP and TCP listeners, request parsing, the TTL-aw
 crates/cogwheel-lists     Fetching and parsing blocklists — `domains`, `hosts` and
                           Adblock syntax — plus verification. Talks HTTP, so it is
                           never on the DNS path.
-crates/cogwheel-storage   The SQLite schema, the guarded v0→v1 upgrade, the
-                          repositories and the retention prune. Schema details stay
-                          inside it; nothing else writes SQL.
-apps/cogwheel-server      The composition root: configuration, the 22 routes, the
+crates/cogwheel-storage   The SQLite schema, the guarded v0→v1 upgrade and the
+                          additive v1→v2 step, the repositories and the retention
+                          prune. Schema details stay inside it; nothing else writes
+                          SQL.
+apps/cogwheel-server      The composition root: configuration, the 29 routes, the
                           response envelope, the readiness tracker, the refresh
-                          scheduler, the event stream. The only crate that depends
-                          on all four libraries.
+                          scheduler, the event stream, and the opt-in AI reviewer.
+                          The only crate that depends on all four libraries.
 apps/cogwheel-web         React 19 + Vite + Tailwind 4 on Shark UI. Five pages.
                           Talks to the server only through `src/lib/api.ts`.
 docs/                     Quick start, deployment, architecture, design, releasing,
@@ -257,8 +261,11 @@ pull requests.
   `cogwheel_policy::evaluate` is pure, the cache and the counters are in memory,
   and the only network call a query may make is to the configured upstream. A
   test in `cogwheel-dns-core` fails if the crate's manifest gains an HTTP client
-  or an LLM dependency. New cloud-backed or AI-assisted ideas belong in
-  off-path control-plane code, if anywhere.
+  or an LLM dependency. A model API on the DNS path is still refused.
+  [ADR 0002](docs/adr/0002-ai-review-tier.md) is the one admitted shape for AI
+  off that path — opt-in, verdicts compiled into the policy as data, every one
+  stored and undoable — so a new AI-assisted idea extends that record or argues
+  a new ADR; it does not get a third way in.
 
 - **A hot-path change without a measurement.** `scripts/bench/run.py` exists and
   documents its own measurement bugs; use it. "Should be faster" is not a
@@ -269,7 +276,12 @@ pull requests.
 - **A new user-facing setting.** The UI contract is deliberately small: five
   pages, and Settings is read-only. A setting is a promise to support a
   combination forever. Most proposed settings are a default someone disagrees
-  with, and the right change is usually the default.
+  with, and the right change is usually the default. AI review's set-up — its
+  key, model and daily limit, on Lists — is the one feature configured in the
+  UI, because it is the household's own consent and its own account, not the
+  operator's; the operator's controls for it are still environment variables,
+  and Settings still only shows them. It is not a precedent for the next
+  setting.
 
 - **A change to the crate dependency graph without an ADR.** Update
   [ADR 0001](docs/adr/0001-crate-boundaries.md) first, then the guard test, then

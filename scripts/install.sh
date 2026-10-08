@@ -1731,7 +1731,8 @@ print_success() {
     if [ -x "$UPDATE_SCRIPT" ]; then
         printf '  Is it stale: sudo %s\n' "$UPDATE_SCRIPT"
         printf '               asks ghcr.io and changes nothing. Cogwheel itself makes\n'
-        printf '               no update check and no outbound request of its own.\n'
+        printf '               no update check, and no outbound request of its own\n'
+        printf '               unless you turn on AI review.\n'
     fi
     printf '  Logs:        cd %s && sudo docker compose logs -f\n' "$CONFIG_DIR"
     printf '  Stop:        cd %s && sudo docker compose down   (the data volume is kept)\n' "$CONFIG_DIR"

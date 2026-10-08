@@ -11,10 +11,12 @@
 # has, minus the download.
 #
 # Cogwheel itself makes no update check. There is no setting for one and
-# nothing in the product phones home, because the first thing a privacy
-# appliance should not do is open an unannounced connection on first boot --
-# even a harmless one, and even to answer a useful question. This script is the
-# same answer as an opt-in: nothing runs it unless you do.
+# nothing in the product phones home on its own: its one optional outbound
+# call, AI review, sends domain names to OpenRouter only after you add a key and
+# turn it on. The first thing a privacy appliance should not do is open an
+# unannounced connection on first boot -- even a harmless one, and even to
+# answer a useful question. This script is the same answer as an opt-in:
+# nothing runs it unless you do.
 #
 # If you want to be told, run it from cron and let the exit status decide:
 #

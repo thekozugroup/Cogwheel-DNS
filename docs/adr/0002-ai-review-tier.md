@@ -389,9 +389,14 @@ override in that site's context. The override is:
 - The key is never returned, logged, stored in SQLite or shown in part.
 - The feature is counted as one unit under the spec's §12.1. Its own files
   have a budget of 3,900 lines, of which at most 175 may sit in
-  `cogwheel-policy` and `cogwheel-dns-core`. RSS grows by nothing while review
-  is off and by at most 5 MB while it is on. If the feature is ever cut, it
-  is cut in one place, and the core returns to its own budget.
+  `cogwheel-policy` and `cogwheel-dns-core`. As first built its own files
+  measure 6,218, and 183 of its lines (own files and glue) sit in those two
+  crates — over both, which §12.1 records rather than hides. RSS is budgeted
+  to grow by nothing while review is off and by at most 5 MB while it is on.
+  As first measured (the spec's §11.1), an empty AI list added nothing the
+  benchmark could see, and a full 10,000-name list about 14 MB — over that
+  budget, and recorded there. If the feature is ever cut, it is cut in one
+  place, and the core returns to its own budget.
 
 ## Alternatives Rejected
 

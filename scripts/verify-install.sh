@@ -159,7 +159,7 @@ else
     fi
 
     # Distinct endpoint from liveness, and a stronger claim: the server holds
-    # this at 503 until storage is open at schema v1, a policy is installed and
+    # this at 503 until storage is open at its schema version, a policy is installed and
     # both DNS listeners are bound. A 200 here means the appliance can answer
     # queries, which is what a rolling upgrade should gate on.
     code=$(http_get /health/ready)

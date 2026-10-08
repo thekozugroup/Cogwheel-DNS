@@ -130,8 +130,9 @@ first five minutes after it is running.
 
 Upgrading depends on the install: `docker compose pull && docker compose up -d` in the directory
 holding the compose file, **Apply Update** in Unraid's Docker tab, or `git pull` and a re-run of
-`install-native.sh` without Docker. Cogwheel never checks for updates on its own — the first
-thing a privacy appliance should not do is phone home.
+`install-native.sh` without Docker. Cogwheel never checks for updates and opens no connection
+you did not ask for — the first thing a privacy appliance should not do is phone home. The one
+optional exception, AI review, stays off until you add your own OpenRouter key and turn it on.
 [DEPLOYMENT.md](docs/DEPLOYMENT.md#10-upgrades-and-rollback) covers all five paths, how to ask
 whether there is anything newer, rollback and backup; its
 [troubleshooting section](docs/DEPLOYMENT.md#8-troubleshooting) is organised by symptom.
@@ -175,18 +176,20 @@ and counts.
 
 When a query arrives, these are applied in order, and the first tier that matches decides:
 
-| #   | Tier                  | Who sets it                                        |
-| --- | --------------------- | -------------------------------------------------- |
-| 1   | Filtering is off      | You — protection paused, or a device set to bypass |
-| 2   | Device rule           | You                                                |
-| 3   | Household rule        | You                                                |
-| 4   | Protected set         | Cogwheel — 21 suffixes, not editable               |
-| 5   | List exception (`@@`) | A subscribed list                                  |
-| 6   | List block            | A subscribed list                                  |
-| 7   | Allowed               | Nothing matched                                    |
+| #   | Tier                  | Who sets it                                                         |
+| --- | --------------------- | ------------------------------------------------------------------- |
+| 1   | Filtering is off      | You — protection paused, or a device set to bypass                  |
+| 2   | Device rule           | You                                                                 |
+| 3   | Household rule        | You                                                                 |
+| 4   | Protected set         | Cogwheel — 21 suffixes, not editable                                |
+| 5   | AI list               | A decision model, when you turn on AI review; exact names           |
+| 6   | List exception (`@@`) | A subscribed list                                                   |
+| 7   | List block            | A subscribed list                                                   |
+| 8   | Allowed               | Nothing matched                                                     |
 
-Inside any one tier, an allow beats a block. Everything a list can do sits below everything you
-can do, which is the property that turns a broken site into two clicks on the Activity row.
+Inside any one tier, an allow beats a block. Everything a list or the AI list can do sits below
+everything you can do, which is the property that turns a broken site into two clicks on the
+Activity row.
 
 ### Protected names no list can take down
 
@@ -220,6 +223,29 @@ filtered and never appears in the log either. Per-device control and a device th
 network entirely are two halves of the same sentence, and the Activity page is how you find out
 which you have.
 
+### AI review (optional)
+
+Off by default, and no name your household looks up goes anywhere until you turn it on. With
+your own [OpenRouter](https://openrouter.ai) key, Cogwheel can ask a decision model — Jev, Clef
+and the like, which answer a question with a choice and how sure they are, never with text —
+about the names each website loads. For each one the model picks block, allow, or leave it to
+your lists. It answers after the page has loaded, never before: a first visit is filtered by your
+lists alone, and later lookups use the answer, usually within a minute.
+
+The answers form the **AI list**, a tier of its own: exact names only, below your rules and the
+protected set, above every subscribed list. An allow there can lift a list's block that broke a
+site, but only past a high bar and a second question, and at most 20 times a day. Every verdict
+is a row on the Lists page with the model's own confidence and, for as long as the log keeps
+history, the website it was judged for. Activity names the AI list whenever it decided, and a
+rule of yours, Forget or Clear undoes any of it.
+
+While it is on, the names a website loads leave your network, with the website that loaded them —
+never which device asked. OpenRouter and the company running the model see them; Cogwheel asks
+for providers that neither collect nor keep them but cannot check that they comply. Your account
+pays, within a daily limit of 5¢, 10¢, 25¢ or $1. Turning it off stops it at once. Set it up on
+the Lists page; [SECURITY.md](SECURITY.md) and [ADR 0002](docs/adr/0002-ai-review-tier.md) have
+the rest.
+
 ### Encrypted upstream
 
 Plain UDP to `1.1.1.1` and `1.0.0.1` by default. DNS-over-TLS or DNS-over-HTTPS is one variable:
@@ -243,7 +269,7 @@ Raspberry Pi figures — no Pi 5 measurement exists yet.
 
 | Measurement                                                | Value               |
 | ---------------------------------------------------------- | ------------------- |
-| Binary, stripped                                           | 11 MB               |
+| Binary, stripped                                           | 12 MB               |
 | Resident memory, settled after a boot from cached lists    | ~17 MB              |
 | Resident memory, peak while adding a list to a live policy | ~30 MB              |
 | Cache hit, server-internal                                 | ~2.3 µs             |
@@ -270,6 +296,11 @@ set. The ones people actually change:
 | `COGWHEEL_UPDATER__REFRESH_INTERVAL_SECS` | `86400`                    | How often lists are re-fetched. Floored at 300 — it is somebody else's server. A failing list retries every five minutes.  |
 | `COGWHEEL_SERVER__ADVERTISED_DNS_TARGETS` | auto-detected              | The address the UI tells you to give your router. Set it when the box has several and it picks the wrong one.              |
 | `COGWHEEL_SERVER__HTTP_BIND_ADDR`         | `0.0.0.0:8080`             | `127.0.0.1:8080` puts the control plane behind a reverse proxy instead. See [SECURITY.md](SECURITY.md).                    |
+| `COGWHEEL_SERVER__ALLOWED_HOSTS`          | empty                      | Extra hostnames AI review's set-up accepts requests under — a reverse proxy's name. Local names and IPs need no entry.     |
+| `COGWHEEL_AI__AVAILABLE`                  | `true`                     | `false` switches AI review off for this appliance, whatever the household chose in the UI.                                 |
+| `COGWHEEL_AI__OPENROUTER_API_KEY`         | unset                      | An OpenRouter key for AI review. Wins over one saved in the UI, which then cannot change it.                               |
+| `COGWHEEL_AI__ZERO_RETENTION`             | `true`                     | Ask OpenRouter only for providers with zero data retention. `false` admits more models, and providers that may keep names. |
+| `COGWHEEL_AI__BASE_URL`                   | `https://openrouter.ai`    | Where AI review sends. Environment-only, so nobody on the network can point your key elsewhere.                            |
 
 Those are the defaults the image and the shipped Compose file give you. A variable that is set
 but cannot be parsed stops startup rather than falling back to something nobody chose, and
@@ -325,10 +356,11 @@ crates/cogwheel-lists      Fetching, parsing and verifying blocklists, and compi
                            the index the policy crate matches against
 crates/cogwheel-dns-core   The resolver: listeners, the upstream client, and the wire-answer
                            cache that keeps a hit to microseconds
-crates/cogwheel-storage    SQLite, the schema, and the migration that takes a snapshot before
-                           it rewrites anything
+crates/cogwheel-storage    SQLite, the schema, and the migrations that take a snapshot before
+                           they rewrite anything
 apps/cogwheel-server       The composition root: HTTP, the query log writer, the refresh
-                           scheduler. The only member allowed to depend on all four crates
+                           scheduler and the opt-in AI reviewer. The only member allowed to
+                           depend on all four crates
 apps/cogwheel-web          The five-page control plane, served by the binary above
 deploy/                    The systemd unit, and the Unraid Docker template with its icon
 docs/                      Quick start, using it, architecture, design contract, deployment,

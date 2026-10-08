@@ -3,17 +3,21 @@
 Product: a DNSNet-class DNS ad-blocker for a Raspberry Pi 5 in one Docker
 container: subscribe to hosts/ABP/domain lists, allow/deny rules, a query log —
 plus (1) device names by IP, (2) an activity log with counts, (3) per-device
-allow/block rules and per-device list selection, (4) a five-page Shark UI.
-Nothing else.
+allow/block rules and per-device list selection, (4) a five-page Shark UI —
+and, opt-in and off by default, (5) AI review and the AI list
+([ADR 0002](adr/0002-ai-review-tier.md)). Nothing else.
 
 Three user concepts: **Device** (name + IP), **List** (a subscription), **Rule**
-(allow|block a domain, for everyone or for one device). One read: **the query
-log**.
+(allow|block a domain, for everyone or for one device). Off by default, a
+fourth: the **AI list** (exact names a decision model judged, once you add an
+OpenRouter key and turn AI review on). One read: **the query log**.
 
 Precedence (fixed, tested): pause → device filtering off → device rules →
-household rules → protected suffixes → list allow (`@@`) → list block → CNAME
-re-check (list tier only) → allow. Explicit user rules outrank the 21 protected
-suffixes; protected outranks subscribed lists only.
+household rules → protected suffixes → AI list (exact names, only while AI
+review is on; [ADR 0002](adr/0002-ai-review-tier.md)) → list allow (`@@`) →
+list block → CNAME re-check (list tier only) → allow. Explicit user rules
+outrank the 21 protected suffixes; protected outranks the AI list and the
+subscribed lists only.
 
 **This document is the contract.** Everything in §1–§10 is implemented and
 shipped. Where the code and this file disagree, one of them is a bug — decide
@@ -35,7 +39,7 @@ Path-dependency graph (enforced by the ADR test, moved to the server crate):
 dns-core → policy; lists → policy; storage → (none); server → policy, lists,
 dns-core, storage.
 
-### 1.1 cogwheel-policy (735 LOC, no I/O, deps: serde only)
+### 1.1 cogwheel-policy (860 LOC, no I/O, deps: serde only)
 - `pub const PROTECTED_SUFFIXES: [&str; 21]`.
 - `pub enum BlockMode { NullIp, NxDomain, NoData, Refused }` — `Copy`.
 - `pub enum Action { Allow, Block }` (Copy).
@@ -46,18 +50,30 @@ dns-core, storage.
 - `pub struct RuleSet(HashMap<Box<str>, Action>)` — user rules; suffix semantics.
   `get_at_boundaries(&str) -> Option<Action>`.
 - `pub struct Scope { pub id: u32, pub filtering: bool, pub mask: u64, pub rules: Option<Arc<RuleSet>> }`.
-- `pub struct Policy { index, household, by_ip, all_mask, block_mode }`.
+- `pub struct AiList` (`ai.rs`, ADR 0002): exact names only, `HashMap<Box<str>, Action>`
+  plus a block count fixed at build, so `blocks()`/`allows()` are O(1). `get(&str)`
+  is one branch when empty and one hash probe otherwise, with no allocation;
+  `changes(&next)` (control plane only) is the set of names added, removed or
+  flipped. Not a `RuleSet`: suffix matching would let an allow of a site's apex
+  whitelist every tracker under it.
+- `pub struct Policy { index, household, ai: Arc<AiList>, by_ip, all_mask, block_mode }`;
+  `Policy::new` leaves `ai` empty and `with_ai(Arc<AiList>)` sets it.
   Reserved scope ids: `SCOPE_HOUSEHOLD = 0`, `SCOPE_UNFILTERED = 1`. Device
   scopes start at 2 and are interned by signature (§6).
 - `pub enum Verdict { Allow(Reason, u8 /*slot*/), Block(Reason, u8 /*slot*/) }` (Copy)
-  with `pub enum Reason { NoMatch, DeviceRule, HouseholdRule, Protected, ListAllow, List, Cname, Paused, Unfiltered }`.
+  with `pub enum Reason { NoMatch, DeviceRule, HouseholdRule, Protected, ListAllow, List, Cname, Paused, Unfiltered, Ai }`
+  — codes 0–9 on the wire; `ai = 9` is the AI list, whose arm carries the
+  direction and no slot.
   Both arms carry the slot because an `@@` exception has to be attributable to
   the list that granted it exactly as a block is: `Verdict::slot()` is
   `Some(slot)` for `ListAllow`, `List` and `Cname` and `None` on every tier no
   list decided, where the field itself is `0`.
-- `pub fn evaluate(&Policy, &Scope, &str) -> Verdict` — allocation-free.
+- `pub fn evaluate(&Policy, &Scope, &str) -> Verdict` — allocation-free; the
+  AI tier sits here, after the protected check and before the lists.
   `pub fn evaluate_lists(&Policy, mask, &str) -> Verdict` = protected + list
-  tiers only (CNAME re-check and `GET /check`).
+  tiers only: the CNAME re-check. `GET /check` runs `evaluate`.
+  `Verdict::rechecks_aliases()` is true for `Allow(NoMatch)` and `Allow(Ai)`:
+  the names whose answer's CNAME targets are re-checked (§5.2 step 7).
 - `normalize_domain`, `normalize_rule_domain` (also strips a leading `*.`).
 
 ### 1.2 cogwheel-lists (443 LOC)
@@ -77,15 +93,22 @@ dns-core, storage.
 - `protected_hits(index) -> Vec<&'static str>`: surfaced as a per-list `note`,
   never a rejection (protection is enforced at evaluation).
 
-### 1.3 cogwheel-dns-core (1,651 LOC)
+### 1.3 cogwheel-dns-core (1,768 LOC)
 - `upstream.rs` (moved from cogwheel-api) plus `build_resolver(servers)` with
   `ResolverOpts { timeout: 2 s, attempts: 2, cache_size: 0, try_tcp_on_error:
   true, preserve_intermediates: true }`.
 - `DnsRuntime` (§5), `serve_with_ready_signal`, the TCP handler.
 - TTL clamp (5 s floor, 1 h ceiling, 60 s negative), `error_response_for_payload`,
   `servfail`, `build_base_response`, `build_blocked_response`.
+- `invalidate.rs` (ADR 0002): `DnsRuntime::swap_policy_invalidating(policy,
+  &changed) -> usize` installs a policy whose verdicts differ only for the exact
+  names in `changed`, and drops every cached answer for those names under every
+  scope and type (not their subdomains). Epoch before sweep, as `swap_policy`
+  does; each shard's write lock is taken only if a read pass found one of the
+  names. Complete because the AI tier is not in `evaluate_lists`, so no cached
+  answer depends on another name's AI verdict.
 
-### 1.4 cogwheel-storage (1,760 LOC, deps: rusqlite(bundled), serde, serde_json, thiserror, tokio, tracing)
+### 1.4 cogwheel-storage (2,275 LOC, deps: rusqlite(bundled), serde, serde_json, thiserror, tokio, tracing)
 - One `Arc<Mutex<Connection>>`; PRAGMAs journal_mode=WAL, synchronous=NORMAL,
   wal_autocheckpoint=1000, foreign_keys=ON, busy_timeout=5000, cache_size=-1024
   (the page cache is 1 MiB of the process's stated memory budget rather than
@@ -93,7 +116,8 @@ dns-core, storage.
 - Every public method is `async fn` running its closure under
   `tokio::task::spawn_blocking` (the DNS task and axum handlers never run
   rusqlite on a runtime worker).
-- `schema_v1.sql` (fresh) + `migrate.rs` (legacy v0 → v1), versioned by
+- `schema_v1.sql` (frozen) + `schema_v2.sql` (the v1 → v2 step, which a fresh
+  install runs too) + `migrate.rs` (legacy v0 → v1, and v1 → v2), versioned by
   `PRAGMA user_version` (§2). The eleven legacy migration files live in
   `tests/fixtures/legacy/` and are used to build the upgrade fixture.
 - Ids stay TEXT UUIDs for `sources`/`devices`; the crate stores them as `String`
@@ -101,37 +125,59 @@ dns-core, storage.
 - Repos: sources (list/insert/update/delete/update_fetch_status), devices
   (list/upsert/delete/set_lists), rules (list/insert/delete), query_log
   (insert_batch_with_rollups, page, top_domains, clear, prune), stats
-  (hourly_24h, per_client_24h, unnamed_clients_24h), settings (get/set for
-  `pause_until` only).
+  (hourly_24h, per_client_24h, unnamed_clients_24h), settings (`pause_until`,
+  plus a generic `setting`/`set_setting` for AI review's keys, §2.1a).
+- `ai_verdicts.rs` (ADR 0002): `list_ai_verdicts`, `ai_verdict`,
+  `page_ai_verdicts`, `ai_counts`, `record_ai_verdicts(rows, ai_spend)` (one
+  transaction; `rows` may be empty, which is how a billed response with nothing
+  to store persists its spend), `delete_ai_verdict`, `clear_ai_verdicts`,
+  `scrub_ai_sites`, `forget_ai_negatives` (Clear log's half) and
+  `prune_ai_verdicts(now, history_days, max_rows) -> AiPruned` (every deleted
+  domain, and how many were decisions).
 - Tests: idempotent open; v0 fixture upgrade (fixture built by executing the
   eleven legacy migration files, seeding a device with bypass + allowed_domains
   + profile override, the baseline source, one user source); prune by days and
   by row cap; rollup upsert arithmetic; HISTORY_DAYS=0 writes rollups but no log
-  rows.
+  rows; a v1 file upgrades to v2 with a `.pre-v2` copy, a fresh one takes none,
+  and a failed v1 → v2 step rolls back naming the copy; the AI list's upserts,
+  paging, counts, site scrubbing, Clear log's half and every prune step; spend
+  written in the same transaction as the rows, empty or not.
 
-### 1.5 apps/cogwheel-server (4,019 LOC across modules, 3,680 excluding tests)
+### 1.5 apps/cogwheel-server (9,750 LOC excluding tests, 5,690 of them AI review's own files)
 `main.rs` (CLI `--version/--help`, init_tracing, startup order, background
 tasks, graceful shutdown), `config.rs` (AppConfig from env), `http.rs` (router,
 `/health/live`, `/health/ready` + `Readiness`, `ApiEnvelope`, `ApiError`, SPA
 fallback, CompressionLayer), `state.rs`, `policy_build.rs` (§6), `refresh.rs`
 (§2.7), `querylog.rs` (§7), `prune.rs`,
-`api/{overview,queries,devices,rules,lists,check,settings,runtime}.rs`.
+`api/{overview,queries,devices,rules,lists,check,settings,runtime,ai}.rs`, and
+the AI reviewer, `ai/` (ADR 0002): `mod.rs` (`AiState`, the tap, `ListState`),
+`gate.rs` (the send gate and the state machine), `settings.rs`, `patch.rs`
+(route 24), `test_run.rs` (route 26), `models.rs` (route 25), `status.rs`,
+`key.rs`, `client.rs`, `site.rs`, `burst.rs`, `prompt.rs`, `verdict.rs`,
+`known.rs`, `spend.rs`, `review.rs` and `review/settle.rs` (the pure
+`Pipeline`), `worker.rs` and `install.rs` (the two tasks). `ai/` is a module,
+not a crate, so the ADR 0001 graph is unchanged; its unit tests live in
+`ai/tests/`.
 Tests: ADR path-dependency test, CLI tests, block-mode tests,
 `encrypted_upstreams_have_trust_anchors_compiled_in`, EventBus tests (Query
-frames only), source-due test, handler tests against an in-memory Storage.
+frames only), source-due test, handler tests against an in-memory Storage, and
+AI review's unit, handler and end-to-end tests against a local stub OpenRouter
+(no test reaches the network).
 
-### 1.6 apps/cogwheel-web (8,227 LOC; React 19 + Vite + Tailwind 4 + Shark UI (Ark) + Inter)
-Five routes, one provider, one `api.ts` of 22 calls; approved shell reused (§4).
+### 1.6 apps/cogwheel-web (14,308 LOC; React 19 + Vite + Tailwind 4 + Shark UI (Ark) + Inter)
+Five routes, one provider, one `api.ts` of 29 calls; approved shell reused (§4).
 
 ---
 
 ## 2 Schema + migration
 
-Seven tables, `PRAGMA user_version = 1`. All timestamps are INTEGER unix
-seconds. Ids for `sources`/`devices` remain TEXT UUIDs (every existing row keeps
-its id).
+Eight tables, `PRAGMA user_version = 2`: the seven of `schema_v1.sql` (§2.1),
+plus `ai_verdicts` from the additive v1 → v2 step (§2.1a, ADR 0002). All
+timestamps are INTEGER unix seconds. Ids for `sources`/`devices` remain TEXT
+UUIDs (every existing row keeps its id).
 
-### 2.1 `schema_v1.sql` (fresh installs)
+### 2.1 `schema_v1.sql` (frozen; every install runs it, then §2.1a)
+As v1 shipped it; the comment on `settings` predates v2, whose keys are in §2.1a.
 ```sql
 CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL);
   -- only key: 'pause_until' (unix secs; absent/0 = not paused)
@@ -183,13 +229,68 @@ PRAGMA user_version = 1;
 ```
 Write rates: `sources` one UPDATE per source per refresh (daily by default);
 `devices`/`device_lists`/`rules` on user edits; `query_log` +
-`query_stats_hourly` one transaction per 5 s (§7); `settings` per pause click.
+`query_stats_hourly` one transaction per 5 s (§7); `settings` per pause click,
+and once per paid OpenRouter request (`ai_spend`, in the same transaction as
+any `ai_verdicts` row that request produced), which the request cap of §3a
+bounds.
+
+### 2.1a `schema_v2.sql` (the v1 → v2 step; ADR 0002)
+Additive: the seven v1 tables are untouched. A fresh install runs
+`schema_v1.sql` and then this file, exactly as a v1 upgrade does, so there is
+one definition of v2; `schema_v1.sql` stays frozen because v0 upgrades execute
+it.
+```sql
+CREATE TABLE ai_verdicts (
+  domain            TEXT PRIMARY KEY,   -- normalize_domain form; an exact name, never a suffix
+  verdict           TEXT NOT NULL CHECK (verdict IN ('block','allow','ignore')),
+  why               TEXT CHECK (why IS NULL OR why IN ('agrees','unsure','limit','contested')),
+  choice            TEXT NOT NULL CHECK (choice IN ('block','allow','ignore')),   -- the role answer
+  confidence        REAL CHECK (confidence IS NULL OR (confidence >= 0 AND confidence <= 1)),
+  effect            TEXT CHECK (effect IS NULL OR effect IN ('breaks','works','unsure')),
+  effect_confidence REAL CHECK (effect_confidence IS NULL OR (effect_confidence >= 0 AND effect_confidence <= 1)),
+  lists             TEXT NOT NULL CHECK (lists IN ('nothing','block','exception')), -- household lists when judged
+  site              TEXT,               -- the site load's website; NULLed at HISTORY_DAYS and on Clear log
+  conflict_site     TEXT,               -- the other website, for why='contested'; NULLed with site
+  rechecks          INTEGER NOT NULL DEFAULT 0 CHECK (rechecks BETWEEN 0 AND 2), -- 0 on every fresh judgement
+  model             TEXT NOT NULL,      -- the dated snapshot the response named
+  judged_at         INTEGER NOT NULL,   -- unix seconds
+  review_after      INTEGER NOT NULL    -- judged_at + 30 days; + min(30, HISTORY_DAYS) days for an
+                                        -- ordinary ignore; + 90 days for a contested one
+) WITHOUT ROWID;
+PRAGMA user_version = 2;
+```
+No secondary index (the table is capped at 10,000 rows), no client column (the
+AI list never records which device visited a site), and no `applied` column
+(whether a row applies depends on the live lists, so it is decided at compile
+time). From v2, `settings` also holds AI review's keys, written through the
+generic `setting`/`set_setting`:
+
+| key | value | written by |
+|---|---|---|
+| `ai_enabled` | `1`, or absent | `PUT /api/v1/ai`; deleted at startup whenever AI review is unavailable, so it never resumes without a fresh Turn on |
+| `ai_model` | a model id, e.g. `typesafe/jev-1.13` | `PUT /api/v1/ai` |
+| `ai_model_price` | USD per million prompt tokens, as listed when the model was picked; absent if unknown | `PUT /api/v1/ai` |
+| `ai_daily_limit` | `0.05` \| `0.10` \| `0.25` \| `1.00`; absent means `0.10` | `PUT /api/v1/ai` |
+| `ai_spend` | `"<utc_day> <micro_usd> <requests> <overrides>"` | only the server's spend owner, always through `record_ai_verdicts`, in one transaction with any verdicts |
+
+The OpenRouter key is never in the database: it is
+`<dir of DATABASE_URL>/openrouter.key`, mode 0600, so it never reaches a
+`.pre-v2` copy, a `VACUUM INTO` backup or the WAL.
 
 ### 2.2 Open sequence (`Storage::open`)
-1. Open, set PRAGMAs. 2. `v = PRAGMA user_version`. 3. If `v == 1` → done.
-4. If `v == 0` and no `sources` table → execute `schema_v1.sql` in one
-transaction. 5. If `v == 0` and table `rulesets` exists → legacy upgrade (§2.3).
-6. Any other `v` → refuse to start with "database is from a newer Cogwheel".
+A chain of steps, one version at a time, each committed before the next, so a
+crash between two steps leaves a valid older file that the next open carries
+on from.
+1. Open, set PRAGMAs. 2. `opened_at = v = PRAGMA user_version`. 3. Loop:
+`v == 2` → done. `v == 0` and table `rulesets` exists → legacy upgrade (§2.3),
+which leaves v1. `v == 0` and a `sources` table but no `rulesets` → refuse
+(unknown schema). `v == 0` otherwise → execute `schema_v1.sql` in one
+transaction. `v == 1` → the v2 step: `schema_v2.sql` in one `IMMEDIATE`
+transaction, after a `VACUUM INTO '<db path>.pre-v2'` **only when
+`opened_at == 1`** — a fresh file, a v0 file (already copied as `.pre-v1`) and
+`:memory:` get no copy. Any other `v` → refuse to start with "database is from
+a newer Cogwheel". A step that does not advance `user_version` is an error, not
+a loop.
 After open: `seed_if_empty` (§2.4).
 
 ### 2.3 Legacy v0 → v1 upgrade (`migrate.rs`), one transaction, guarded by a backup
@@ -280,20 +381,23 @@ runner with no egress and the Overview shows "Lists not downloaded yet".
 ## 3 API
 
 Every JSON response is `{ "data": … }` (ApiEnvelope). Errors:
-`{ "error": "<plain sentence>" }` with 400 (validation), 404, 409 (65th enabled
-list; duplicate device IP; duplicate list name), 429 (refresh within 30 s), 503
-(SSE cap / not ready), 500. Ids are the UUID strings. Times are unix seconds.
-22 routes (20 + 2 health).
+`{ "error": "<plain sentence>" }` with 400 (validation; a guarded AI route
+called from elsewhere, §3a), 404, 409 (65th enabled list; duplicate device IP;
+duplicate list name; AI review unavailable, or not ready to turn on), 429
+(refresh within 30 s; a Test within 10 s; OpenRouter rate-limiting), 503 (SSE
+cap / not ready; OpenRouter unreachable), 500. Ids are the UUID strings. Times
+are unix seconds. 29 routes (27 + 2 health); routes 23–29 are AI review's
+(ADR 0002, §3a).
 
 | # | Method | Path | Body / query | Response `data` | Notes |
 |---|---|---|---|---|---|
 | 1 | GET | `/health/live` | — | `{status:"ok"}` | Docker HEALTHCHECK, install.sh — unchanged |
 | 2 | GET | `/health/ready` | — | `{status, subsystems{storage,policy,dns_listeners}}` 503 until all | ci.yml, verify-install.sh — unchanged; policy ready once ANY policy (even empty) is installed |
-| 3 | GET | `/api/v1/overview` | — | `{protection:{paused_until:int\|null}, runtime:{queries_total,blocked_total,cache_hits_total,cache_expired_total,stale_served_total,upstream_failures_total,cname_blocks_total,dropped_total,log_dropped_total,cache_hit_latency_avg_ns,cache_miss_latency_avg_ns}, last_24h:{queries,blocked,per_hour:[24×{hour,queries,blocked}],active_clients,named_devices,unnamed_clients}, lists:{enabled,total,rules_loaded,last_ok_at:int\|null,downloaded:bool}, top_blocked:[10×{domain,count}], top_queried:[10×{domain,count}], connect:{targets:[string],port:int}}` | Polled every 5 s. `last_24h`/`active_clients` read `query_stats_hourly`; `top_*` scan `query_log` once per 60 s (memoized); `connect.targets` = `COGWHEEL_SERVER__ADVERTISED_DNS_TARGETS` else `hostname -I` |
+| 3 | GET | `/api/v1/overview` | — | `{protection:{paused_until:int\|null}, runtime:{queries_total,blocked_total,cache_hits_total,cache_expired_total,stale_served_total,upstream_failures_total,cname_blocks_total,dropped_total,log_dropped_total,cache_hit_latency_avg_ns,cache_miss_latency_avg_ns}, last_24h:{queries,blocked,per_hour:[24×{hour,queries,blocked}],active_clients,named_devices,unnamed_clients}, lists:{enabled,total,rules_loaded,last_ok_at:int\|null,downloaded:bool}, top_blocked:[10×{domain,count}], top_queried:[10×{domain,count}], connect:{targets:[string],port:int}}` | Polled every 5 s. `last_24h`/`active_clients` read `query_stats_hourly`; `top_*` scan `query_log` once per 60 s (memoized); `connect.targets` = `COGWHEEL_SERVER__ADVERTISED_DNS_TARGETS` else `hostname -I`. Also `ai:{state, applying, applied_block, applied_allow}`, from memory alone (atomics and the live `AiList`'s O(1) counts) |
 | 4 | POST | `/api/v1/runtime/pause` | `{minutes:u32}` (1..=1440) | `{paused_until}` | AtomicU64 + `settings.pause_until`; survives restart |
 | 5 | POST | `/api/v1/runtime/resume` | — | `{paused_until:null}` | |
 | 6 | GET | `/api/v1/queries` | `?limit=200(max 1000)&before=<id>&client=<ip>&unnamed=true&blocked=true\|false&q=<substr>` | `{rows:[{id,ts,client,device_id\|null,device_name\|null,domain,qtype,blocked,reason,list\|null}], next_before:int\|null, logging:bool}` | Keyset newest-first; LEFT JOIN devices ON ip_address = client so renames relabel history; `logging=false` when HISTORY_DAYS=0 |
-| 7 | DELETE | `/api/v1/queries` | — | `{deleted:int}` | Clear log (rollups kept) |
+| 7 | DELETE | `/api/v1/queries` | — | `{deleted:int}` | Clear log (rollups kept). Also forgets the AI list's browsing history (§3a): every verdict's website, every ordinary `ignore` row, and the reviewer's in-memory site data. Its blocks and allows stay. Unguarded, as before |
 | 8 | GET | `/api/v1/events/stream` | — | SSE, event `query`: `{ts,client,deviceName,domain,qtype,blocked,reason,list}` | 32-subscriber cap and shutdown `take_until` kept; only `query` frames |
 | 9 | GET | `/api/v1/devices` | — | `{devices:[{id,name,ip_address,filtering,all_lists,lists:[source_id],rules:[{id,domain,action}],queries_24h,blocked_24h,last_seen_at\|null}], unnamed_clients:[{ip,queries_24h,blocked_24h,last_seen_at}]}` | counts from `query_stats_hourly`; unnamed = clients in rollups with no devices row |
 | 10 | POST | `/api/v1/devices` | `{name,ip_address,filtering?=true,all_lists?=true,lists?=[source_id]}` | device | `ip_address` must parse as `IpAddr` (400); duplicate IP 409; rebuilds scopes |
@@ -307,13 +411,75 @@ list; duplicate device IP; duplicate list name), 429 (refresh within 30 s), 503
 | 18 | PUT | `/api/v1/lists/{id}` | `{name?,url?,kind?,enabled?}` | list | url/kind change → refetch; enabled toggle → rebuild from cache only |
 | 19 | DELETE | `/api/v1/lists/{id}` | — | `{deleted:true}` | removes body file, device_lists rows; rebuild |
 | 20 | POST | `/api/v1/lists/refresh` | `{id?}` | `[{id,name,outcome,rule_count,note}]` | 429 within 30 s of the previous manual refresh |
-| 21 | GET | `/api/v1/check` | `?domain=&client=<ip optional>` | `{domain, verdict:"allow"\|"block", reason, list\|null, scope:"household"\|"device"\|"unfiltered"\|"paused", device_name\|null}` | runs `evaluate` on the live `Policy` — the "Why?" answer |
-| 22 | GET | `/api/v1/settings` | — | `{version, upstreams:[{spec,protocol,encrypted}], block_mode, http_bind, dns_udp_bind, dns_tcp_bind, advertised_targets, advertised_port, refresh_interval_secs, retention:{history_days,max_rows,prune_interval_secs}, db_path, db_size_bytes, lists_dir, protected_suffixes:[21], schema_version}` | read-only; config is env-only by design |
+| 21 | GET | `/api/v1/check` | `?domain=&client=<ip optional>` | `{domain, verdict:"allow"\|"block", reason, list\|null, scope:"household"\|"device"\|"unfiltered"\|"paused", device_name\|null, ai:{verdict, why, choice, confidence, effect, effect_confidence, lists, site, conflict_site, model, judged_at, applied}\|null}` | runs `evaluate` on the live `Policy` — the "Why?" answer. `ai` is the AI list's row whenever one exists, whether it decided, was outranked or fell below its bar; `applied` is read from the live policy. If the AI list decided but the row was just forgotten, every field but `verdict` and `applied` is null: provenance is never invented |
+| 22 | GET | `/api/v1/settings` | — | `{version, upstreams:[{spec,protocol,encrypted}], block_mode, http_bind, dns_udp_bind, dns_tcp_bind, advertised_targets, advertised_port, refresh_interval_secs, retention:{history_days,max_rows,prune_interval_secs}, db_path, db_size_bytes, lists_dir, protected_suffixes:[21], schema_version, ai:{available, unavailable_reason, enabled, key_source, model, daily_limit_usd, zero_retention, base_url}}` | read-only; config is env-only by design, and AI review, the one feature set up in the UI, is set up on Lists |
+| 23 | GET | `/api/v1/ai` | — | `{available, unavailable_reason:null\|"operator_off"\|"history_off", enabled, state, key:{source:"none"\|"saved"\|"environment", limit_usd, limit_remaining_usd, checked_at}, model:{id,name,prompt_usd_per_million}\|null, daily_limit_usd, today:{spent_usd,requests,overrides,resets_at}, verdicts:{block,allow,ignore,applied_block,applied_allow}, queue:{waiting,dropped}, zero_retention, sends_to, last_review_at, last_error}` | AI review's status. `state` is one of `unavailable off no_key reviewing paused_budget retrying key_refused out_of_credit model_refused stopped`. Never any part of the key, and no `label` (OpenRouter's label is a masked copy of the key). `last_error` is one of a fixed set of sentences |
+| 24 | PUT | `/api/v1/ai` | `{enabled?, model?, key?:string\|null, daily_limit_usd?:0.05\|0.1\|0.25\|1}` | the route 23 status | **Guarded.** For `key`, absent keeps it, `null` removes it, a string replaces it after `GET {base}/api/v1/key` accepts it. Validates everything before saving anything; turning on runs a Test unless the same key and model passed one in the last 10 min; a withdrawal of consent closes the send gate before anything is written. 409 while unavailable (except a body that only removes the key), and for a body with `key` while the key is set in the environment |
+| 25 | GET | `/api/v1/ai/models` | — | `{fetched_at, zero_retention_required, models:[{id,name,description,context_length,prompt_usd_per_million,usd_per_thousand_names,zero_retention,tested}]}` | **Guarded** (it makes the appliance fetch). OpenRouter's decision models, with and without `&zdr=true`, fetched without the key, 1 MiB cap each, cached 1 h, sorted by price. 409 while unavailable; 503 when the listing cannot be fetched |
+| 26 | POST | `/api/v1/ai/test` | `{model?, key?}` or no body | `{ok, model, provider, latency_ms, cost_usd, answer:{website,candidate,choice,confidence,effect,effect_confidence}, sentence}` | **Guarded.** One request about a fixed public example (`www.wikipedia.org` loading `www.googletagmanager.com`), no household data. One every 10 s (429). A pass needs a role answer with a confidence. Its spend counts toward today's |
+| 27 | GET | `/api/v1/ai/verdicts` | `?view=changes\|all&verdict=block\|allow\|ignore&q=&limit=200(max 500)` | `{total, counts:{block,allow,ignore}, rows:[{domain,verdict,why,choice,confidence,effect,effect_confidence,lists,lists_now,applied,not_applied,outranked_by,site,conflict_site,model,judged_at,review_after}]}` | The AI list, newest judgement first, each row read against the live policy. `Cache-Control: no-store`. Unguarded and unauthenticated, like the query log |
+| 28 | DELETE | `/api/v1/ai/verdicts` | — | `{deleted:int}` | **Guarded.** Clear the AI list and rebuild before answering. Review is not halted |
+| 29 | DELETE | `/api/v1/ai/verdicts/{domain}` | — | `{deleted:true}` | **Guarded.** Forget one name (400 if not a domain, 404 if no row) and rebuild before answering; it is judged again the next time a website loads it while review is on |
 
 Removed route names that scripts reference: `/api/v1/dashboard` →
 `/api/v1/overview`; `/api/v1/resolver-access` → `overview.connect`;
 `/api/v1/runtime` → `overview.runtime`; `/metrics` gone; block-profiles marker →
 device marker.
+
+### 3a AI review (routes 23–29; [ADR 0002](adr/0002-ai-review-tier.md))
+The record of the decision, its thresholds and caps, and exactly what leaves
+the house is ADR 0002. What the API is held to:
+
+- **The guard.** Routes 24, 25, 26, 28 and 29 answer 400 "Change AI review
+  from Cogwheel's own address or a local name. Behind a reverse proxy, add its
+  name to COGWHEEL_SERVER__ALLOWED_HOSTS." unless all three hold: every name
+  the request was addressed to (the `Host` header and the URI authority, each
+  when present) is an IP literal, `localhost`, a single label, ends in `.local`,
+  `.lan`, `.home`, `.home.arpa`, `.internal` or `.localdomain`, or is in
+  `COGWHEEL_SERVER__ALLOWED_HOSTS`; an `Origin`, if sent, is the same
+  `host[:port]`, an allowed name, or loopback on both sides (`Origin: null` is
+  refused); and `Sec-Fetch-Site`, if sent, is `same-origin`, `same-site` or
+  `none`. Routes 24 and 26 read their bodies through an extractor that never
+  logs a rejection, because serde's text can quote the key. Read-only routes
+  (23, 27) and Clear log (7) stay unguarded.
+- **The key.** Never returned, logged or stored in SQLite; it lives in
+  `openrouter.key` beside the database, mode 0600.
+  `COGWHEEL_AI__OPENROUTER_API_KEY` wins over a saved key, and the API then
+  cannot change it. `COGWHEEL_AI__BASE_URL` is environment-only, so nobody on
+  the network can point the bearer key somewhere else. The OpenRouter client
+  is AI review's own: 20 s timeout, 5 s connect, no redirects followed.
+- **Off means off, at once.** A PUT that turns review off, removes the key, or
+  changes the key or model closes the send gate before it answers: queued and
+  grouped names are discarded and requests in flight are cancelled. No request
+  starts after that answer.
+- **The tap.** The query-log writer offers each batch to the reviewer through a
+  bounded channel (4,096) with `try_send`; a full channel drops and counts. Only
+  A, AAAA and HTTPS lookups that a list, the AI list or nothing decided are
+  offered — never a rule's name, a protected one, a paused or unfiltered
+  device's, or a CNAME-decided one. While review is off the writer pays one
+  atomic load per batch.
+- **What is sent.** One Decisions request (`POST {base}/api/alpha/decisions`)
+  per judged name: the website the load is taken to be for, the candidate and
+  up to 24 other names from the same load, as JSON values in `state`, with
+  constant question text and `provider.data_collection: "deny"` (plus
+  `zdr: true` unless `COGWHEEL_AI__ZERO_RETENTION=false`, and, when the
+  model's price is known, a ceiling of 1.25× it). Never client addresses,
+  device names, query types, timestamps, or a name that fails the shareable
+  check (ADR 0002).
+- **Bounds.** 2 requests in flight, 1 s apart, 2,000 a UTC day, within the
+  daily spend limit (5¢, 10¢, 25¢ or $1); at most 24 names per site load, 60
+  per site key per day and 300 per client per hour; a queue of 1,024 that drops
+  its oldest; 10,000 verdict rows.
+- **Retention.** The website a verdict was judged for is set to NULL after
+  `HISTORY_DAYS`; an ordinary `ignore` row lives `min(30 days, HISTORY_DAYS)`;
+  a block, allow or contested row lives at most 90 days; the table is capped at
+  10,000 rows, oldest first. The prune (hourly by default) enforces all four. Clear log
+  (route 7) NULLs every website, deletes every ordinary `ignore` row and empties
+  the reviewer's in-memory site data. `HISTORY_DAYS=0` makes AI review
+  unavailable and empties the AI list at startup.
+- **Consent.** Whenever AI review is unavailable at startup
+  (`COGWHEEL_AI__AVAILABLE=false` or `HISTORY_DAYS=0`) the `ai_enabled` key is
+  deleted, so it never resumes without a fresh Turn on.
 
 ---
 
@@ -456,7 +622,10 @@ visible tab); localStorage cache keys kept; `mutate()` unchanged.
   this device resolves everything and is still logged"), **Lists**: radio "Use
   all household lists" / "Choose lists" → checkbox per enabled list (nothing
   ticked is refused inline) / "No lists" ("Only rules apply. Nothing on a list
-  is blocked for this device."), **Rules for this device**: domain +
+  is blocked for this device."; while the AI list is applying, "Only your rules
+  and the AI list apply. Nothing on a subscribed list is blocked for this
+  device.", because the AI list is household-wide and reaches a device on no
+  lists too), **Rules for this device**: domain +
   Block/Allow segment + "Add rule", staged until Save — each marked New,
   Changed or Removed (struck through, with Undo). Footer: Save / Add device,
   Cancel, and Delete device at the far end (ConfirmDialog naming what the
@@ -482,6 +651,32 @@ visible tab); localStorage cache keys kept; `mutate()` unchanged.
   the Preset select (every §2.5 preset) and Name, Address, **Format** select
   (hosts / domains / adblock) and Enabled switch. The submit button names what
   it adds ("Add HaGeZi Pro").
+- SectionCard **AI list** (ADR 0002), between Add a list and Rules because
+  that is where it sits in precedence. Unavailable (`operator_off` /
+  `history_off`): a neutral `NoticeBanner` naming the variable, and only
+  "Remove key…" when a key is saved. Never set up: what AI review does, a warn
+  `NoticeBanner` "Domain names leave your network while this is on", and "Set up
+  AI review", which opens the set-up `<form>`: OpenRouter key (`type="password"`,
+  never shown again; a saved key reads "Saved key · $x of its $y limit left",
+  never any part of the key; an environment key reads "Set by
+  COGWHEEL_AI__OPENROUTER_API_KEY" with no controls), Model (a native select
+  from route 25, priced per 1,000 names; models with no zero-retention provider
+  greyed out while that is required), Daily spending limit (5¢ / 10¢ / 25¢ /
+  $1), Test, and "Turn on AI review…", which confirms through a
+  `ConfirmDialog` that names what is sent and who pays. Set up: a header
+  `Switch` "AI review" (optimistic, rolled back with the API's sentence) and a
+  "⋯" (Change set-up, Test now, Forget every verdict…); the description is a
+  status line, a dot and words ("On · judged N names today · $x of $y", "Daily
+  limit reached · resumes at <time>", "Stopped · OpenRouter refused the key",
+  …); a summary of what DNS is using ("Blocking N · allowing N over your lists ·
+  N left to your lists"); the verdict table — a `SegmentGroup` of Changes and
+  All judged, a "Find a name" search, and columns Name (with "for <website>"),
+  Verdict ("Block", "Allow", or "Lists decide" with no fourth hue), Model's
+  confidence, Your lists and Judged, with a row menu of Allow/Block for everyone,
+  Forget this verdict and Why?; and a footer that says exact names only, the
+  precedence, and when a name is judged again, with "Clear AI list…". A
+  confidence is always the model's, never Cogwheel's. The key never enters the
+  snapshot, `localStorage` or an optimistic patch.
 - SectionCard **Rules**: `h3` "Household rules" — domain + Block/Allow segment
   + "Add rule" form and a list with delete — and `h3` "Device rules", read-only,
   grouped by device, each group linking to `/devices?device=<id>`; footnote
@@ -501,9 +696,19 @@ visible tab); localStorage cache keys kept; `mutate()` unchanged.
   scripts/install.sh writes; `cogwheel.env` belongs to
   scripts/install-native.sh alone.)
 - "Activity log": logging on/off, retention days, max rows, prune interval,
-  database path and size, lists dir; "Clear log" button.
+  database path and size, lists dir; "Clear log" button. Once AI review has been
+  set up, its `ConfirmDialog` adds that the AI list forgets which websites its
+  verdicts were judged for and the names it left to your lists.
+- "AI review" (read-only, like the rest of the page): status, model, key
+  ("Set in the environment" / "Saved on this appliance" / "None"), daily limit,
+  providers ("Zero data retention only" / "Any that do not collect data") and
+  where it sends, with the `COGWHEEL_AI__*` names under "Show the variable
+  names" and a footer pointing to Lists, where it is set up. It is the one
+  feature set up in the UI rather than the environment, and Settings still
+  changes nothing.
 - "Protected domains": the 21 suffixes behind "Show the list", with one
-  sentence explaining they outrank lists but not your own rules.
+  sentence explaining they outrank lists and the AI list but not your own
+  rules.
 - "About": version, schema version. The theme toggle lives in the sidebar only.
 - Before the first answer, a skeleton; if settings never load, "Could not read
   the settings" with Try again, never placeholder values.
@@ -565,16 +770,20 @@ log_dropped_total, hit/miss latency totals+samples.
 5. **Evaluate** (sync, allocation-free).
 6. **Blocked**: `build_blocked_response` → `to_vec()` → `CachedWire{fresh_until:
    now + 300 s, blocked: true}`.
-7. **Upstream**: unless the verdict was an explicit allow, walk
-   `lookup.answers()` for `RData::CNAME` targets (≤ 8) and run `evaluate_lists`
-   on each — zero extra RTT.
+7. **Upstream**: unless the verdict was an explicit allow — a rule, a
+   protected suffix or a list exception — walk `lookup.answers()` for
+   `RData::CNAME` targets (≤ 8) and run `evaluate_lists` on each — zero extra
+   RTT. The gate is `Verdict::rechecks_aliases()`: `Allow(NoMatch)` and
+   `Allow(Ai)`. An AI-list allow is still re-checked, because the model judged
+   the name, not where it points.
 8. **Upstream failure**: serve the stale entry if present (`stale_served += 1`),
    re-freshened for 30 s; else SERVFAIL.
 9. **Insert + send + log**: `truncated` precomputed only when `bytes.len() >
    512`; send = memcpy + 2-byte id patch + RD bit.
 
 A policy swap bumps a cache epoch so a miss already in flight cannot insert a
-verdict from the replaced policy.
+verdict from the replaced policy. `swap_policy_invalidating` (§1.3) bumps it
+too, before its sweep, so the same holds for an AI list install.
 
 ### 5.3 Pause
 `pause_protection_until(secs)` stores the AtomicU64 and the server persists
@@ -591,7 +800,7 @@ NULL|id)`. Lists: `sources` rows; the enabled ones get slot bits 0..63 in `id`
 order (max 64 enabled, 409 on the 65th).
 
 Build (`policy_build.rs`, on spawn_blocking, after any list refresh, list
-toggle, device or rule edit):
+toggle, device or rule edit, or AI list change):
 1. `index` = `ListIndex::build` from every enabled source's cached body (reused
    as the same `Arc` when only devices/rules changed).
 2. `all_mask` = OR of enabled slots; `household: RuleSet` from
@@ -606,20 +815,40 @@ toggle, device or rule edit):
    A device edit produces a new sig → a fresh id, and its old cache entries age
    out (no `invalidate_all`). A list rebuild or a household-rule change calls
    `cache.invalidate_all()` and clears `by_sig`.
-5. `Policy` is swapped into `DnsRuntime.policy`; the querylog task receives a
+5. The AI list (ADR 0002): while AI review is applying (available and turned
+   on), every build reads `ai_verdicts` and compiles it against the live index
+   and `all_mask` — a block where no household list decides the name needs the
+   model's confidence ≥ 0.85; a block over a list `@@` or an allow over a list
+   block needs ≥ 0.92 on the role question and ≥ 0.90 on the effect question
+   in the matching direction; a block the lists already make, an allow with
+   nothing to override, an allow over a list exception, an `ignore`, and a
+   protected name are never compiled. Otherwise the AI list is empty. It is
+   judged against the household's lists, not each device's.
+6. `Policy` is swapped into `DnsRuntime.policy`; the querylog task receives a
    fresh `Arc<HashMap<IpAddr, (Arc<str> name, String id)>>` for SSE attribution.
+   A fourth rebuild kind, `Ai`, reuses the index and keeps the cache; it and the
+   device kind compare the AI list in force with the new one and drop only the
+   cached answers for the names that changed
+   (`swap_policy_invalidating`). The reviewer never builds a policy: it commits
+   verdicts and wakes an installer task that rebuilds after 5 s, so a burst of
+   answers is one install.
 
 Resolution order for client IP C and name N (first match wins):
 1. pause → allow (Paused) · 2. C has no device row → household scope ·
 3. `filtering = 0` → allow (Unfiltered) · 4. device allow rule → allow ·
 5. device block rule → block · 6. household allow rule → allow ·
 7. household block rule → block · 8. protected suffix → allow ·
-9. list allow (`@@`) under `mask` → allow · 10. list block under `mask` → block,
-attributed to `trailing_zeros(bits & mask)` · 11. CNAME targets re-run 8–10 →
-block · 12. allow.
+9. AI list, exact name → allow or block (Ai) · 10. list allow (`@@`) under
+`mask` → allow · 11. list block under `mask` → block, attributed to
+`trailing_zeros(bits & mask)` · 12. CNAME targets re-run 8, 10 and 11 → block
+(Cname) — only when the query reached 13 or step 9 allowed it · 13. allow.
 
-Rule matching is suffix-on-label-boundary. `GET /check` reports which step
-fired. Unnamed clients are discovered from `query_stats_hourly`.
+Rule matching is suffix-on-label-boundary; the AI list alone matches exact
+names. The AI list is household-wide and applies in every filtered scope,
+including a device on no lists; paused and unfiltered scopes never reach it.
+`GET /check` runs `evaluate` (not `evaluate_lists`, which is the CNAME
+re-check alone) and reports which step fired. Unnamed clients are discovered
+from `query_stats_hourly`.
 
 ---
 
@@ -639,6 +868,12 @@ Writer (`querylog.rs`), one task, owns everything off the hot path:
   pairs (always written: counts are not browsing history). A SQLite error drops
   the batch with a WARN; DNS never waits on it.
 - Channel full → entry dropped, `log_dropped_total += 1`.
+- AI review's tap (ADR 0002, §3a): once per batch the writer reads
+  `state.ai.tap()` — one atomic load, `None` unless review is running — and,
+  when it is `Some`, offers each A/AAAA/HTTPS entry a list, the AI list or
+  nothing decided as a `Seen { ts, client, domain: Arc<str>, blocked, reason }`
+  with `try_send` into a 4,096-deep channel. A full channel drops and counts;
+  the writer never waits on the reviewer, and dns-core is untouched.
 
 Size: ~55 B/row on disk; a busy household (~10 qps, 0.9 M rows/day) hits the
 250,000-row cap (~15–20 MB) long before 7 days; a quiet one keeps 7 days.
@@ -649,7 +884,15 @@ Prune (`prune.rs`, hourly, first tick immediate):
 `DELETE FROM query_log WHERE ts < now - history_days*86400` (skipped when
 history_days == 0); `DELETE FROM query_log WHERE id <= (SELECT id FROM query_log
 ORDER BY id DESC LIMIT 1 OFFSET max_rows)`; `DELETE FROM query_stats_hourly
-WHERE hour < now - 90*86400`.
+WHERE hour < now - 90*86400`. Then, when history_days > 0, the AI list:
+`prune_ai_verdicts(now, history_days, 10_000)` deletes ordinary `ignore` rows
+past `review_after` or older than `HISTORY_DAYS`, contested rows past
+`review_after`, any row judged 90 days ago or more, and the oldest beyond
+10,000 rows; every deleted name leaves the reviewer's memory too, and the AI
+list is reinstalled if a decision went. `scrub_ai_sites(now -
+history_days*86400)` then sets `site` and `conflict_site` to NULL on every row
+judged before the cutoff. Each failure is logged at WARN and left for the next
+pass.
 
 Reads: GET /queries keyset; Overview `top_*` memoized 60 s. Lifetime counters
 come from the runtime atomics, so a cleared log does not zero them. Restart:
@@ -675,6 +918,11 @@ invalid values fail startup.
 | `COGWHEEL_RETENTION__HISTORY_DAYS` | `7` | days of `query_log`; **`0` = do not write the query log** (rollups still kept) |
 | `COGWHEEL_RETENTION__QUERY_LOG_MAX_ROWS` | `250000` | hard row cap enforced by the prune |
 | `COGWHEEL_RETENTION__PRUNE_INTERVAL_SECS` | `3600` | floor 60 |
+| `COGWHEEL_SERVER__ALLOWED_HOSTS` | empty | comma list of extra hostnames (no ports; lowercased) the guarded AI routes accept, e.g. a reverse proxy's name (§3a); also never sent to OpenRouter |
+| `COGWHEEL_AI__AVAILABLE` | `true` | `false` is the operator's kill switch: the reviewer never starts, the AI list compiles empty, routes 24–26 answer 409, and `ai_enabled` is deleted at startup. `true/false`, `1/0`, `yes/no`, `on/off` |
+| `COGWHEEL_AI__OPENROUTER_API_KEY` | unset | wins over a key saved in the UI, which then cannot change it. Empty counts as unset; a value that cannot be a header (a byte outside 0x21–0x7E, or over 512 characters) stops startup, printed as `(hidden)`. No `sk-or-` prefix check |
+| `COGWHEEL_AI__BASE_URL` | `https://openrouter.ai` | environment-only, never settable through the API. `https://`, or `http://` to a loopback host; no path but `/`, no query, fragment or credentials. A bad value stops startup |
+| `COGWHEEL_AI__ZERO_RETENTION` | `true` | sends `provider.zdr` with every request; `data_collection: "deny"` is sent either way. `false` admits decision models whose providers may retain the names |
 | `COGWHEEL_WEB_DIST_DIR` | search path | unchanged |
 | `RUST_LOG` | `info` | unchanged |
 
@@ -690,22 +938,28 @@ pull request that adds one needs to argue with this list first —
 [ARCHITECTURE §1](ARCHITECTURE.md#1-scope-boundary--what-cogwheel-is-not) has the
 reasoning at length.
 
-- Machine-learning classification of domains, and threat-intelligence feeds. A
-  name is blocked because a list you subscribed to names it, or because you
-  wrote a rule. That is the whole decision procedure, and it is why
-  `GET /api/v1/check` can name the step that fired.
+- Machine-learning classification of domains **on the DNS path, or without an
+  explicit opt-in**, and threat-intelligence feeds. A name is blocked because a
+  list you subscribed to names it, because you wrote a rule, or — only after
+  you turned on AI review — because a decision model judged that exact name off
+  the request path and the verdict is a stored, visible, undoable row. That is
+  the whole decision procedure, and it is why `GET /api/v1/check` can name the
+  step that fired. [ADR 0002](adr/0002-ai-review-tier.md) is the one argued
+  exception, and the place to argue with it.
 - Multi-node sync, VPN and exit-node integration.
 - Notifications, a backup API, soak-testing tooling, a metrics exporter.
   `GET /api/v1/overview` and `/health/*` are the operational surface; the data
   directory is the backup.
 - Telemetry of any kind, including an update check. The appliance's only
-  outbound connections are to the configured upstream resolver and to the
-  blocklist URLs you subscribed to.
+  outbound connections are to the configured upstream resolver, to the
+  blocklist URLs you subscribed to, and, only while AI review is on (or while
+  someone uses its set-up form), OpenRouter.
 - Intercepting HTTPS in order to defeat anti-adblock detection.
 
 Classifier, reliability-budget and multi-node code all existed at one point and
-were cut. They are not coming back under a different name: §9 is the boundary,
-not a backlog.
+were cut. The classifier that was cut is not back: ADR 0002 admits a narrower,
+opt-in, auditable thing, and that ADR is where to argue with it. The rest are
+not coming back under a different name: §9 is the boundary, not a backlog.
 
 ---
 
@@ -728,6 +982,7 @@ from. Undoing one needs a measurement, not an opinion.
 | LOW device edit flushes the cache | scope interning |
 | MED query log never persisted | `query_log` + `query_stats_hourly`, batched every 5 s |
 | NEW correctness | TC truncation for non-EDNS UDP clients; A-label keying |
+| NEW AI review needs its verdicts on the request path (ADR 0002) | compiled into `Policy` as an exact-name `AiList`: one branch on a miss while it is empty, one hash probe when not, nothing on a hit; a change drops only the changed names' cache entries, never the whole cache (§11.1 has the measurement) |
 
 ---
 
@@ -754,6 +1009,67 @@ request path is expected to come with its output — and with
 [§12.3](#123-reading-the-first-time-blocked-miss-figure) read first, because the
 harness's own floor is most of that number.
 
+### 11.1 ADR 0002, before and after
+
+ADR 0002 touches the request path in two places: one branch (an empty AI
+list) or one hash probe (a non-empty one) in `evaluate` on a cache miss, and
+the CNAME re-check gate. So it came with the benchmark, run three ways:
+**before**, the `a49d021` tree it was built on; **after** with an empty AI
+list; and **after** with 10,000 applied AI-list blocks, the table's cap.
+
+Method, so the numbers can be disagreed with: both binaries built with
+`cargo build --release --locked -p cogwheel-server` from clean exports of the
+two commits, on 2026-10-08, on a shared 4-vCPU x86_64 sandbox; oisd small
+fetched that day (57,661 lines); each configuration run three times as a whole
+`scripts/bench/run.py` invocation, the three configurations interleaved, every
+run passing every correctness check (`blocked_total` exact, AAAA-after-A, CNAME
+cloak, hung upstream, blocked answers). The 10,000-name list was written
+straight into a fresh v2 database before the run — 10,000 block rows at the
+model's confidence 0.95 for names on no list, and `ai_enabled=1`, with no key,
+so nothing was ever sent — and every policy install in those runs logged
+`ai_applied=10000`. This host has egress, so in every run the seeded default
+list also downloaded at boot: the RSS and timings below include a second copy
+of oisd small and are comparable with each other, not with the §12 table, which
+was taken by the method in §12.2. Each cell is the lowest and highest of the
+three runs.
+
+| | Before (`a49d021`) | After, empty AI list | After, 10,000-name AI list |
+|---|---|---|---|
+| Binary (stripped) | 11,099,384 B | 11,863,352 B | 11,863,352 B |
+| Startup → ready | 34 – 49 ms | 25 – 47 ms | 68 – 96 ms |
+| List toggle (rebuild from cache) | 74 – 93 ms | 84 – 118 ms | 109 – 149 ms |
+| RSS after the lists load | 48.4 – 57.0 MB | 51.9 – 53.4 MB | 66.0 – 67.4 MB |
+| Cache hit, server-internal (window) | 3.20 – 4.98 µs | 3.19 – 3.70 µs | 3.43 – 3.91 µs |
+| Cache hit, client p50 | 72 – 96 µs | 80 – 86 µs | 79 – 91 µs |
+| Blocked (cached), client p50 | 78 – 90 µs | 74 – 87 µs | 81 – 94 µs |
+| First-time blocked miss, client p50 | 92 – 115 µs | 84 – 115 µs | 84 – 99 µs |
+| Cold miss, client p50 | 370 – 502 µs | 304 – 483 µs | 411 – 464 µs |
+| Throughput (4 × 25,000) | 35,642 – 42,744 QPS | 35,045 – 43,395 QPS | 38,642 – 40,536 QPS |
+| Server CPU per query | 32.1 – 39.2 µs | 32.6 – 39.3 µs | 35.0 – 37.2 µs |
+| Cache hit, `HISTORY_DAYS=0` run | 3.22 – 3.71 µs | 2.46 – 7.07 µs | 3.34 – 4.33 µs |
+| Threads, steady state | 5 | 5 | — |
+
+What that says, and does not:
+
+- **On the request path, nothing that this harness can separate from its own
+  noise.** Every latency and throughput range for the empty and the
+  10,000-name AI list overlaps the before range; the first-time blocked miss,
+  the one that pays the AI probe, reads 84 – 99 µs with 10,000 names against
+  92 – 115 µs before. Per §12.3 the harness's floor is most of each number, so
+  this rules out a large cost and cannot see a small one.
+- **A full AI list costs at startup and in memory.** With 10,000 names, startup
+  to ready is about 45 ms longer, a list toggle about 30 ms longer (every
+  rebuild reads and compiles the stored verdicts), and RSS after the lists load
+  is about 14 MB higher than with an empty list, comparing the averages of the
+  three runs. That is more than the 5 MB ADR 0002 budgets for review being on,
+  and this measurement had the list applying but review not running (no key,
+  so no reviewer state beyond the `known` map). Where the 14 MB goes was not
+  taken apart in this change; it is recorded here so the next one starts from
+  it.
+- **The binary grew by 763,968 B (6.9%)**, against the ≤ 14 MB target.
+- **Threads are unchanged**: the reviewer and the installer are Tokio tasks.
+  Counted as `ls /proc/<pid>/task | wc -l` after readiness, with no AI list.
+
 ---
 
 ## 12 What it measures
@@ -769,37 +1085,43 @@ needs a harness and a host named beside it to mean anything at all.
 
 | Metric | Before | Now | Target |
 |---|---|---|---|
-| Rust LOC (excl. tests) | 19,512 in 10 members | **8,269 in 5** | ≤ 8,600 in 5 — see [§12.1](#121-how-the-rust-loc-figure-is-counted) |
-| Web LOC (`apps/cogwheel-web/src`) | 17,222 | **8,227** (7,927 TS/TSX + 300 CSS) | ≤ 8,000 — over by 227, see below |
-| HTTP routes | 44 + 4 | **20 + 2** | 20 + 2 |
+| Rust LOC (excl. tests) | 19,512 in 10 members | **15,096 in 5**: the core 8,878, ADR 0002's own files 6,218 | core ≤ 9,100; ADR 0002 ≤ 3,900; total ≤ 13,000 in 5 — **ADR 0002 over by 2,318**, see [§12.1](#121-how-the-rust-loc-figure-is-counted) |
+| Web LOC (`apps/cogwheel-web/src`) | 17,222 | **14,308** (13,906 TS/TSX + 402 CSS) | ≤ 8,000 — over by 6,308, see below |
+| HTTP routes | 44 + 4 | **27 + 2** | 27 + 2 |
 | Sidebar pages | 8 | **5** | 5 |
 | Library crates + binary | 10 | **5** | 5 (+ web) |
 | `Cargo.lock` packages | 326 | **222** | ≤ 245 |
-| SQLite tables | 12 | **7** | 7 |
-| Binary (x86_64, stripped) | 15,707,800 B | **11,083,000 B** | ≤ 14 MB |
+| SQLite tables | 12 | **8** | 8 |
+| Binary (x86_64, stripped) | 15,707,800 B | **11,863,352 B** | ≤ 14 MB |
 | Threads, steady state | 6 | **5** | 5 |
 
 ```sh
 find apps/cogwheel-web/src -type f | xargs wc -l | tail -1   # web LOC
-grep -n '\.route(' apps/cogwheel-server/src/http.rs         # 16 calls, 22 routes
+grep -n '\.route(' apps/cogwheel-server/src/http.rs         # 21 calls, 29 routes
 grep -c '{ to: "/' apps/cogwheel-web/src/lib/nav.ts        # sidebar pages
 grep -c '^\[\[package\]\]' Cargo.lock                      # lock packages
-grep -c 'CREATE TABLE' crates/cogwheel-storage/src/schema_v1.sql
+cat crates/cogwheel-storage/src/schema_v*.sql | grep -c 'CREATE TABLE'   # 8
 stat -c %s target/release/cogwheel-server                   # binary bytes
 ls /proc/<pid>/task | wc -l                                 # threads, once ready
 ```
 
 Rust LOC needs the counting rule in [§12.1](#121-how-the-rust-loc-figure-is-counted)
-rather than a `wc -l`: a plain count of the same files is 9,321, because it
-includes the `#[cfg(test)]` modules the rule excludes.
+rather than a `wc -l`: a plain count of every `.rs` file under the five crates'
+`src/` is 28,356, because it includes the test files and `#[cfg(test)]` modules
+the rule excludes.
 
 Two of those want a word rather than a number.
 
-**Web LOC is 227 over its target**, counting everything under `src/`
-(8,227 lines across 59 files); counting only TypeScript it is 7,927 and under.
-The target was set against the whole directory, so the honest reading is that it
-is over. It is recorded here rather than quietly recounted, because a target
-that moves to wherever the tree happens to be is a row that can never fail.
+**Web LOC is 6,308 over its target**, counting everything under `src/`
+(14,308 lines across 81 files: 13,906 TypeScript and TSX, 402 CSS). This row was
+last recorded at 8,227 (227 over, across 59 files), and the tree had reached
+12,538 across 78 files by `a49d021`, the commit ADR 0002 was built on, without
+the row being restated; ADR 0002's UI is 1,770 of what remains (three new files
+under `routes/lists/`, and glue in twelve existing ones). The target was set
+against the whole directory, so the honest reading is that it is well over, and
+nothing in this row argues it up. It is recorded here rather than quietly
+recounted, because a target that moves to wherever the tree happens to be is a
+row that can never fail.
 
 **Threads is five in the steady state** — the main thread plus four Tokio
 workers on a four-CPU host. A sixth appears transiently while a list is being
@@ -842,44 +1164,96 @@ supports.
 ### 12.1 How the Rust LOC figure is counted
 
 **The rule:** every `.rs` file under a crate's `src/`, minus the files that
-exist only for tests (`src/tests.rs`, `src/tests/`, `alloc_guard.rs`) and minus
-every `#[cfg(test)]` module inside the rest. Those exclusions, plus the `tests/`
-directories, are 5,908 further lines.
+exist only for tests (`src/tests.rs`, any `tests/` directory under `src/` —
+`src/tests/` and the AI reviewer's `src/ai/tests/` — and `alloc_guard.rs`) and
+minus every `#[cfg(test)]` item inside the rest. Those exclusions, plus the
+crates' own `tests/` directories, are 15,917 further lines.
 
 The target this row is measured against — `≤ 4,600` — was written before any of
 this code existed. It was a guess, it was never derived from the work the
 product has to do, and the tree was then read line by line against it.
 
-| Crate | Lines | Of which comment | What needs them |
-|---|---|---|---|
-| `apps/cogwheel-server` | 3,680 | 722 | 22 routes across eight handler modules, the §3 envelope and its two rejection wrappers, config from twelve environment variables, the §6 policy build with scope interning, the §2.7 refresh pipeline, the §7 query-log writer, retention, and startup/shutdown for four background tasks |
-| `cogwheel-storage` | 1,760 | 517 | seven tables, a guarded one-way v0→v1 upgrade, a batched log writer with hourly rollups in the same transaction, keyset paging, a bounded top-ten, and two retention bounds — every method `async` over `spawn_blocking` |
-| `cogwheel-dns-core` | 1,651 | 397 | a forwarder with a sharded wire cache, serve-stale, EDNS truncation, CNAME re-check, a bounded miss pipeline, UDP and TCP listeners, and DoT/DoH upstream parsing |
-| `cogwheel-policy` | 735 | 220 | the seven-tier precedence of §6, the 64-slot bitmask index, rule sets with label-boundary matching, scopes, and one normaliser |
-| `cogwheel-lists` | 443 | 109 | conditional GET with a streaming 32 MiB cap, three list grammars, verification, and the protected-name note |
-| **Total** | **8,269** | **1,965** | |
+| Crate | At `a49d021` | Now | Of which comment | What needs them |
+|---|---|---|---|---|
+| `apps/cogwheel-server` | 3,741 | 9,750 | 1,791 | 29 routes across nine handler modules, the §3 envelope and its three rejection wrappers, config from eighteen environment variables, the §6 policy build with scope interning, the §2.7 refresh pipeline, the §7 query-log writer, retention, startup/shutdown for six background tasks, and the opt-in AI reviewer |
+| `cogwheel-storage` | 1,760 | 2,275 | 673 | eight tables, a guarded one-way v0→v1 upgrade and an additive v1→v2 step, a batched log writer with hourly rollups in the same transaction, keyset paging, a bounded top-ten, and three retention bounds — every method `async` over `spawn_blocking` |
+| `cogwheel-dns-core` | 1,708 | 1,768 | 427 | a forwarder with a sharded wire cache, serve-stale, EDNS truncation, CNAME re-check, a bounded miss pipeline, UDP and TCP listeners, DoT/DoH upstream parsing, and per-name invalidation |
+| `cogwheel-policy` | 737 | 860 | 252 | the eight-tier precedence of §6, the 64-slot bitmask index, rule sets with label-boundary matching, scopes, one normaliser, and the exact-name AI list |
+| `cogwheel-lists` | 443 | 443 | 109 | conditional GET with a streaming 32 MiB cap, three list grammars, verification, and the protected-name note |
+| **Total** | **8,389** | **15,096** | **3,252** | |
 
-Two figures put that in proportion. Roughly a quarter of it — 1,965 lines — is
+`a49d021` is the tree ADR 0002 was built on. This section last recorded 8,269;
+the same rule applied to `a49d021` gives 8,389 — 120 lines that landed after
+that recording without it being restated. Both columns above
+were measured with the rule, on the same day, by the same script.
+
+Two figures put that in proportion. Roughly a fifth of it — 3,252 lines — is
 comment, which is this codebase's house style: every non-obvious decision says
 why it was made, and several of those comments are the only record of a measured
-result. Strip them and the blank lines and 5,658 lines of code remain. And the
-comparison people reach for does not hold either: DNSNet's Rust core is about
-1,000 lines, and it has no HTTP API, no SQLite, no per-device model and no
+result. Strip them and the 1,162 blank lines and 10,682 lines of code remain.
+And the comparison people reach for does not hold either: DNSNet's Rust core is
+about 1,000 lines, and it has no HTTP API, no SQLite, no per-device model and no
 persisted query log — four of the things this document exists to specify.
 
-A pass looking specifically for incidental complexity — duplicated logic,
-hand-rolled code a dependency provides, abstractions with one caller, builders
-that add a layer without adding safety — found and removed 130 lines (the
-largest: the v0→v1 upgrade now executes `schema_v1.sql` itself instead of
-carrying a second copy of the DDL, and the Overview serialises the runtime's own
-snapshot instead of copying it field by field into a near-identical struct).
-That is what was there. The remaining 8,269 is the product: 4,600 was never
-reachable without deleting features this spec requires.
+Before ADR 0002, a pass looking specifically for incidental complexity —
+duplicated logic, hand-rolled code a dependency provides, abstractions with one
+caller, builders that add a layer without adding safety — found and removed 130
+lines (the largest: the v0→v1 upgrade now executes `schema_v1.sql` itself
+instead of carrying a second copy of the DDL, and the Overview serialises the
+runtime's own snapshot instead of copying it field by field into a
+near-identical struct). That is what was there. What remained was the product:
+4,600 was never reachable without deleting features this spec requires, and the
+target became `≤ 8,600` — the measurement plus a little headroom, because a
+target set to whatever the tree happens to be is a row that can never fail.
 
-The target is therefore `≤ 8,600`, not the reading: the measurement plus a
-little headroom. A target set to whatever the tree happens to be is a row that
-can never fail. There are 331 lines of room; needing more than that means coming
-back here and arguing the ceiling up, which is the point of having one.
+**ADR 0002, counted as one unit.** Its own files, with the same rule:
+
+| File | Lines |
+|---|---|
+| `crates/cogwheel-policy/src/ai.rs` | 84 |
+| `crates/cogwheel-dns-core/src/invalidate.rs` | 59 |
+| `crates/cogwheel-storage/src/ai_verdicts.rs` | 385 |
+| `apps/cogwheel-server/src/ai/` (excluding `ai/tests/`), 19 files | 5,176 |
+| `apps/cogwheel-server/src/api/ai.rs` | 514 |
+| **ADR 0002's own files** (1,106 of them comment) | **6,218** |
+| Glue ADR 0002 added to files that already existed (server 319, storage 130, policy 39, dns-core 1) | 489 |
+| **The core**: everything that is not ADR 0002's own files (8,389 + 489) | **8,878** |
+| ADR 0002's lines in `cogwheel-policy` and `cogwheel-dns-core` together (`ai.rs` 84 + 39 glue, `invalidate.rs` 59 + 1 glue) | 183 |
+
+The target, replacing the single `≤ 8,600`:
+
+> The core target is `≤ 9,100`: the `≤ 8,600` this section argued, plus up to
+> 500 lines of glue that ADR 0002 adds to existing files. ADR 0002's own files
+> are counted separately, with the same rule, against `≤ 3,900`:
+> `crates/cogwheel-policy/src/ai.rs`, `crates/cogwheel-dns-core/src/invalidate.rs`,
+> `crates/cogwheel-storage/src/ai_verdicts.rs`, `apps/cogwheel-server/src/ai/`
+> (excluding `ai/tests/`) and `apps/cogwheel-server/src/api/ai.rs`. No more than
+> 175 of all ADR 0002 lines may sit in `cogwheel-policy` and `cogwheel-dns-core`
+> combined. The total is `≤ 13,000` in 5 members. The sub-budget keeps the core
+> honest and makes the feature auditable as one unit: if it is ever cut, it is
+> cut in one place, and the core returns to `≤ 8,600`. Needing more than any of
+> these means coming back here.
+
+**As built, it is over, and this records that rather than moving the targets to
+fit.** The core is 8,878, inside its 9,100, with the glue at 489 of its 500. The
+rest is not:
+
+- **ADR 0002's own files are 6,218 against 3,900 — 2,318 over.** The 3,900 was
+  set from a file-by-file estimate of 3,680 written before the code. The
+  largest miss is the state, settings and set-up cluster: the estimate had
+  `mod.rs` and `settings.rs` at 740 lines between them, and the build has nine
+  files there (`mod.rs`, `settings.rs`, `gate.rs`, `known.rs`, `models.rs`,
+  `patch.rs`, `spend.rs`, `status.rs`, `test_run.rs`) at 2,185. The pipeline
+  (`review.rs` and `review/settle.rs`) is 926 against 460, the client 468
+  against 290, and `api/ai.rs` 514 against 380; only `site.rs`, `worker.rs`
+  and `invalidate.rs` came in under their estimates.
+- **ADR 0002's lines in `cogwheel-policy` and `cogwheel-dns-core` are 183
+  against 175 — 8 over.**
+- **The total is 15,096 against 13,000 — 2,096 over.**
+
+Coming back here is now, then: the feature is cut back toward these numbers, or
+the ceiling is argued up in this section, with the reason, in its own change.
+Until one of those happens this row fails, and says so.
 
 ### 12.2 What the RSS row is a measurement of
 
