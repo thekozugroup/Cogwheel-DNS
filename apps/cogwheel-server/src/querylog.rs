@@ -173,8 +173,13 @@ fn absorb(
 ) {
     let streaming = state.events.listening();
     let names = streaming.then(|| state.device_names());
+    // AI review's tap (§6.2): one atomic load per batch, and `None` unless it is reviewing.
+    let tap = state.ai.tap();
 
     for entry in received.drain(..) {
+        if let Some(tap) = tap {
+            crate::ai::offer(tap, &entry, &state.ai);
+        }
         let reason = entry.verdict.reason();
         let blocked = entry.verdict.is_blocked();
         let ts = i64::from(entry.ts);

@@ -6,10 +6,14 @@
 //! is to stop somebody else keeping that record.
 
 use crate::state::{ServerState, now_secs};
+use cogwheel_storage::AiPruned;
 
 /// How long the hourly rollups are kept. They are counts, not browsing history, and at roughly
 /// 15 KB a day three months of them is smaller than one day of raw rows.
 const ROLLUP_DAYS: u32 = 90;
+
+/// The most rows the AI list keeps (§6.14), oldest judged first to go.
+const AI_MAX_ROWS: u32 = 10_000;
 
 /// Prune on the configured interval, starting immediately.
 ///
@@ -46,5 +50,44 @@ pub async fn task(state: ServerState) {
             // and a database busy with a flush is a transient the next tick handles.
             Err(error) => tracing::warn!(%error, "prune pass failed"),
         }
+        // With no activity log there is no AI list to prune: startup emptied it (§12).
+        if config.logging() {
+            prune_ai_list(&state, config.history_days).await;
+        }
+    }
+}
+
+/// The AI list's retention (§12): ordinary ignores live no longer than the activity log, the
+/// websites verdicts were judged for are forgotten at `HISTORY_DAYS`, and nothing lives past 90
+/// days or the row cap. Every failure is logged and left for the next pass.
+pub(crate) async fn prune_ai_list(state: &ServerState, history_days: u32) {
+    let now = now_secs();
+    match state
+        .storage
+        .prune_ai_verdicts(now, history_days, AI_MAX_ROWS)
+        .await
+    {
+        Ok(pruned) => {
+            // Every deleted name, of any verdict, so the reviewer's map shrinks with the table.
+            if !pruned.domains.is_empty() {
+                state.ai.forget_known(&pruned.domains);
+            }
+            // Only a decision changes the AI list; an expired ignore was never compiled.
+            if pruned.decisions > 0 {
+                state.ai.notify_install();
+            }
+            if pruned != AiPruned::default() {
+                tracing::info!(
+                    deleted = pruned.domains.len(),
+                    decisions = pruned.decisions,
+                    "pruned the AI list"
+                );
+            }
+        }
+        Err(error) => tracing::warn!(%error, "AI list prune failed"),
+    }
+    let cutoff = now - i64::from(history_days) * 86_400;
+    if let Err(error) = state.storage.scrub_ai_sites(Some(cutoff)).await {
+        tracing::warn!(%error, "scrubbing AI list sites failed");
     }
 }

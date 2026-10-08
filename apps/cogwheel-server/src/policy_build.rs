@@ -5,12 +5,17 @@
 //! does the same to verdicts without touching the index, so the index `Arc` is reused but the
 //! cache still goes. A device change only re-maps clients onto scopes, so the cache survives and
 //! the edited device simply lands on a new id whose entries have to be fetched once.
+//!
+//! A fourth kind, the AI list, changes verdicts for a few exact names: the index and cache are
+//! kept and only those names' answers are dropped. Because every compile reads the AI rows, every
+//! kind that keeps the cache compares the installed AI list with the new one and drops the
+//! difference — a device edit must not install verdicts the cache was never told about.
 
 use crate::http::ApiError;
 use crate::state::{DeviceNames, ServerState, lock, read, write};
 use cogwheel_lists::{ParsedList, SourceKind, build_index, parse_list, protected_hits};
 use cogwheel_policy::{Action, ListIndex, Policy, RuleSet, Scope, normalize_rule_domain};
-use cogwheel_storage::{Device, DeviceList, Rule, Source};
+use cogwheel_storage::{AiVerdict, Device, DeviceList, Rule, Source};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -30,6 +35,9 @@ pub enum Rebuild {
     Household,
     /// Only devices (or their own rules) changed: the index and the cache are both kept.
     Devices,
+    /// Only the AI list, or whether it applies, changed: the index is reused, and only the answers
+    /// for the names whose AI verdict changed are dropped.
+    Ai,
 }
 
 impl Rebuild {
@@ -46,6 +54,12 @@ pub struct PolicyStats {
     pub rules_loaded: usize,
     /// Enabled lists that took a slot.
     pub slots: usize,
+    /// Names whose AI verdict this install changed. 0 on an install that drops the whole cache,
+    /// which covers them anyway.
+    pub ai_changed: usize,
+    /// Cached answers dropped for those names. The cache is private to dns-core, so this is how a
+    /// test sees that an install took the targeted path.
+    pub ai_dropped: usize,
 }
 
 /// Read the database, compile a policy and install it in the runtime.
@@ -62,6 +76,16 @@ pub async fn rebuild(state: &ServerState, kind: Rebuild) -> Result<PolicyStats, 
     let devices = state.storage.list_devices().await?;
     let device_lists = state.storage.list_device_lists(None).await?;
     let rules = state.storage.list_rules(None).await?;
+    // Every kind reads the AI rows, so whatever installs a policy installs the committed verdicts.
+    // `applying()` is read here, under the lock: turning review off is an `Ai` rebuild that
+    // compiles an empty list, and the diff below then covers every name that was in force.
+    let ai_rows = if state.ai.applying() {
+        state.storage.list_ai_verdicts().await?
+    } else {
+        Vec::new()
+    };
+    // Read under the lock, always: the index is reused from it, and the install diffs against it.
+    let current = state.runtime.current_policy();
 
     // `enabled_slots` takes only the first 64. The API refuses a 65th under the refresh gate, so
     // reaching this means the database was edited behind the server's back — and a list with no
@@ -90,10 +114,9 @@ pub async fn rebuild(state: &ServerState, kind: Rebuild) -> Result<PolicyStats, 
         Rebuild::Lists
     };
 
-    // A device or household rebuild reuses the compiled index: the lists did not change, and
+    // A device, household or AI rebuild reuses the compiled index: the lists did not change, and
     // re-reading 50,000 lines off an SD card to rename a phone would be absurd.
-    let reuse = (kind != Rebuild::Lists).then(|| state.runtime.current_policy());
-    let index = reuse.as_ref().map(|policy| Arc::clone(&policy.index));
+    let index = (kind != Rebuild::Lists).then(|| Arc::clone(&current.index));
 
     let lists_dir = PathBuf::from(state.lists_dir.as_path());
     // Taken before `sources` is moved onto the blocking pool; the sweep below needs every id,
@@ -108,10 +131,13 @@ pub async fn rebuild(state: &ServerState, kind: Rebuild) -> Result<PolicyStats, 
             scopes.reset();
         }
         compile_policy(
-            &sources,
-            &devices,
-            &device_lists,
-            &rules,
+            &Rows {
+                sources: &sources,
+                devices: &devices,
+                device_lists: &device_lists,
+                rules: &rules,
+                ai: &ai_rows,
+            },
             index,
             block_mode,
             &mut scopes,
@@ -129,18 +155,46 @@ pub async fn rebuild(state: &ServerState, kind: Rebuild) -> Result<PolicyStats, 
     state.set_device_names(built.device_names);
     *write(&state.indexed_lists) = enabled;
     let policy = Arc::new(built.policy);
+    let (mut ai_changed, mut ai_dropped) = (0, 0);
     if kind.invalidates_cache() {
         state.runtime.swap_policy(policy);
     } else {
-        state.runtime.swap_policy_keep_cache(policy);
+        // Devices and Ai keep the cache, so whatever the AI list changed is dropped by name. The
+        // diff is against the policy read under this lock, which is exactly the one replaced.
+        let changed = current.ai.changes(&policy.ai);
+        if changed.is_empty() {
+            state.runtime.swap_policy_keep_cache(policy);
+        } else {
+            let runtime = Arc::clone(&state.runtime);
+            ai_changed = changed.len();
+            // The sweep walks every cache shard, so it runs off the async workers.
+            ai_dropped = tokio::task::spawn_blocking(move || {
+                runtime.swap_policy_invalidating(policy, &changed)
+            })
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "AI list install failed");
+                ApiError::internal("The policy could not be installed.")
+            })?;
+            tracing::info!(
+                names = ai_changed,
+                dropped = ai_dropped,
+                "AI list changed; dropped only the answers for those names"
+            );
+        }
     }
     tracing::info!(
         ?kind,
         rules_loaded = built.stats.rules_loaded,
         slots = built.stats.slots,
+        ai_applied = built.ai_applied,
         "policy installed"
     );
-    Ok(built.stats)
+    Ok(PolicyStats {
+        ai_changed,
+        ai_dropped,
+        ..built.stats
+    })
 }
 
 /// A compiled policy and the two things the server keeps alongside it.
@@ -148,6 +202,17 @@ struct Built {
     policy: Policy,
     device_names: DeviceNames,
     stats: PolicyStats,
+    /// Names the compiled AI list decides, for the log line.
+    ai_applied: usize,
+}
+
+/// Everything a compile reads from the database.
+struct Rows<'a> {
+    sources: &'a [Source],
+    devices: &'a [Device],
+    device_lists: &'a [DeviceList],
+    rules: &'a [Rule],
+    ai: &'a [AiVerdict],
 }
 
 /// Build the list index from the cached bodies on disk (§2.6, §6 step 1).
@@ -238,16 +303,20 @@ pub fn enabled_slots(sources: &[Source]) -> impl Iterator<Item = &Source> {
         .take(MAX_LIST_SLOTS)
 }
 
-/// Compile the scopes (§6 steps 2–5). Pure: everything it needs is an argument.
+/// Compile the scopes (§6 steps 2–5) and the AI list. Pure: everything it needs is an argument.
 fn compile_policy(
-    sources: &[Source],
-    devices: &[Device],
-    device_lists: &[DeviceList],
-    rules: &[Rule],
+    rows: &Rows<'_>,
     index: Arc<ListIndex>,
     block_mode: cogwheel_policy::BlockMode,
     scopes: &mut crate::state::ScopeAllocator,
 ) -> Built {
+    let Rows {
+        sources,
+        devices,
+        device_lists,
+        rules,
+        ai: ai_rows,
+    } = *rows;
     let slot_of: HashMap<&str, u8> = enabled_slots(sources)
         .enumerate()
         .filter_map(|(slot, source)| {
@@ -301,14 +370,20 @@ fn compile_policy(
         device_names.insert(ip, Arc::from(device.name.as_str()));
     }
 
+    // Judged against the live lists, with every bar applied again (§5.1).
+    let ai = Arc::new(crate::ai::verdict::compile(ai_rows, &index, all_mask));
+    let ai_applied = ai.len();
     let stats = PolicyStats {
         rules_loaded: index.len(),
         slots: slot_of.len(),
+        ai_changed: 0,
+        ai_dropped: 0,
     };
     Built {
-        policy: Policy::new(index, household, by_ip, all_mask, block_mode),
+        policy: Policy::new(index, household, by_ip, all_mask, block_mode).with_ai(ai),
         device_names,
         stats,
+        ai_applied,
     }
 }
 

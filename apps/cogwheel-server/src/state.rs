@@ -235,6 +235,9 @@ pub struct ServerState {
     /// Addresses to point a router at, memoized because discovering them shells out.
     pub connect_targets: Arc<Cached<Vec<String>>>,
     pub http: reqwest::Client,
+    /// AI review (ADR 0002): its send gate, settings, key and spend. It owns the only client that
+    /// talks to OpenRouter; `http` above is the list fetcher, which follows redirects.
+    pub ai: Arc<crate::ai::AiState>,
     pub shutdown: tokio::sync::watch::Receiver<bool>,
 }
 

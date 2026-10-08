@@ -7,6 +7,7 @@
 //! happens afterwards, in the background, which is why `/health/ready` answers 200 on a machine
 //! with no egress at all.
 
+mod ai;
 mod api;
 mod config;
 mod http;
@@ -40,9 +41,10 @@ Usage:
 
 There are no other flags. Everything is configured by environment variable:
 COGWHEEL_PROFILE, COGWHEEL_SERVER__*, COGWHEEL_STORAGE__*, COGWHEEL_UPSTREAM__*,
-COGWHEEL_BLOCKING__*, COGWHEEL_UPDATER__*, COGWHEEL_RETENTION__*. On an installed
-appliance those live in /etc/cogwheel/.env, or /etc/cogwheel/cogwheel.env for a
-native systemd install. See docs/DEPLOYMENT.md for the full list.
+COGWHEEL_BLOCKING__*, COGWHEEL_UPDATER__*, COGWHEEL_RETENTION__*, COGWHEEL_AI__*.
+On an installed appliance those live in /etc/cogwheel/.env, or
+/etc/cogwheel/cogwheel.env for a native systemd install. See docs/DEPLOYMENT.md
+for the full list.
 ";
 
 /// What the command line asked for.
@@ -138,6 +140,9 @@ async fn run(descriptors: usize) -> Result<()> {
     let storage = Storage::open(&config.database_url).await?;
     let readiness = Arc::new(http::Readiness::default());
     readiness.mark_storage_ready();
+    // Before the boot rebuild, which compiles the AI list from what this leaves: when AI review
+    // is unavailable it forgets the consent to it, and with no activity log it empties the list.
+    let (ai_state, tap_rx) = ai::AiState::load(&config, &storage).await?;
 
     let resolver = build_resolver(&config.upstream_servers)?;
     // The runtime boots on an empty policy — every name resolves — and takes the compiled one
@@ -168,6 +173,7 @@ async fn run(descriptors: usize) -> Result<()> {
             .connect_timeout(CONNECT_TIMEOUT)
             .build()
             .context("build the list fetcher")?,
+        ai: ai_state,
         shutdown: shutdown_rx.clone(),
     };
 
@@ -207,6 +213,13 @@ async fn run(descriptors: usize) -> Result<()> {
 
     let log_handle = tokio::spawn(querylog::writer(state.clone(), log_rx));
     tokio::spawn(prune::task(state.clone()));
+    // Detached like the prune, so neither AI task can take DNS down. Unavailable (the operator's
+    // switch, or no activity log to review), nothing is spawned and the tap is never read.
+    if config.ai_available && config.logging() {
+        ai::spawn(&state, tap_rx);
+    } else {
+        drop(tap_rx);
+    }
     let refresh_handle = tokio::spawn(refresh::scheduler(state.clone()));
 
     // Named, with the fix, for the same reason the DNS listeners are: the operator reading this

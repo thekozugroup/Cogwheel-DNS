@@ -59,6 +59,8 @@ pub struct Harness {
     pub state: ServerState,
     pub lists: TempDir,
     _log_rx: mpsc::Receiver<LogEntry>,
+    /// AI review's tap, held open like the log channel; nothing reads it unless a test does.
+    _tap_rx: mpsc::Receiver<crate::ai::Seen>,
     _shutdown: watch::Sender<bool>,
 }
 
@@ -78,6 +80,9 @@ impl Harness {
         config.block_mode = mode;
         // Fixed so no test shells out to `hostname -I` on a machine this does not control.
         config.advertised_dns_targets = vec!["192.168.1.2".to_owned()];
+        // A closed port: no test can reach OpenRouter, and AI review's own client skips proxies
+        // for a loopback base, so a CI runner's HTTPS_PROXY cannot carry a request out either.
+        config.ai_base_url = "http://127.0.0.1:1".parse().expect("a loopback url");
 
         let storage = Storage::open(&config.database_url)
             .await
@@ -93,6 +98,9 @@ impl Harness {
                 .expect("remove the seeded source");
         }
 
+        let (ai, tap_rx) = crate::ai::AiState::load(&config, &storage)
+            .await
+            .expect("load AI review's state");
         let resolver = build_resolver(&config.upstream_servers).expect("build a resolver");
         let (runtime, log_rx) = DnsRuntime::new(resolver, Arc::new(Policy::empty(mode)));
         let (shutdown, shutdown_rx) = watch::channel(false);
@@ -111,12 +119,14 @@ impl Harness {
             top_domains: Arc::new(Cached::new(TOP_DOMAIN_TTL)),
             connect_targets: Arc::new(Cached::new(TOP_DOMAIN_TTL)),
             http: reqwest::Client::new(),
+            ai,
             shutdown: shutdown_rx,
         };
         Self {
             state,
             lists,
             _log_rx: log_rx,
+            _tap_rx: tap_rx,
             _shutdown: shutdown,
         }
     }

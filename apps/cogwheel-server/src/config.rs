@@ -7,12 +7,14 @@
 //! set and cannot be parsed stops startup — a resolver that quietly falls back to a default
 //! bind address is a resolver nobody on the network can find.
 
+use crate::ai::key::SecretKey;
 use cogwheel_dns_core::UpstreamEndpoint;
 use cogwheel_policy::BlockMode;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::str::FromStr;
+use url::{Host, Url};
 
 /// Refresh interval floor (§8): a list server is somebody else's, and a tighter loop than this
 /// is impolite at best and rate-limited at worst.
@@ -21,6 +23,12 @@ const MIN_REFRESH_INTERVAL_SECS: u64 = 300;
 /// Prune interval floor (§8). A one-second interval would have the appliance deleting across
 /// its largest table continuously.
 const MIN_PRUNE_INTERVAL_SECS: u64 = 60;
+
+/// Where AI review sends names when nothing says otherwise (ADR 0002).
+const DEFAULT_AI_BASE_URL: &str = "https://openrouter.ai";
+
+/// What a `ConfigError` says instead of the value of a variable that holds a secret.
+const HIDDEN: &str = "(hidden)";
 
 /// Where this instance is deployed, which is only ever a shorthand for a set of defaults.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -102,6 +110,19 @@ pub struct AppConfig {
     pub history_days: u32,
     pub max_rows: u64,
     pub prune_interval_secs: u64,
+    /// `false` is the operator's kill switch for AI review (ADR 0002): the reviewer never starts,
+    /// the AI list compiles empty, and the AI writes answer 409.
+    pub ai_available: bool,
+    /// An OpenRouter key from the environment. It wins over one saved in the UI, which then
+    /// cannot change it.
+    pub ai_api_key: Option<SecretKey>,
+    /// Where OpenRouter is. Environment-only, and never settable through the API, so nobody on
+    /// the network can point the bearer key somewhere else.
+    pub ai_base_url: Url,
+    /// Ask OpenRouter for zero-data-retention providers only (`provider.zdr`).
+    pub ai_zero_retention: bool,
+    /// Extra hostnames the AI routes' guard accepts: a reverse proxy's name, lowercased.
+    pub allowed_hosts: Vec<String>,
 }
 
 impl AppConfig {
@@ -216,6 +237,38 @@ impl AppConfig {
             config.max_rows = value;
         }
 
+        if let Some(value) = flag(&get, "COGWHEEL_AI__AVAILABLE")? {
+            config.ai_available = value;
+        }
+        if let Some(value) = get("COGWHEEL_AI__OPENROUTER_API_KEY") {
+            // Never the value, not even in the error that stops startup: it is printed, and
+            // `docker logs` is not a place a key should end up.
+            config.ai_api_key = SecretKey::from_env(&value).map_err(|()| ConfigError {
+                variable: "COGWHEEL_AI__OPENROUTER_API_KEY",
+                value: HIDDEN.to_owned(),
+                expected: "an OpenRouter key: at most 512 visible ASCII characters, no spaces",
+            })?;
+        }
+        if let Some(value) = get("COGWHEEL_AI__BASE_URL") {
+            config.ai_base_url = ai_base_url(&value).ok_or_else(|| ConfigError {
+                variable: "COGWHEEL_AI__BASE_URL",
+                // A URL with credentials in it is refused, and not repeated either.
+                value: if value.contains('@') {
+                    HIDDEN.to_owned()
+                } else {
+                    value.clone()
+                },
+                expected: "an https:// address (or http:// to this machine) with no path, query \
+                           or credentials",
+            })?;
+        }
+        if let Some(value) = flag(&get, "COGWHEEL_AI__ZERO_RETENTION")? {
+            config.ai_zero_retention = value;
+        }
+        if let Some(value) = get("COGWHEEL_SERVER__ALLOWED_HOSTS") {
+            config.allowed_hosts = allowed_hosts(&value)?;
+        }
+
         Ok(config)
     }
 
@@ -244,6 +297,12 @@ impl AppConfig {
             history_days: 7,
             max_rows: 250_000,
             prune_interval_secs: 3_600,
+            ai_available: true,
+            ai_api_key: None,
+            ai_base_url: Url::parse(DEFAULT_AI_BASE_URL)
+                .unwrap_or_else(|error| unreachable!("the default OpenRouter URL parses: {error}")),
+            ai_zero_retention: true,
+            allowed_hosts: Vec::new(),
         }
     }
 
@@ -293,6 +352,80 @@ where
             expected,
         }),
     }
+}
+
+/// Read a switch. Spelled forgivingly, like the block mode: `true`/`false`, `1`/`0`, `yes`/`no`
+/// and `on`/`off`, in any case.
+fn flag<F>(get: &F, variable: &'static str) -> Result<Option<bool>, ConfigError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let Some(value) = get(variable) else {
+        return Ok(None);
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(Some(true)),
+        "false" | "0" | "no" | "off" => Ok(Some(false)),
+        _ => Err(ConfigError {
+            variable,
+            value,
+            expected: "true or false",
+        }),
+    }
+}
+
+/// An OpenRouter base URL, or `None` if it is not one Cogwheel will send a key to.
+///
+/// `https://`, or `http://` only to a loopback host (the offline test stub). No path but `/`, no
+/// query, fragment or credentials: the endpoints are joined onto it, and anything else would be
+/// a second place for a request to be redirected.
+fn ai_base_url(value: &str) -> Option<Url> {
+    let url = Url::parse(value.trim()).ok()?;
+    let secure = match url.scheme() {
+        "https" => true,
+        "http" => is_loopback(&url),
+        _ => false,
+    };
+    let bare = url.host().is_some()
+        && url.path() == "/"
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.username().is_empty()
+        && url.password().is_none();
+    (secure && bare).then_some(url)
+}
+
+/// Whether a URL's host is this machine: 127.0.0.0/8, `::1` or `localhost`.
+pub fn is_loopback(url: &Url) -> bool {
+    match url.host() {
+        Some(Host::Ipv4(address)) => address.is_loopback(),
+        Some(Host::Ipv6(address)) => address.is_loopback(),
+        Some(Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+        None => false,
+    }
+}
+
+/// `COGWHEEL_SERVER__ALLOWED_HOSTS`: hostnames, lowercased, no ports. An IP literal never needs
+/// listing (the guard accepts one already), so anything with a `:` is a mistake worth naming.
+fn allowed_hosts(value: &str) -> Result<Vec<String>, ConfigError> {
+    split_list(value)
+        .into_iter()
+        .map(|entry| {
+            let host = entry.trim_end_matches('.').to_ascii_lowercase();
+            let usable = !host.is_empty()
+                && !host.contains([':', '/', '@'])
+                && !host.contains(char::is_whitespace);
+            if usable {
+                Ok(host)
+            } else {
+                Err(ConfigError {
+                    variable: "COGWHEEL_SERVER__ALLOWED_HOSTS",
+                    value: entry,
+                    expected: "a comma-separated list of hostnames, without ports",
+                })
+            }
+        })
+        .collect()
 }
 
 /// Split a comma-separated variable, dropping empty entries and surrounding space.
@@ -423,5 +556,152 @@ mod tests {
         let config =
             config_from(&[("COGWHEEL_STORAGE__DATABASE_URL", ":memory:")]).expect("memory loads");
         assert_eq!(config.lists_dir().to_str(), Some("lists"));
+    }
+
+    /// A recognisable fake, so a leak of any part shows. Deliberately not OpenRouter's real shape
+    /// (`sk-or-v1-` and 64 hex digits): a test key in that shape trips secret scanning on push.
+    const KEY: &str = "sk-or-v1-fake-test-key-qwzx-mnbv-plok-ijuh-ygtf-rdes";
+
+    #[test]
+    fn an_unusable_ai_key_stops_startup_without_echoing_it() {
+        for value in [
+            "sk-or-v1-0123456789 abcdef0123456789",
+            "sk-or-v1-0123456789\tabcdef",
+            "sk-or-v1-ключ0123456789abcdef",
+            &"k".repeat(513),
+        ] {
+            let error = config_from(&[("COGWHEEL_AI__OPENROUTER_API_KEY", value)])
+                .expect_err("a value that cannot be a header stops startup");
+            let printed = format!("{error} {error:?}");
+            assert!(printed.contains("COGWHEEL_AI__OPENROUTER_API_KEY"));
+            assert!(printed.contains("(hidden)"), "{printed}");
+            assert!(!printed.contains("0123456789"), "the key leaked: {printed}");
+        }
+
+        // No `sk-or-` check: a future key format must not stop boot. Empty counts as unset.
+        let config = config_from(&[(
+            "COGWHEEL_AI__OPENROUTER_API_KEY",
+            "  rk-future-format-key  ",
+        )])
+        .expect("any header-safe key loads");
+        assert_eq!(
+            config.ai_api_key.as_ref().map(|key| key.expose()),
+            Some("rk-future-format-key")
+        );
+        let config =
+            config_from(&[("COGWHEEL_AI__OPENROUTER_API_KEY", "  ")]).expect("empty is unset");
+        assert!(config.ai_api_key.is_none());
+    }
+
+    #[test]
+    fn the_ai_base_url_must_be_https_or_loopback() {
+        let base = |value: &str| {
+            config_from(&[("COGWHEEL_AI__BASE_URL", value)]).map(|config| config.ai_base_url)
+        };
+        assert_eq!(
+            config_from(&[])
+                .expect("defaults load")
+                .ai_base_url
+                .as_str(),
+            "https://openrouter.ai/"
+        );
+        for accepted in [
+            "https://openrouter.ai",
+            "https://openrouter.ai/",
+            "https://proxy.example.net:8443",
+            "http://127.0.0.1:18080",
+            "http://[::1]:18080",
+            "http://localhost:18080/",
+        ] {
+            assert!(base(accepted).is_ok(), "{accepted} should be accepted");
+        }
+        for refused in [
+            "http://openrouter.ai",
+            "http://192.168.1.10:8080",
+            "ftp://openrouter.ai",
+            "https://openrouter.ai/api/v1",
+            "https://openrouter.ai/?x=1",
+            "https://openrouter.ai/#here",
+            "openrouter.ai",
+        ] {
+            let error = base(refused).expect_err("refused");
+            assert!(error.to_string().starts_with("COGWHEEL_AI__BASE_URL"));
+        }
+
+        // Credentials are refused, and not repeated in the error that is printed.
+        let error = base("https://user:secret-password@openrouter.ai").expect_err("userinfo");
+        assert!(!error.to_string().contains("secret-password"), "{error}");
+        assert!(error.to_string().contains("(hidden)"));
+    }
+
+    #[test]
+    fn debug_output_never_contains_the_key() {
+        let config =
+            config_from(&[("COGWHEEL_AI__OPENROUTER_API_KEY", KEY)]).expect("the key loads");
+        let printed = format!("{config:?} {config:#?}");
+        assert!(printed.contains("SecretKey(..)"), "{printed}");
+        for window in KEY.as_bytes().windows(8) {
+            let window = std::str::from_utf8(window).expect("ascii");
+            assert!(!printed.contains(window), "{window:?} of the key leaked");
+        }
+    }
+
+    #[test]
+    fn allowed_hosts_are_parsed_lowercase() {
+        let config = config_from(&[(
+            "COGWHEEL_SERVER__ALLOWED_HOSTS",
+            " Cogwheel.Example.COM , , proxy.lan. ",
+        )])
+        .expect("hosts load");
+        assert_eq!(
+            config.allowed_hosts,
+            vec!["cogwheel.example.com".to_owned(), "proxy.lan".to_owned()]
+        );
+        assert!(
+            config_from(&[])
+                .expect("defaults load")
+                .allowed_hosts
+                .is_empty()
+        );
+        for refused in ["proxy.lan:8443", "https://proxy.lan", "user@proxy.lan"] {
+            let error = config_from(&[("COGWHEEL_SERVER__ALLOWED_HOSTS", refused)])
+                .expect_err("not a bare hostname");
+            assert!(
+                error
+                    .to_string()
+                    .starts_with("COGWHEEL_SERVER__ALLOWED_HOSTS")
+            );
+        }
+    }
+
+    #[test]
+    fn ai_review_is_available_by_default_and_can_be_switched_off() {
+        let config = config_from(&[]).expect("defaults load");
+        assert!(config.ai_available);
+        assert!(
+            config.ai_zero_retention,
+            "zero retention is asked for by default"
+        );
+        assert!(config.ai_api_key.is_none());
+
+        for (spelling, expected) in [
+            ("false", false),
+            ("OFF", false),
+            (" 0 ", false),
+            ("yes", true),
+        ] {
+            let config =
+                config_from(&[("COGWHEEL_AI__AVAILABLE", spelling)]).expect("a switch loads");
+            assert_eq!(config.ai_available, expected, "{spelling:?}");
+        }
+        let config = config_from(&[("COGWHEEL_AI__ZERO_RETENTION", "false")])
+            .expect("zero retention can be turned off");
+        assert!(!config.ai_zero_retention);
+
+        let error = config_from(&[("COGWHEEL_AI__AVAILABLE", "maybe")]).expect_err("not a switch");
+        assert_eq!(
+            error.to_string(),
+            "COGWHEEL_AI__AVAILABLE is \"maybe\", which is not true or false"
+        );
     }
 }
