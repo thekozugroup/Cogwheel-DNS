@@ -1,7 +1,8 @@
 import React from "react";
 import { RotateCwIcon } from "lucide-react";
 import { api, errorMessage, type AiDailyLimit, type AiModelList, type AiPatch, type AiStatus } from "@/lib/api";
-import { formatCents, formatEstimate, formatUsd } from "@/lib/format";
+import { AI_REQUESTS_PER_DAY, aiDailyReach } from "@/lib/derive";
+import { formatCents, formatCount, formatEstimate, formatUsd } from "@/lib/format";
 import { notify } from "@/lib/toast";
 import { useCogwheelActions } from "@/data/context";
 import { Button } from "@/components/ui/button";
@@ -32,12 +33,8 @@ function shortModelName(name: string): string {
   return colon >= 0 ? name.slice(colon + 2) : name;
 }
 
-/** Midnight UTC, when the daily limit resets, on the reader's own clock. */
-function resetTime(): string {
-  const now = new Date();
-  const midnight = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
-  return new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(midnight);
-}
+/** When the daily limit resets, on the reader's own clock. */
+const resetClock = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
 
 /** The Test's answer or why it failed. */
 export type TestOutcome = { ok: boolean; sentence: string } | null;
@@ -45,9 +42,18 @@ export type TestOutcome = { ok: boolean; sentence: string } | null;
 /**
  * A dot and the server's sentence, in a region that is always mounted so the
  * answer is announced when it lands. Green only for a passed Test: the
- * sentence is the server's, and it says how sure the model was.
+ * sentence is the server's, and it says how sure the model was. `pending`
+ * is said in the same region while the question is out.
  */
-export function TestLine({ outcome, className }: { outcome: TestOutcome; className?: string }) {
+export function TestLine({
+  outcome,
+  pending,
+  className,
+}: {
+  outcome: TestOutcome;
+  pending?: string;
+  className?: string;
+}) {
   return (
     <div aria-live="polite" className={className}>
       {outcome ? (
@@ -55,6 +61,8 @@ export function TestLine({ outcome, className }: { outcome: TestOutcome; classNa
           <Status className="mt-1.5" size="sm" variant={outcome.ok ? "success" : "destructive"} />
           <span className="min-w-0 max-w-[56ch] break-words">{outcome.sentence}</span>
         </p>
+      ) : pending ? (
+        <p className="text-muted-foreground text-sm">{pending}</p>
       ) : null}
     </div>
   );
@@ -162,6 +170,7 @@ export function AiSetupForm({
 }) {
   const { reload } = useCogwheelActions();
   const headingId = React.useId();
+  const formRef = React.useRef<HTMLFormElement>(null);
   const keyRef = React.useRef<HTMLInputElement>(null);
   const modelRef = React.useRef<HTMLSelectElement>(null);
   const [key, setKey] = React.useState("");
@@ -180,6 +189,13 @@ export function AiSetupForm({
   const [outcome, setOutcome] = React.useState<TestOutcome>(null);
   const [saving, setSaving] = React.useState(false);
   const [confirming, setConfirming] = React.useState(false);
+
+  // The form comes to the reader, as the device editor does: "Set up AI
+  // review" is replaced by it, and focus left on nothing fell to the page body.
+  React.useEffect(() => {
+    formRef.current?.scrollIntoView({ block: "nearest" });
+    formRef.current?.focus({ preventScroll: true });
+  }, []);
 
   React.useEffect(() => {
     const controller = new AbortController();
@@ -306,12 +322,24 @@ export function AiSetupForm({
   ]
     .filter(Boolean)
     .join(" ");
-  const limitHint = `Reviews stop for the rest of the day (until ${resetTime()}) once this is spent; your lists keep working.${
-    perThousand ? ` At this model's price that is about ${formatEstimate((limit / perThousand) * 1000)} names a day.` : ""
-  }`;
+  const resets = resetClock.format(status.today.resets_at * 1000);
+  const reach = perThousand ? aiDailyReach(limit, perThousand) : null;
+  const cap = formatCount(AI_REQUESTS_PER_DAY);
+  const limitHint = reach?.capped
+    ? `Cogwheel asks at most ${cap} questions a day, and at this model's price it reaches them before this limit, at about ${formatUsd(reach.capUsd)}. Reviews then stop until ${resets}; your lists keep working.`
+    : reach
+      ? `Reviews stop for the rest of the day (until ${resets}) once this is spent; your lists keep working. At this model's price that is about ${formatEstimate(reach.names)} names a day.`
+      : `Reviews stop for the rest of the day (until ${resets}) once this is spent or ${cap} questions are asked; your lists keep working.`;
 
   return (
-    <form aria-labelledby={headingId} className="max-w-xl space-y-6" noValidate onSubmit={submit}>
+    <form
+      aria-labelledby={headingId}
+      className="max-w-xl scroll-mt-6 space-y-6 rounded-sm"
+      noValidate
+      onSubmit={submit}
+      ref={formRef}
+      tabIndex={-1}
+    >
       <h3 className="font-medium text-foreground text-sm" id={headingId}>
         {mode === "first" ? "Set up" : "Change set-up"}
       </h3>

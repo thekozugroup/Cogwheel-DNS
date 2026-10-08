@@ -43,6 +43,26 @@ fn key(scope: u32, owner: &str, qtype: RecordType) -> CacheKey {
     }
 }
 
+/// Every shard's eviction queue holds exactly its entries' keys, once each. A key a sweep left
+/// in `order` is queued again when its name is next answered, and eviction then pops the stale
+/// copy and takes the live entry early.
+fn assert_order_matches_entries(cache: &WireCache) {
+    for shard in &cache.shards {
+        let shard = read_recover(shard);
+        let queued: HashSet<&CacheKey> = shard.order.iter().collect();
+        assert_eq!(
+            shard.order.len(),
+            shard.entries.len(),
+            "one queue slot per entry"
+        );
+        assert_eq!(
+            queued,
+            shard.entries.keys().collect(),
+            "the queue is the entries' keys"
+        );
+    }
+}
+
 /// A block is decided from the question alone, so an AI block is as cheap as a list's.
 #[tokio::test]
 async fn an_ai_blocked_name_is_answered_without_the_upstream() {
@@ -221,6 +241,7 @@ async fn an_invalidating_swap_drops_only_the_changed_names() {
     for kept in &kept_keys {
         assert!(harness.runtime.cache.get(kept).is_some(), "{kept:?}");
     }
+    assert_order_matches_entries(&harness.runtime.cache);
 
     // The unrelated name is still a hit; the changed one is decided afresh under the new list.
     let asked = harness.stub.queries.load(Ordering::Relaxed);
@@ -230,6 +251,8 @@ async fn an_invalidating_swap_drops_only_the_changed_names() {
     let decided = harness.query("changed.test", RecordType::A).await;
     assert_eq!(v4(&decided), vec![Ipv4Addr::UNSPECIFIED]);
     assert_eq!(harness.stub.queries.load(Ordering::Relaxed), asked);
+    // Answered again, the name is queued once, not behind a copy the sweep left.
+    assert_order_matches_entries(&harness.runtime.cache);
 }
 
 /// The twin of `a_policy_swap_during_a_miss_does_not_cache_the_old_verdict`: the targeted swap
@@ -283,18 +306,108 @@ async fn an_invalidating_swap_during_a_miss_does_not_cache_the_old_verdict() {
     let next = harness.query("late.test", RecordType::A).await;
     assert_eq!(v4(&next), vec![Ipv4Addr::UNSPECIFIED]);
     assert_eq!(harness.runtime.snapshot().cache_hits_total, 0);
+    // The late entry was taken back by key, and the block that replaced it is queued once.
+    assert_order_matches_entries(&harness.runtime.cache);
+}
+
+/// An install that changes one name must not cost a miss for another name its entry. When that
+/// miss is the refresh of an expired answer during an outage, the entry is the stale answer the
+/// name falls back to, and without it every later query for the name is SERVFAIL until the
+/// upstream returns.
+#[tokio::test]
+async fn an_invalidating_swap_keeps_the_stale_fallback_of_another_name() {
+    let zone = zone(&[(
+        "stale.test",
+        RecordType::A,
+        vec![a("stale.test", [192, 0, 2, 1])],
+    )]);
+    let harness = Harness::start(zone, policy(&[], &[], HashMap::new())).await;
+    let key = Harness::key("stale.test", RecordType::A);
+    harness.query("stale.test", RecordType::A).await;
+    harness.expire(&key);
+
+    // The refresh parks on a silent upstream, holding the expired answer as its fallback.
+    harness.stub.set_mode(HANG);
+    let parked = harness.request("stale.test", RecordType::A, None);
+    harness.send(&parked).await;
+    timeout(Duration::from_secs(2), async {
+        while harness.stub.queries.load(Ordering::Relaxed) < 2 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the refresh reached the upstream");
+
+    let next = with_ai(
+        policy(&[], &[], HashMap::new()),
+        &[("unrelated.test", Action::Block)],
+    );
+    harness
+        .runtime
+        .swap_policy_invalidating(next, &changed(&["unrelated.test"]));
+    // The upstream's retry now fails outright, and the refresh falls back to the stale answer.
+    harness.stub.set_mode(SERVFAIL);
+    let mut buffer = [0u8; 512];
+    let (size, _) = timeout(
+        Duration::from_secs(5),
+        harness.client.recv_from(&mut buffer),
+    )
+    .await
+    .expect("the parked refresh is answered")
+    .expect("receive");
+    let fallback = Message::from_vec(&buffer[..size]).expect("parse");
+    assert_eq!(fallback.metadata.id, parked.metadata.id);
+    assert_eq!(v4(&fallback), vec![Ipv4Addr::new(192, 0, 2, 1)]);
+    assert_eq!(harness.runtime.snapshot().stale_served_total, 1);
+
+    assert!(
+        harness.runtime.cache.get(&key).is_some(),
+        "the stale answer is still cached"
+    );
+    let again = harness.query("stale.test", RecordType::A).await;
+    assert_eq!(again.metadata.response_code, ResponseCode::NoError);
+    assert_eq!(v4(&again), vec![Ipv4Addr::new(192, 0, 2, 1)]);
+    assert_order_matches_entries(&harness.runtime.cache);
 }
 
 /// The sweep takes each shard's write lock only for that shard's own `retain`, so a hit queues
 /// behind one shard's worth of work at most, never behind the whole walk.
-#[tokio::test]
+///
+/// The test holds the shard walked just after the hit's, so every hit runs while the sweep is
+/// parked mid-walk, and a hit that waits on the walk waits forever. The hits go out on a blocking
+/// socket with a read timeout: a receive loop stuck behind the sweep blocks its worker, and with
+/// it the runtime's timers, so only a timeout outside the runtime fails the test instead of
+/// hanging it. Multi-threaded so the receive loop runs while the test thread blocks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_cache_hit_stays_fast_while_a_sweep_runs() {
-    let zone = zone(&[(
-        "fast.test",
-        RecordType::A,
-        vec![a("fast.test", [192, 0, 2, 5])],
-    )]);
-    let harness = Harness::start(zone, policy(&[], &[], HashMap::new())).await;
+    // Several names, so one can be hit whose shard is not the last one walked.
+    let owners: Vec<String> = (0..8).map(|n| format!("fast{n}.test")).collect();
+    let records: Vec<_> = owners
+        .iter()
+        .map(|owner| {
+            (
+                owner.as_str(),
+                RecordType::A,
+                vec![a(owner, [192, 0, 2, 5])],
+            )
+        })
+        .collect();
+    let harness = Harness::start(zone(&records), policy(&[], &[], HashMap::new())).await;
+    let cache = &harness.runtime.cache;
+    let shard_index = |owner: &str| {
+        let shard = cache.shard(&key(SCOPE_HOUSEHOLD, owner, RecordType::A));
+        cache
+            .shards
+            .iter()
+            .position(|each| std::ptr::eq(each, shard))
+    };
+    let (fast, hit_shard) = owners
+        .iter()
+        .find_map(|owner| {
+            let index = shard_index(owner)?;
+            (index + 1 < CACHE_SHARDS).then_some((owner.as_str(), index))
+        })
+        .expect("eight names do not all hash to the last shard");
 
     // A full cache of names the AI list is about to change, planted directly: the misses that
     // would otherwise put them there are not what is being measured.
@@ -307,36 +420,68 @@ async fn a_cache_hit_stays_fast_while_a_sweep_runs() {
     let names: Vec<String> = (0..CACHE_CAPACITY).map(|n| format!("p{n}.test")).collect();
     for name in &names {
         let planted = key(SCOPE_HOUSEHOLD, name, RecordType::A);
-        harness.runtime.cache.insert(planted, Arc::clone(&wire));
+        cache.insert(planted, Arc::clone(&wire));
     }
     // Cached after the planting, so it is the newest entry in its shard and evicts, not evicted.
-    harness.query("fast.test", RecordType::A).await;
-    let cached: usize = harness
-        .runtime
-        .cache
+    harness.query(fast, RecordType::A).await;
+    let cached: usize = cache
         .shards
         .iter()
         .map(|shard| read_recover(shard).entries.len())
         .sum();
     let changed: HashSet<Box<str>> = names.iter().map(|name| Box::from(name.as_str())).collect();
 
+    let client = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind client");
+    client
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .expect("read timeout");
+    // Correct, the sweep parks here holding no lock; one that kept earlier shards' locks across
+    // the walk would be holding the hit's too.
+    let barrier = write_recover(&cache.shards[hit_shard + 1]);
     let runtime = Arc::clone(&harness.runtime);
     let next = runtime.current_policy();
     let sweep =
         tokio::task::spawn_blocking(move || runtime.swap_policy_invalidating(next, &changed));
+    // Past the hit's shard once only the hit is left in it, or once the sweep holds its lock.
+    let past_hit_shard = || match cache.shards[hit_shard].try_read() {
+        Ok(shard) => shard.entries.len() == 1,
+        Err(_) => true,
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !past_hit_shard() {
+        assert!(
+            Instant::now() < deadline,
+            "the sweep never reached the hit's shard"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
     let mut fastest = Duration::MAX;
+    let mut buffer = [0u8; 512];
     for _ in 0..5 {
+        let request = harness.request(fast, RecordType::A, None);
         let started = Instant::now();
-        let response = harness.query("fast.test", RecordType::A).await;
+        client
+            .send_to(&request.to_vec().expect("encode"), harness.server)
+            .expect("send");
+        let (size, _) = client
+            .recv_from(&mut buffer)
+            .expect("a hit does not wait for the sweep");
         fastest = fastest.min(started.elapsed());
+        let response = Message::from_vec(&buffer[..size]).expect("parse");
+        assert_eq!(response.metadata.id, request.metadata.id);
         assert_eq!(v4(&response), vec![Ipv4Addr::new(192, 0, 2, 5)]);
     }
+    assert!(!sweep.is_finished(), "every hit overlapped the sweep");
+    drop(barrier);
     let dropped = sweep.await.expect("the sweep finished");
     assert_eq!(
         dropped,
         cached - 1,
         "every planted name, and not the one being hit"
     );
+    // Every hit is bounded by the read timeout above; this is the hit path's own speed, taken as
+    // the fastest of five like the hung-upstream test, since one slow wake-up is the scheduler.
     assert!(fastest < Duration::from_millis(5), "hit took {fastest:?}");
     assert_eq!(harness.runtime.snapshot().cache_hits_total, 5);
 }

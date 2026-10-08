@@ -963,7 +963,11 @@ leaves review off until someone turns it on again in the UI.
 **The key.** A key saved in the UI is written to `openrouter.key` beside the
 database (`/app/data/openrouter.key` in the image, `$DATA_DIR/openrouter.key`
 natively), mode 0600, and never into SQLite. `COGWHEEL_AI__OPENROUTER_API_KEY`
-wins over it, and the UI then cannot change or remove the key. Removing a saved
+wins over it, and the UI then cannot change or remove the key. Setting the
+variable does not delete a key saved in the UI earlier: remove it there first
+(**Remove key…**), or delete `openrouter.key`, or it stays in backups and is
+used again if the variable is ever unset; Cogwheel logs a warning at startup
+while both exist. Removing a saved
 key overwrites the file with zeros before deleting it; on an SD card or SSD that
 is best effort, because wear levelling may keep the old block. Give the key its
 own credit limit at OpenRouter: that limit holds even if something in Cogwheel
@@ -993,8 +997,9 @@ list follows its retention: the website a verdict was judged for is forgotten
 after `HISTORY_DAYS`, and the names the AI list left to the household's lists
 live `min(30 days, HISTORY_DAYS)`. A short `HISTORY_DAYS` therefore has those
 names judged — and paid for — again sooner, within the same daily limit. Blocks
-and allows live up to 90 days whatever it says, and the table holds at most
-10,000 rows.
+and allows live up to 90 days whatever it says, and so does a name two websites
+disagreed about (contested), which Clear log also keeps, without its websites.
+The table holds at most 10,000 rows.
 
 **Spend.** The household picks a daily limit of 5¢, 10¢ (the default), 25¢ or
 $1, and review pauses until 00:00 UTC once it is reached. There are also at most

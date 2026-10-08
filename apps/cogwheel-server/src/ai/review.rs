@@ -365,8 +365,12 @@ impl Pipeline {
         }
         if *self.paused_day.get_or_insert(today) != today {
             self.paused_day = None;
-            tracing::info!("a new UTC day: AI review resumes");
-            self.ai.resume();
+            if self
+                .ai
+                .resume_from(&[State::PausedBudget, State::OutOfCredit])
+            {
+                tracing::info!("a new UTC day: AI review resumes");
+            }
             self.catch_up();
         }
     }
@@ -380,7 +384,7 @@ impl Pipeline {
         };
         let model: Arc<str> = Arc::from(model);
         let provider = Provider {
-            zero_retention: self.ai.zero_retention(),
+            zero_retention: self.ai.zero_retention,
             price_per_million: price,
         };
         let shared: Vec<bool> = load
@@ -577,6 +581,11 @@ impl Pipeline {
         self.bursts.len()
     }
 
+    /// Closed bursts dropped unscored because too many were waiting: site loads never reviewed.
+    pub const fn bursts_dropped(&self) -> u64 {
+        self.bursts.dropped()
+    }
+
     /// Whether a job for `name` is queued or in flight.
     pub fn is_pending(&self, name: &str) -> bool {
         self.pending.contains_key(name)
@@ -601,7 +610,7 @@ impl Pipeline {
 /// them. `sendable`, and no household rule covers it: a household rule is how a household keeps
 /// a name of its own, and everything under it, out of review.
 pub fn shareable(ai: &AiState, policy: &Policy, name: &str) -> bool {
-    site::sendable(name, ai.own_names()) && policy.household.get_at_boundaries(name).is_none()
+    site::sendable(name, &ai.own_names) && policy.household.get_at_boundaries(name).is_none()
 }
 
 /// Up to [`CONTEXT_NAMES`] other shareable names of the load, nearest in time to the candidate

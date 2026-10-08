@@ -8,17 +8,18 @@
 //!
 //! Nothing here logs a domain, a body or the key (§6.16): DEBUG carries counts only.
 //!
-//! [`AliveGuard`]: super::AliveGuard
+//! [`AliveGuard`]: super::gate::AliveGuard
 
-use super::client;
+use super::client::{self, KeyCheck};
 use super::key::SecretKey;
 use super::review::{Now, Outcome, Pipeline, Rechecked, Settlement, Start};
-use super::spend::Cost;
-use super::{AiState, Seen, TAP_DEPTH};
+use super::spend::{Cost, Written};
+use super::{AiState, Halt, Seen, TAP_DEPTH};
 use crate::state::{ServerState, now_secs, stopped};
 use cogwheel_storage::AiVerdict;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::{Id, JoinSet};
@@ -61,17 +62,24 @@ pub async fn task(state: ServerState, mut tap: mpsc::Receiver<Seen>) {
                     spawn_job(&mut jobs, start);
                 }
                 if pipeline.key_info_due(now) {
-                    refresh_key_info(&ai);
+                    refresh_key_info(&ai, ai.generation());
                 }
             }
             () = ai.halted() => catch_up(&mut pipeline, &mut jobs, &mut tap),
             Some((id, outcome)) = jobs.next(), if !jobs.is_empty() => {
-                let settlement = pipeline.settle(Now::wall(), id, outcome);
-                persist(&state, settlement).await;
+                let now = Now::wall();
+                let settlement = pipeline.settle(now, id, outcome);
+                persist(&state, now.secs(), settlement).await;
+                let counters = &ai.counters;
                 tracing::debug!(
                     waiting = pipeline.waiting(),
                     in_flight = pipeline.in_flight(),
                     bursts = pipeline.bursts(),
+                    bursts_dropped = pipeline.bursts_dropped(),
+                    tap_dropped = counters.tap_dropped.load(Ordering::Relaxed),
+                    malformed = counters.malformed.load(Ordering::Relaxed),
+                    unpriced = counters.unpriced.load(Ordering::Relaxed),
+                    installs = counters.installs.load(Ordering::Relaxed),
                     "AI review settled a request"
                 );
             }
@@ -83,8 +91,9 @@ pub async fn task(state: ServerState, mut tap: mpsc::Receiver<Seen>) {
     jobs.abort_all();
     let drained = tokio::time::timeout(DRAIN, async {
         while let Some((id, outcome)) = jobs.next().await {
-            let settlement = pipeline.settle(Now::wall(), id, outcome);
-            persist(&state, settlement).await;
+            let now = Now::wall();
+            let settlement = pipeline.settle(now, id, outcome);
+            persist(&state, now.secs(), settlement).await;
         }
     })
     .await;
@@ -181,37 +190,48 @@ async fn send(ai: Arc<AiState>, generation: u64, key: Option<SecretKey>, body: V
     let Some(key) = key.filter(|_| ai.may_send(generation)) else {
         return Outcome::Withdrawn;
     };
-    match client::decide(ai.client(), ai.base(), &key, body).await {
+    match client::decide(&ai.client, &ai.base, &key, body).await {
         Ok(reply) => Outcome::Answered(reply),
         Err(failure) => Outcome::Failed(failure),
     }
 }
 
-/// Write what a settlement asks for: the spend and the rows in one transaction, through
-/// `AiState::settle`, the one writer of today's spend; then wake the installer if a row changed.
-pub async fn persist(state: &ServerState, settlement: Settlement) {
+/// Write what a settlement asks for: the spend, the rows and a re-check in one transaction,
+/// through `AiState::commit`, the one writer of today's spend; then wake the installer if a row
+/// changed. `now` is the clock the settlement was made on.
+pub async fn persist(state: &ServerState, now: i64, settlement: Settlement) {
     let Settlement {
         cost,
-        mut rows,
+        rows,
         recheck,
+        sites_epoch,
     } = settlement;
-    if let Some(recheck) = recheck
-        && let Some(row) = rechecked(state, &recheck).await
-    {
-        rows.push(row);
-    }
-    if cost == Cost::default() && rows.is_empty() {
+    let recheck = match recheck {
+        Some(recheck) => rechecked(state, &recheck).await,
+        None => None,
+    };
+    if cost == Cost::default() && rows.is_empty() && recheck.is_none() {
         return;
     }
-    let changed = !rows.is_empty();
-    // A failed write is logged by `settle`, and its spend stays counted in memory.
-    if state.ai.settle(&state.storage, cost, rows).await.is_ok() && changed {
-        state.ai.notify_install();
+    let fresh: Vec<String> = rows.iter().map(|row| row.domain.clone()).collect();
+    let write = Written {
+        cost,
+        rows,
+        recheck,
+        sites_epoch: Some(sites_epoch),
+    };
+    match state.ai.commit(&state.storage, now, write).await {
+        Ok(true) => state.ai.notify_install(),
+        Ok(false) => {}
+        // Logged by `commit`, and the spend stays counted in memory. Nothing was stored, so the
+        // names are asked about when next seen, not skipped as judged for up to 30 days.
+        Err(_) => state.ai.forget_known(&fresh),
     }
 }
 
-/// A re-check applied to the row as it is stored now. A row Forget removed meanwhile has nothing
-/// left to re-check: the name is judged afresh when it is next seen.
+/// A re-check applied to the row as it is stored now; written only if the row is still a block or
+/// an allow then. A row Forget removed meanwhile has nothing left to re-check: the name is judged
+/// afresh when it is next seen.
 async fn rechecked(state: &ServerState, recheck: &Rechecked) -> Option<AiVerdict> {
     match state.storage.ai_verdict(recheck.domain.to_string()).await {
         Ok(Some(row)) if matches!(row.verdict.as_str(), "block" | "allow") => {
@@ -225,21 +245,37 @@ async fn rechecked(state: &ServerState, recheck: &Rechecked) -> Option<AiVerdict
     }
 }
 
-/// Read the key's credit limits again for the status card (§8 step 7). The answer is kept only if
-/// the same key is still in force; a failure changes nothing, since the decisions requests
-/// classify the key themselves.
-fn refresh_key_info(ai: &Arc<AiState>) {
+/// The id a key check is tracked under, so a halt aborts it like a request; jobs count from 1.
+const KEY_CHECK: u64 = 0;
+
+/// Read the key's credit limits again for the status card (§8 step 7), behind the send gate like
+/// a decisions request (D18): checked as the last step before it is sent, and aborted by a halt.
+/// The answer counts only if the same key is still in force. A key OpenRouter now refuses, or
+/// that is out of credit, stops review: the first tick after a restart checks it, before any
+/// site load can close, so a key refused before the restart sends no name.
+pub(super) fn refresh_key_info(ai: &Arc<AiState>, generation: u64) {
     let Some(slot) = ai.key() else {
         return;
     };
-    let ai = Arc::clone(ai);
-    tokio::spawn(async move {
-        if let Ok(info) = client::key_info(ai.client(), ai.base(), &slot.key).await
-            && ai
+    let checking = Arc::clone(ai);
+    let task = tokio::spawn(async move {
+        let ai = checking;
+        if ai.may_send(generation) {
+            let checked = client::key_info(&ai.client, &ai.base, &slot.key).await;
+            if ai
                 .key()
                 .is_some_and(|current| current.generation == slot.generation)
-        {
-            ai.set_key_info(info, now_secs());
+            {
+                match checked {
+                    Ok(info) => ai.set_key_info(info, now_secs()),
+                    Err(KeyCheck::Refused) => ai.halt(Halt::KeyRefused),
+                    Err(KeyCheck::NoCredit) => ai.halt(Halt::OutOfCredit),
+                    // The decisions requests classify everything else themselves.
+                    Err(_) => {}
+                }
+            }
         }
+        ai.untrack(KEY_CHECK);
     });
+    ai.track(KEY_CHECK, generation, task.abort_handle());
 }

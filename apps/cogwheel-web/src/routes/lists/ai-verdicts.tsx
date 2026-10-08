@@ -9,10 +9,11 @@ import {
   type AiVerdictRow,
   type RuleAction,
 } from "@/lib/api";
-import { checkSentence } from "@/lib/derive";
+import { aiForgetSentence, checkSentence } from "@/lib/derive";
 import { formatCount, formatRelative, formatSure } from "@/lib/format";
 import { notify } from "@/lib/toast";
 import { useCogwheelActions, useSnapshot } from "@/data/context";
+import { ROW_TRIGGER, useRovingMenus } from "@/hooks/use-roving-menus";
 import { Button } from "@/components/ui/button";
 import { SegmentGroup, SegmentGroupItem, SegmentGroupItemText } from "@/components/ui/segment-group";
 import { Status } from "@/components/ui/status";
@@ -28,6 +29,9 @@ import { TextField } from "@/components/app/text-field";
 const LIMIT = 200;
 
 type View = "changes" | "all";
+
+/** A Why? answer and the row it is about; `text` is null while /check is asked. */
+type Why = { domain: string; text: string | null };
 
 /**
  * The muted notes under a verdict: why it is not what DNS does, or why the
@@ -46,6 +50,7 @@ function notesFor(row: AiVerdictRow): string[] {
   if (row.not_applied === "lists_changed") notes.push("your lists changed; judged again next time");
   if (row.not_applied === "lists_agree") notes.push("your lists block it too");
   if (row.not_applied === "below_bar") notes.push("the model was not sure enough for it to apply");
+  if (row.not_applied === "pending") notes.push("applying: DNS picks it up in a few seconds");
   return notes;
 }
 
@@ -69,16 +74,6 @@ function ListsWord({ state }: { state: AiListState }) {
       <span className="sr-only">Not on a list</span>
     </span>
   );
-}
-
-/** What Forget means right now, from the card's last read of AI review's state. */
-function forgotten(state: AiState): string {
-  if (state === "reviewing") return "judged again the next time a website loads it.";
-  if (state === "paused_budget") {
-    return "your lists decide for it until today's limit resets; then it is judged again when a website loads it.";
-  }
-  if (state === "retrying") return "judged again once OpenRouter answers and a website loads it.";
-  return "your lists decide for it.";
 }
 
 /**
@@ -108,8 +103,18 @@ export function AiVerdicts({
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [attempt, setAttempt] = React.useState(0);
-  const [why, setWhy] = React.useState<string | null>(null);
+  const [why, setWhy] = React.useState<Why | null>(null);
+  const inflight = React.useRef<AbortController | null>(null);
   const viewLabel = React.useId();
+  const hintId = React.useId();
+  const rootRef = React.useRef<HTMLDivElement>(null);
+  // Up to 200 row menus are one tab stop, as on Activity and Overview.
+  const regionRef = React.useRef<HTMLDivElement>(null);
+  const roving = useRovingMenus(regionRef);
+  // Where the forgotten row was, until the page that no longer has it arrives.
+  const forgot = React.useRef<number | null>(null);
+
+  React.useEffect(() => () => inflight.current?.abort(), []);
 
   // Server-side search, a moment after the typing stops.
   React.useEffect(() => {
@@ -137,13 +142,25 @@ export function AiVerdicts({
     return () => controller.abort();
   }, [view, q, version, attempt, rules]);
 
-  const handlers = React.useRef({ rules, mutate, state, onChanged });
+  // Forget removes the row whose ⋯ held focus. The next row's ⋯ takes it, or
+  // the search field once none is left, rather than the page body.
   React.useEffect(() => {
-    handlers.current = { rules, mutate, state, onChanged };
+    const index = forgot.current;
+    if (index === null || !page) return;
+    forgot.current = null;
+    if (document.activeElement && document.activeElement !== document.body) return;
+    const triggers = regionRef.current?.querySelectorAll<HTMLElement>(ROW_TRIGGER) ?? [];
+    const next = triggers[Math.min(index, triggers.length - 1)];
+    (next ?? rootRef.current?.querySelector<HTMLElement>('input[type="text"]'))?.focus();
+  }, [page]);
+
+  const handlers = React.useRef({ rules, mutate, state, onChanged, rows: page?.rows ?? [] });
+  React.useEffect(() => {
+    handlers.current = { rules, mutate, state, onChanged, rows: page?.rows ?? [] };
   });
 
   const onAction = React.useCallback((row: AiVerdictRow, action: string) => {
-    const { rules: current, mutate: run, state: now, onChanged: changed } = handlers.current;
+    const { rules: current, mutate: run, state: now, onChanged: changed, rows: shown } = handlers.current;
     if (action === "allow" || action === "block") {
       const verb: RuleAction = action;
       const existing = current.find((rule) => rule.device_id === null && rule.domain === row.domain);
@@ -168,32 +185,83 @@ export function AiVerdicts({
         key: `ai-forget-${row.domain}`,
         action: () => api.forgetAiVerdict(row.domain),
         successTitle: "Forgotten",
-        successDetail: `${row.domain} — ${forgotten(now)}`,
+        successDetail: `${row.domain} — ${aiForgetSentence(row, now)}`,
         failureTitle: "Could not forget the verdict",
         after: "light",
       }).then((done) => {
-        if (done) changed();
+        if (!done) return;
+        forgot.current = Math.max(0, shown.findIndex((entry) => entry.domain === row.domain));
+        changed();
       });
     } else {
+      inflight.current?.abort();
+      const controller = new AbortController();
+      inflight.current = controller;
+      // Mounted saying "Checking…", so the answer lands as a change to a live
+      // region a screen reader announces, under the row it is about.
+      setWhy({ domain: row.domain, text: null });
       api
-        .check(row.domain)
-        .then((result) => setWhy(checkSentence(result)))
-        .catch((cause) => notify.error("Could not check that domain", errorMessage(cause)));
+        .check(row.domain, undefined, { signal: controller.signal })
+        .then((result) => {
+          if (!controller.signal.aborted) setWhy({ domain: row.domain, text: checkSentence(result) });
+        })
+        .catch((cause) => {
+          if (controller.signal.aborted) return;
+          setWhy(null);
+          notify.error("Could not check that domain", errorMessage(cause));
+        });
     }
   }, []);
 
+  // The answer sits under its own row, as on Overview's cards: above a
+  // 200-row table it landed thousands of pixels from the row that asked.
+  const answer = React.useCallback(
+    (row: AiVerdictRow) =>
+      why?.domain === row.domain ? (
+        <div className="mt-2 scroll-mb-2" data-why>
+          <NoticeBanner
+            actions={
+              <Button
+                onClick={(event) => {
+                  // Dismiss goes with the banner; focus goes back to the row's ⋯.
+                  const trigger = event.currentTarget.closest("tr, li")?.querySelector<HTMLElement>(ROW_TRIGGER);
+                  inflight.current?.abort();
+                  setWhy(null);
+                  trigger?.focus();
+                }}
+                size="sm"
+                variant="outline"
+              >
+                Dismiss
+              </Button>
+            }
+            title={why.text ?? `Checking ${row.domain}…`}
+            tone="neutral"
+          />
+        </div>
+      ) : null,
+    [why],
+  );
+
+  // Under the last row on screen, the answer would land below the fold.
+  React.useEffect(() => {
+    if (why) regionRef.current?.querySelector("[data-why]")?.scrollIntoView({ block: "nearest" });
+  }, [why]);
+
   const menu = React.useCallback(
     (row: AiVerdictRow) => (
-      <RowMenu
-        actions={[
-          { value: "allow", label: "Allow for everyone", group: "For everyone" },
-          { value: "block", label: "Block for everyone", group: "For everyone" },
-          { value: "forget", label: "Forget this verdict", group: "AI list" },
-          { value: "why", label: "Why?", group: "AI list" },
-        ]}
-        label={`Actions for ${row.domain}`}
-        onSelect={(value) => onAction(row, value)}
-      />
+      <span className="inline-flex" data-row-actions>
+        <RowMenu
+          actions={[
+            { value: "allow", label: "Allow for everyone", group: "For everyone" },
+            { value: "block", label: "Block for everyone", group: "For everyone" },
+            { value: "forget", label: "Forget this verdict", group: "AI list" },
+            { value: "why", label: "Why?", group: "AI list" },
+          ]}
+          label={`Actions for ${row.domain}`}
+          onSelect={(value) => onAction(row, value)}
+        />
+      </span>
     ),
     [onAction],
   );
@@ -206,12 +274,15 @@ export function AiVerdicts({
         primary: true,
         wrap: true,
         render: (row) => (
-          <span className="block min-w-0">
-            <span className="block font-mono text-sm [overflow-wrap:anywhere]">
-              <DomainName name={row.domain} />
+          <>
+            <span className="block min-w-0">
+              <span className="block font-mono text-sm [overflow-wrap:anywhere]">
+                <DomainName name={row.domain} />
+              </span>
+              <span className="block truncate text-muted-foreground text-xs">{site(row)}</span>
             </span>
-            <span className="block truncate text-muted-foreground text-xs">{site(row)}</span>
-          </span>
+            {answer(row)}
+          </>
         ),
       },
       {
@@ -259,7 +330,7 @@ export function AiVerdicts({
       },
       { key: "actions", header: "Actions", hideHeader: true, align: "end", stackHeader: true, render: menu },
     ],
-    [menu],
+    [menu, answer],
   );
 
   // Domain first; under it the verdict, the model's confidence and the website,
@@ -281,6 +352,7 @@ export function AiVerdicts({
                 · {sureWords(row, true)} · {site(row)}
               </span>
               {notes.length > 0 ? <span className="mt-1 block">{notes.join(" · ")}</span> : null}
+              {answer(row)}
             </>
           }
           lead={
@@ -289,12 +361,13 @@ export function AiVerdicts({
             )
           }
           meta={formatRelative(row.judged_at)}
-          title={row.domain}
+          title={<DomainName name={row.domain} />}
           titleClassName="font-mono"
+          wrapTitle
         />
       );
     },
-    [menu],
+    [menu, answer],
   );
 
   const shown = page?.counts ?? counts;
@@ -302,17 +375,34 @@ export function AiVerdicts({
   const all = changes + shown.ignore;
   const rows = page?.rows ?? [];
 
+  const clearSearch = (
+    <Button onClick={() => setSearch("")} size="sm" variant="outline">
+      Clear search
+    </Button>
+  );
+  // Changes holds only blocks and allows: a name the model left to the lists
+  // is in the AI list, under All judged, and is not said to be missing.
   const empty = q
-    ? {
-        icon: SearchXIcon,
-        title: "No verdicts match",
-        description: `Nothing in the AI list contains "${q}".`,
-        action: (
-          <Button onClick={() => setSearch("")} size="sm" variant="outline">
-            Clear search
-          </Button>
-        ),
-      }
+    ? view === "changes"
+      ? {
+          icon: SearchXIcon,
+          title: "No changes match",
+          description: `No blocks or allows contain "${q}".`,
+          action: (
+            <div className="flex flex-wrap justify-center gap-2">
+              <Button onClick={() => setView("all")} size="sm">
+                Search all judged
+              </Button>
+              {clearSearch}
+            </div>
+          ),
+        }
+      : {
+          icon: SearchXIcon,
+          title: "No verdicts match",
+          description: `Nothing in the AI list contains "${q}".`,
+          action: clearSearch,
+        }
     : view === "changes" && all > 0
       ? {
           icon: ListChecksIcon,
@@ -334,7 +424,7 @@ export function AiVerdicts({
         };
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4" ref={rootRef}>
       <div className="flex flex-wrap items-start gap-x-gutter gap-y-4">
         <div className="flex flex-col gap-2">
           <GroupLabel id={viewLabel}>Show</GroupLabel>
@@ -367,30 +457,33 @@ export function AiVerdicts({
         />
       </div>
 
-      {why ? (
-        <NoticeBanner
-          actions={
-            <Button onClick={() => setWhy(null)} size="sm" variant="outline">
-              Dismiss
-            </Button>
-          }
-          title={why}
-          tone="neutral"
+      <p className="sr-only" id={hintId}>
+        Arrow keys move between rows.
+      </p>
+      <div
+        aria-describedby={hintId}
+        aria-label="AI list verdicts"
+        onBlur={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) roving.leave();
+        }}
+        onFocus={(event) => roving.noteFocus(event.target)}
+        onKeyDownCapture={roving.onKeyDownCapture}
+        ref={regionRef}
+        role="group"
+      >
+        <DataTable
+          card={card}
+          columns={columns}
+          empty={empty}
+          error={error}
+          errorTitle="Could not load the AI list"
+          loading={loading}
+          onRetry={() => setAttempt((count) => count + 1)}
+          rowKey={(row) => row.domain}
+          rows={rows}
+          stackBelow="2xl"
         />
-      ) : null}
-
-      <DataTable
-        card={card}
-        columns={columns}
-        empty={empty}
-        error={error}
-        errorTitle="Could not load the AI list"
-        loading={loading}
-        onRetry={() => setAttempt((count) => count + 1)}
-        rowKey={(row) => row.domain}
-        rows={rows}
-        stackBelow="2xl"
-      />
+      </div>
 
       {page && page.total > rows.length ? (
         <p className="text-muted-foreground text-sm">

@@ -60,6 +60,7 @@ export const emptySettings: Settings = {
     daily_limit_usd: 0.1,
     zero_retention: true,
     base_url: "",
+    sends_to: "",
   },
 };
 
@@ -77,7 +78,7 @@ export const emptyRules: Rule[] = [];
  */
 export const CACHE_KEYS = {
   overview: "cogwheel_overview_cache_v4",
-  settings: "cogwheel_settings_cache_v4",
+  settings: "cogwheel_settings_cache_v5",
   lists: "cogwheel_lists_cache_v3",
   devices: "cogwheel_devices_cache_v3",
   rules: "cogwheel_rules_cache_v3",

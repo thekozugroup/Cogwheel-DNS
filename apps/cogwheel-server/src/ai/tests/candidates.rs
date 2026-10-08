@@ -8,7 +8,7 @@ use super::review::{
 };
 use super::verdict as stored;
 use crate::ai::burst::{LATE, QUIET};
-use crate::ai::spend::{Cost, usd_to_micro};
+use crate::ai::spend::{Cost, Written, usd_to_micro};
 use crate::ai::verdict::Recheck;
 use crate::ai::{DAY, Halt, KNOWN_CAP, Known, ListState, MODEL_UNRATED, State, offer};
 use cogwheel_dns_core::LogEntry;
@@ -417,4 +417,70 @@ async fn three_unrated_answers_stop_the_model() {
     assert!(rig.ai.tap().is_none());
     assert!(rig.pipeline.next_start(at(t + 20)).is_none());
     assert_eq!(rig.pipeline.waiting(), 0);
+}
+
+/// §12: an answer on the wire when the household presses Clear log lands with no website, in its
+/// row and in `known`.
+#[tokio::test]
+async fn an_answer_in_flight_during_clear_log_lands_with_no_site() {
+    let mut rig = rig().await;
+    let t = noon();
+    visit(
+        &mut rig.pipeline,
+        &empty(),
+        device(1),
+        t,
+        "www.news-site.com",
+        &names(0..1),
+    );
+    let start = rig.pipeline.next_start(at(t + 10)).expect("a start");
+    rig.ai
+        .forget_history(&rig.storage)
+        .await
+        .expect("Clear log");
+    let settled = rig
+        .pipeline
+        .settle(at(t + 11), start.id, answered("block", Some(0.95), 0.00002));
+    assert_eq!(settled.rows.first().expect("a fresh row").site, None);
+    assert_eq!(rig.ai.known(&name(0)).expect("known").site_key, None);
+}
+
+/// One settled before Clear log and written after it carries no website either: the write is
+/// checked under the lock Clear log takes.
+#[tokio::test]
+async fn a_settlement_written_after_clear_log_carries_no_site() {
+    let mut rig = rig().await;
+    let t = noon();
+    visit(
+        &mut rig.pipeline,
+        &empty(),
+        device(1),
+        t,
+        "www.news-site.com",
+        &names(0..1),
+    );
+    let start = rig.pipeline.next_start(at(t + 10)).expect("a start");
+    let settled = rig
+        .pipeline
+        .settle(at(t + 11), start.id, answered("block", Some(0.95), 0.00002));
+    assert_eq!(
+        settled.rows.first().and_then(|row| row.site.as_deref()),
+        Some("www.news-site.com")
+    );
+    rig.ai
+        .forget_history(&rig.storage)
+        .await
+        .expect("Clear log");
+    let write = Written {
+        cost: settled.cost,
+        rows: settled.rows,
+        recheck: None,
+        sites_epoch: Some(settled.sites_epoch),
+    };
+    rig.ai
+        .commit(&rig.storage, t + 11, write)
+        .await
+        .expect("written");
+    let row = rig.storage.ai_verdict(name(0)).await.expect("read");
+    assert_eq!(row.expect("stored").site, None);
 }

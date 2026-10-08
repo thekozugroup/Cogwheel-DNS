@@ -1,7 +1,7 @@
 //! Installing a policy that changes the verdict of a few exact names (ADR 0002's AI list) without
 //! emptying the cache. A child module so it can reach the private `WireCache` and `Shard`.
 
-use super::{DnsRuntime, Policy, Shard, WireCache};
+use super::{Admitted, DnsRuntime, Policy, Shard, WireCache};
 use crate::runtime_support::{read_recover, write_recover};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -15,6 +15,8 @@ impl DnsRuntime {
     /// Complete because a cached answer depends on the AI list only through its own name: the
     /// AI tier is not part of the CNAME re-check (`evaluate_lists`). Epoch before sweep, as in
     /// [`Self::swap_policy`], so a miss decided under the old policy cannot land after the sweep.
+    /// Its own epoch, not `cache_epoch`, so a miss in flight for any other name keeps its entry:
+    /// for an expired name that entry is the stale answer it falls back to during an outage.
     ///
     /// Walks every shard, so the caller runs it off the async workers (`spawn_blocking`); each
     /// shard's write lock is held only for that shard's own `retain`.
@@ -24,8 +26,17 @@ impl DnsRuntime {
         changed: &HashSet<Box<str>>,
     ) -> usize {
         self.swap_policy_keep_cache(policy);
-        self.cache_epoch.fetch_add(1, Ordering::Release);
+        self.ai_epoch.fetch_add(1, Ordering::Release);
         self.cache.invalidate_names(changed)
+    }
+
+    /// Whether an AI install landed while `admitted` was in flight and changed its own name's
+    /// verdict, the only AI verdict its answer depends on. Seeing the new epoch makes that
+    /// install's policy write visible, so the comparison is against its list or a newer one.
+    pub(super) fn ai_verdict_moved(&self, admitted: &Admitted) -> bool {
+        let domain = &*admitted.key.domain;
+        self.ai_epoch.load(Ordering::Acquire) != admitted.ai_epoch
+            && read_recover(&self.policy).ai.get(domain) != admitted.policy.ai.get(domain)
     }
 }
 

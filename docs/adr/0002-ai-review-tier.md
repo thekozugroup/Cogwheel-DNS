@@ -105,8 +105,10 @@ The decisions, numbered so that code comments and reviews can cite them:
 - **D6. Thresholds apply to the model's `confidence`, and a missing one counts
   as no decision.** The bars are in the table below. They are applied again at
   compile time against the live lists. A verdict judged against an older list
-  state stops applying when the lists change, and the name is judged again on
-  its next sighting.
+  state applies only if it still clears the bar for the lists as they are now:
+  an allow whose list block is gone stops, and a block over a `@@` that is gone
+  becomes a plain block, which its override confidence already clears. Either
+  way the name is judged again on its next sighting.
 - **D7. One candidate per request, with at most two questions.** The role
   question is always asked. The effect question ("if it stays blocked, does
   the site break?") is asked only when a list blocks or excepts the name. One
@@ -117,7 +119,9 @@ The decisions, numbered so that code comments and reviews can cite them:
   A block or allow is asked again when it appears in another website's load,
   at most twice in 30 days and once a day. An opposite answer above the plain
   bar turns the row into `ignore` with `why='contested'`, records both
-  websites and keeps the row for 90 days, so the conflict is not forgotten.
+  websites and keeps the row until 90 days after that verdict was judged, so
+  the conflict is not forgotten. A re-check is not a judgement and does not
+  restart that clock.
   DNS has no website context at query time, so one global verdict cannot be
   right for both. A household rule settles it in one click.
 - **D9. Every compile reads the AI rows. Every install that keeps the cache
@@ -211,7 +215,7 @@ These are constants, not settings. Changing one means amending this record.
 | Cross-site re-checks | at most 2 per verdict per 30 days and 1 per day; an opposite answer ≥ 0.85 contests the verdict |
 | New names judged | at most 24 per site load, 60 per site key per UTC day and 300 per client per hour |
 | Requests | at most 2 in flight and 2,000 per UTC day, at least 1 s apart, within the daily spend limit |
-| Re-judging | a block or allow is judged again when a website loads it 30 days or more after its last judgement, and sooner if the household's lists change under it |
+| Re-judging | a block or allow is judged again when a website loads it 30 days or more after its last judgement, and sooner if the household's lists change under it; a name left to the lists, after `min(30 days, HISTORY_DAYS)` or a Clear log (D13) |
 | Verdict rows | at most 10,000, oldest first; no row outlives 90 days from its last judgement, and an ordinary `ignore` goes sooner (D13) |
 
 The bars were set from the accuracy OpenRouter publishes for Jev 1.13. In
@@ -257,10 +261,14 @@ It then sends two kinds of request:
   preferences.
 - **A key check** at most every 10 minutes, carrying the key and no names.
 
-Each exact name is sent once. It is sent again only when a website loads it
-30 days or more after its last judgement, when the household's lists have
-changed under it, or for a cross-site re-check. Repeat visits send nothing.
-The pace is bounded by the table above.
+Each exact name is sent once, and repeat visits send nothing until it is due
+again. A block or allow is due when a website loads it 30 days or more after
+its last judgement. A name left to the lists is due after
+`min(30 days, HISTORY_DAYS)`, 7 days by default (D13), or at once after a
+Clear log, which forgets it. Any name is also sent again when the household's
+lists change under it (except one two websites disagreed about, which waits
+out its 90 days), for a cross-site re-check of a block or allow, and after
+Forget or Clear AI list. The pace is bounded by the table above.
 
 **Never.** A request never carries:
 
@@ -275,7 +283,9 @@ A name is sent only if it is shareable:
 - it is shaped like a public domain;
 - no label starts with `_`;
 - it is not under `arpa`, `local`, `lan`, `home`, `internal` or another
-  private suffix;
+  private suffix, a router vendor's local domain (`fritz.box`,
+  `speedport.ip`), or a wildcard-address, tailnet or dynamic-DNS service
+  (`nip.io`, `ts.net`, `duckdns.org`), whose names each lead to one home;
 - it has no embedded IPv4 address and no identifier-like label;
 - it is not at or under one of the appliance's own names, and not
   protected;
@@ -356,7 +366,8 @@ The reasoning cannot be audited, but these limit what it can do:
 - **Disagreements only.** Where the model agrees with the lists, it changes
   nothing.
 - **Overrides are hard to win.** Overriding a list in either direction needs
-  two answers above a high bar, capped per load and per day.
+  two answers above a high bar; an allow over a list block is also capped at
+  3 per site load and 20 per UTC day.
 - **Conflicts go to the lists.** A cross-site conflict hands the name back to
   them.
 - **Pages cannot vouch for themselves.** The website is never judged in its
@@ -388,15 +399,26 @@ override in that site's context. The override is:
   name, a request or response body, or the key.
 - The key is never returned, logged, stored in SQLite or shown in part.
 - The feature is counted as one unit under the spec's §12.1. Its own files
-  have a budget of 3,900 lines, of which at most 175 may sit in
-  `cogwheel-policy` and `cogwheel-dns-core`. As first built its own files
-  measure 6,218, and 183 of its lines (own files and glue) sit in those two
-  crates — over both, which §12.1 records rather than hides. RSS is budgeted
+  have a budget of 6,900 lines, of which at most 215 (own files and glue) may
+  sit in `cogwheel-policy` and `cogwheel-dns-core`; they measure 6,576 and
+  203. The first budget, 3,900 and 175, came from an estimate written before
+  the code; §12.1 argues the raise file by file. RSS is budgeted
   to grow by nothing while review is off and by at most 5 MB while it is on.
   As first measured (the spec's §11.1), an empty AI list added nothing the
-  benchmark could see, and a full 10,000-name list about 14 MB — over that
-  budget, and recorded there. If the feature is ever cut, it is cut in one
-  place, and the core returns to its own budget.
+  benchmark could see, and a full 10,000-name list about 14 MB, on or off:
+  every policy build read all 10,000 full rows, ignores included, and the
+  known map was built from them at every boot. Builds now read only the blocks
+  and allows, and only the five columns their bars judge, and the known map is
+  read only while review is on. Measured again with oisd small, after three
+  list toggles and 20 rule rebuilds: off or unavailable, a full list is now
+  within the noise of an empty one (25.9–31.5 MB against 25.4–28.1); a full
+  list of ignores, on, costs about 8 MB and stays flat (32.5–38.4); a full
+  list of blocks, on, still reaches 38–50 MB, as before, because every build
+  compiles all 10,000 and the allocator keeps what that churns. That case is
+  still over budget, and recorded; handing freed memory back after a large
+  compile (`malloc_trim`, or `MALLOC_ARENA_MAX` in the image) is the next
+  lever. If the feature is ever cut, it is cut in one place, and the core
+  returns to its own budget.
 
 ## Alternatives Rejected
 

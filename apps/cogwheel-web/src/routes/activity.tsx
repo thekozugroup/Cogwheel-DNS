@@ -2,7 +2,7 @@ import React from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { ActivityIcon, SearchXIcon, Trash2Icon } from "lucide-react";
 import { api, errorMessage, type Device, type StreamQueryEvent } from "@/lib/api";
-import { whySentence } from "@/lib/derive";
+import { clearLogConsequences, whySentence } from "@/lib/derive";
 import { formatClock, formatCount, pluralize } from "@/lib/format";
 import { notify } from "@/lib/toast";
 import {
@@ -165,6 +165,8 @@ function QueryFeed({
 }) {
   const { mutate } = useCogwheelActions();
   const navigate = useNavigate();
+  // Only for what Clear log says it does to the AI list.
+  const settings = useSnapshot("settings");
 
   const [live, setLive] = React.useState(true);
   const [feed, setFeed] = React.useState<Feed>({ rows: [], cursor: null });
@@ -777,7 +779,10 @@ function QueryFeed({
 
       <ConfirmDialog
         confirmLabel="Clear log"
-        consequence="The 24-hour counters on Overview and Devices are kept — they are stored separately from the log."
+        consequence={clearLogConsequences(
+          settings,
+          "The 24-hour counters on Overview and Devices are kept — they are stored separately from the log.",
+        )}
         description="Every stored query row is deleted. This cannot be undone."
         tone="bad"
         onConfirm={clearLog}

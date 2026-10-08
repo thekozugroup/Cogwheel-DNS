@@ -1,27 +1,11 @@
 //! `test_run.rs`: route 26's table, the charge for every billed answer, and the rate limit.
 
-use super::stub::{Reply, Stub};
-use super::{MODEL, env_key, fixture};
+use super::{ANSWER, KEY, MODEL, patch, refused};
 use crate::ai::{AiTestInput, State, apply_patch, run_test};
-use crate::http::ApiError;
 use crate::state::now_secs;
+use crate::tests::Harness;
+use crate::tests::openrouter_stub::{Canned, Stub, keyed};
 use axum::http::StatusCode;
-
-fn patch(body: &str) -> crate::ai::AiPatch {
-    serde_json::from_str(body).expect("a patch body")
-}
-
-fn refused(error: &ApiError, status: StatusCode, sentence: &str) {
-    assert_eq!(
-        (error.status(), error.to_string().as_str()),
-        (status, sentence)
-    );
-}
-
-const ANSWER: &str = r#"{"id":"gen-dec-1","model":"typesafe/jev-1.13-20260917","provider":"TypeSafe",
-  "answers":{"role":{"type":"choice","choice":"block","confidence":0.91},
-             "effect":{"type":"choice","choice":"works","confidence":0.94}},
-  "usage":{"input_tokens":510,"output_tokens":70,"cost":0.0000213}}"#;
 
 #[tokio::test]
 async fn a_test_failure_passes_through_unchanged() {
@@ -61,11 +45,11 @@ async fn a_test_failure_passes_through_unchanged() {
     ];
     for (status, expected, sentence) in cases {
         for through_the_put in [false, true] {
-            let stub = Stub::serve(vec![Reply::json(status, "{}")]);
+            let stub = Stub::serve(vec![("", Canned::json(status, "{}"))]);
             let base = stub.base.clone();
-            let fixture = fixture(
+            let fixture = Harness::with_ai(
                 move |config| {
-                    env_key(config);
+                    keyed(KEY)(config);
                     config.ai_base_url = base;
                 },
                 &[MODEL],
@@ -118,11 +102,11 @@ async fn a_model_that_does_not_say_how_sure_it_is_fails_the_test() {
             0,
         ),
     ] {
-        let stub = Stub::serve(vec![Reply::json(200, body)]);
+        let stub = Stub::serve(vec![("", Canned::json(200, body))]);
         let base = stub.base.clone();
-        let fixture = fixture(
+        let fixture = Harness::with_ai(
             move |config| {
-                env_key(config);
+                keyed(KEY)(config);
                 config.ai_base_url = base;
             },
             &[MODEL],
@@ -159,11 +143,11 @@ async fn a_model_that_does_not_say_how_sure_it_is_fails_the_test() {
 
 #[tokio::test]
 async fn a_passing_test_ends_a_terminal_state_and_tests_are_rate_limited() {
-    let stub = Stub::serve(vec![Reply::json(200, ANSWER)]);
+    let stub = Stub::serve(vec![("", Canned::json(200, ANSWER))]);
     let base = stub.base.clone();
-    let fixture = fixture(
+    let fixture = Harness::with_ai(
         move |config| {
-            env_key(config);
+            keyed(KEY)(config);
             config.ai_base_url = base;
         },
         &[("ai_enabled", "1"), MODEL],

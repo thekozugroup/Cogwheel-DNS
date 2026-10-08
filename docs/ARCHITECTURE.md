@@ -305,7 +305,10 @@ also makes it unavailable and empties the AI list at startup.
 The AI list is bounded the same way. The website a verdict was judged for is
 forgotten after `HISTORY_DAYS`; a row that left a name to the lists lives
 `min(30 days, HISTORY_DAYS)`; nothing lives past 90 days; and Clear log forgets
-the websites and those rows with it.
+the websites and those rows with it. A contested row — two websites disagreed,
+so the name was handed back to the lists — is the exception: it is policy, like
+a block or allow, so it lives up to 90 days after it was judged and Clear log
+keeps it, though not its websites.
 
 **WAL mode is why the backup procedure stops the container.** Everything since
 the last checkpoint lives in `cogwheel.db-wal`, so copying `cogwheel.db` out of

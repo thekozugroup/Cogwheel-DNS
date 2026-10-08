@@ -14,13 +14,14 @@ use super::openrouter_stub::{
 };
 use super::{Harness, device_input};
 use crate::ai::burst::{LATE, QUIET};
-use crate::ai::review::{Now, Pipeline};
+use crate::ai::review::Pipeline;
+use crate::ai::tests::review::{at, name, names, noon};
 use crate::ai::worker::{Jobs, persist, spawn_job};
 use crate::ai::{AliveGuard, Cost, KEY_REFUSED, Seen, State};
 use crate::api::devices;
 use crate::http::ApiJson;
 use crate::policy_build::{Rebuild, rebuild};
-use crate::state::{ServerState, now_secs};
+use crate::state::ServerState;
 use axum::extract::State as Extract;
 use axum::http::StatusCode;
 use cogwheel_policy::{Action, Reason};
@@ -30,26 +31,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-const DAY: i64 = 86_400;
 const WEBSITE: &str = "www.news-site.com";
-
-/// Noon UTC today: the reviewer's synthetic clock, on the day the spend owner's wall clock is on.
-fn noon() -> i64 {
-    now_secs().div_euclid(DAY) * DAY + DAY / 2
-}
-
-fn at(secs: i64) -> Now {
-    Now::from_secs(secs)
-}
-
-/// A third-party name with a site key of its own.
-fn name(n: usize) -> String {
-    format!("t{n}.site{n}.com")
-}
-
-fn names(range: std::ops::Range<usize>) -> Vec<String> {
-    range.map(name).collect()
-}
 
 fn device() -> IpAddr {
     IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20))
@@ -127,7 +109,7 @@ impl Rig {
     async fn settle(&mut self, t: i64) {
         while let Some((id, outcome)) = self.jobs.next().await {
             let settlement = self.pipeline.settle(at(t), id, outcome);
-            persist(&self.harness.state, settlement).await;
+            persist(&self.harness.state, t, settlement).await;
         }
     }
 
@@ -142,8 +124,9 @@ impl Rig {
         }
     }
 
-    fn spent(&self) -> Cost {
-        self.state().ai.today(now_secs())
+    /// Today's spend, on the day of `t`.
+    fn spent(&self, t: i64) -> Cost {
+        self.state().ai.today(t)
     }
 }
 
@@ -241,7 +224,7 @@ async fn turning_review_off_stops_requests_at_once() {
         let t = noon();
         rig.visit(t, &names(0..8));
         assert_eq!(rig.pipeline.waiting(), 8);
-        let before = rig.spent();
+        let before = rig.spent(t);
         assert!(rig.start(t + 10));
         let reserve = rig.pipeline.reserved();
         assert!(rig.stub.wait_for(3).await, "request 1 reached OpenRouter");
@@ -295,7 +278,7 @@ async fn turning_review_off_stops_requests_at_once() {
                 .is_empty(),
             "{stop}"
         );
-        let after = rig.spent();
+        let after = rig.spent(t);
         if stop == "key refused" {
             assert_eq!(state.ai.state(), State::KeyRefused);
             assert_eq!(state.ai.last_error(), Some(KEY_REFUSED));
@@ -506,7 +489,7 @@ async fn a_response_without_cost_is_charged_an_estimate() {
     rig.visit(t, &names(0..1));
     rig.run(t + 10, t + 12).await;
     // 480 input tokens at the ceiling for an unknown price, $1 a million: never free.
-    assert_eq!(rig.spent().micro_usd, 480);
+    assert_eq!(rig.spent(t).micro_usd, 480);
     assert_eq!(rig.state().ai.counters.unpriced.load(Ordering::Relaxed), 1);
     assert!(
         rig.state()
@@ -531,12 +514,12 @@ async fn the_budget_stops_dispatch_and_survives_a_restart() {
         "the first answer spent the day's limit"
     );
     assert_eq!(rig.state().ai.state(), State::PausedBudget);
-    let spent = rig.spent();
+    let spent = rig.spent(t);
     assert_eq!(spent.micro_usd, micro(0.06));
 
     // A new process, from what was stored: the same spend, and still nothing to send.
     let (state, _tap) = rig.harness.restarted_ai().await;
-    assert_eq!(state.ai.today(now_secs()), spent);
+    assert_eq!(state.ai.today(t), spent);
     let (_, text) = call(&state, "GET", "/api/v1/ai", None).await;
     assert_eq!(parsed(&text)["data"]["today"]["spent_usd"], 0.06);
     let mut again = reviewer(
@@ -571,9 +554,9 @@ async fn a_malformed_answer_is_dropped_and_not_stored() {
             .is_empty()
     );
     assert_eq!(rig.state().ai.known(&name(0)), None);
-    assert_eq!(rig.spent().micro_usd, micro(0.00003));
+    assert_eq!(rig.spent(t).micro_usd, micro(0.00003));
     let (state, _tap) = rig.harness.restarted_ai().await;
-    let stored = state.ai.today(now_secs()).micro_usd;
+    let stored = state.ai.today(t).micro_usd;
     assert_eq!(stored, micro(0.00003), "and stored with the day's spend");
 }
 
@@ -592,7 +575,7 @@ async fn test_and_reviewer_spend_writes_never_go_backwards() {
         rig.settle(t + 10),
     );
     assert_eq!(tested.0, StatusCode::OK, "{}", tested.1);
-    let today = rig.spent();
+    let today = rig.spent(t);
     assert_eq!(
         (today.requests, today.micro_usd),
         (2, 2 * micro(0.000_021_3))

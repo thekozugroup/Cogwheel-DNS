@@ -5,7 +5,6 @@
 use super::review::{
     Rig, answered, at, device, empty, failed, name, names, noon, rig, rig_on, visit,
 };
-use super::stub::{Reply as Canned, Stub};
 use super::{KEY, config, consent, load, with_env_key};
 use crate::ai::client::Reply;
 use crate::ai::review::{ATTEMPTS, Outcome};
@@ -14,9 +13,9 @@ use crate::ai::worker::{self, Jobs, persist, spawn_job};
 use crate::ai::{
     Halt, KEY_REFUSED, MODEL_GONE, MODEL_UNREADABLE, NO_ANSWER, OUT_OF_CREDIT, REDIRECTED, State,
 };
-use crate::state::ServerState;
+use crate::state::{ServerState, lock};
 use crate::tests::Harness;
-use serde_json::json;
+use crate::tests::openrouter_stub::{Canned, DECISIONS, KEY_INFO, Stub, decision};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
@@ -190,18 +189,6 @@ async fn three_refused_requests_or_unreadable_answers_stop_the_model() {
 
 // --------------------------------------------------------------------- jobs
 
-/// A decisions answer, as the stub sends it.
-fn decision(choice: &str, confidence: f64, cost: f64) -> String {
-    json!({
-        "id": "gen-dec-1",
-        "model": "typesafe/jev-1.13-20260917",
-        "provider": "TypeSafe",
-        "answers": { "role": { "type": "choice", "choice": choice, "confidence": confidence } },
-        "usage": { "input_tokens": 480, "output_tokens": 70, "cost": cost },
-    })
-    .to_string()
-}
-
 /// A harness whose AI review talks to `stub`, and a reviewing pipeline over its database.
 async fn wired(stub: &Stub) -> (Harness, ServerState, Rig) {
     let harness = Harness::new().await;
@@ -217,7 +204,10 @@ async fn wired(stub: &Stub) -> (Harness, ServerState, Rig) {
 
 #[tokio::test]
 async fn a_job_halted_before_it_starts_sends_nothing_and_costs_nothing() {
-    let stub = Stub::serve(vec![Canned::json(200, decision("block", 0.95, 0.00002))]);
+    let stub = Stub::serve(vec![(
+        DECISIONS,
+        Canned::json(200, decision("block", Some(0.95), None, Some(0.00002))),
+    )]);
     let (_harness, _state, mut rig) = wired(&stub).await;
     let t = noon();
     visit(
@@ -242,7 +232,10 @@ async fn a_job_halted_before_it_starts_sends_nothing_and_costs_nothing() {
 
 #[tokio::test]
 async fn a_job_halted_after_it_was_spawned_is_aborted_and_charged_its_reservation() {
-    let stub = Stub::serve(vec![Canned::json(200, decision("block", 0.95, 0.00002))]);
+    let stub = Stub::serve(vec![(
+        DECISIONS,
+        Canned::json(200, decision("block", Some(0.95), None, Some(0.00002))),
+    )]);
     let (_harness, _state, mut rig) = wired(&stub).await;
     let t = noon();
     visit(
@@ -270,7 +263,10 @@ async fn a_job_halted_after_it_was_spawned_is_aborted_and_charged_its_reservatio
 
 #[tokio::test]
 async fn a_started_job_sends_its_request_and_its_answer_is_written() {
-    let stub = Stub::serve(vec![Canned::json(200, decision("block", 0.95, 0.00002))]);
+    let stub = Stub::serve(vec![(
+        DECISIONS,
+        Canned::json(200, decision("block", Some(0.95), None, Some(0.00002))),
+    )]);
     let (_harness, state, mut rig) = wired(&stub).await;
     let t = noon();
     visit(
@@ -290,7 +286,7 @@ async fn a_started_job_sends_its_request_and_its_answer_is_written() {
     let (id, outcome) = jobs.next().await.expect("the job comes back");
     assert!(matches!(outcome, Outcome::Answered(Reply::Body(_))));
     let settlement = rig.pipeline.settle(at(t + 11), id, outcome);
-    persist(&state, settlement).await;
+    persist(&state, t + 11, settlement).await;
 
     let sent = stub.requests();
     assert_eq!(sent.len(), 1);
@@ -352,4 +348,108 @@ async fn the_reviewer_reads_stopped_once_its_task_ends() {
         assert!(ai.tap().is_none());
         assert!(ai.applying(), "stored verdicts keep applying");
     }
+}
+
+/// A settlement the database refused is not remembered as judged: the name is asked about again
+/// when next seen, not skipped for up to 30 days with nothing stored.
+#[tokio::test]
+async fn a_verdict_that_could_not_be_written_is_asked_about_again() {
+    let stub = Stub::serve(Vec::new());
+    let (_harness, state, mut rig) = wired(&stub).await;
+    let t = noon();
+    visit(
+        &mut rig.pipeline,
+        &empty(),
+        device(1),
+        t,
+        "www.news-site.com",
+        &names(0..1),
+    );
+    let start = rig.pipeline.next_start(at(t + 10)).expect("a start");
+    let mut settlement =
+        rig.pipeline
+            .settle(at(t + 11), start.id, answered("block", Some(0.95), 0.00002));
+    assert!(rig.ai.known(&name(0)).is_some(), "remembered when settled");
+    // A value the schema refuses, standing in for a full disk.
+    settlement.rows[0].confidence = Some(2.0);
+    persist(&state, t + 11, settlement).await;
+
+    assert_eq!(state.storage.ai_verdict(name(0)).await.expect("read"), None);
+    assert!(
+        rig.ai.known(&name(0)).is_none(),
+        "nothing stored, nothing known"
+    );
+    visit(
+        &mut rig.pipeline,
+        &empty(),
+        device(1),
+        t + 60,
+        "www.news-site.com",
+        &names(0..1),
+    );
+    assert!(rig.pipeline.is_pending(&name(0)), "asked about again");
+}
+
+/// §6.12 after a restart: the reviewer's first tick checks the key, so a key OpenRouter refuses
+/// now stops review before any name is sent with it.
+#[tokio::test]
+async fn a_key_refused_on_its_periodic_check_stops_review() {
+    let stub = Stub::serve(vec![(KEY_INFO, Canned::json(401, "{}"))]);
+    let harness = Harness::new().await;
+    consent(&harness.state.storage).await;
+    let mut config = with_env_key(config());
+    config.ai_base_url = stub.base.clone();
+    let (ai, tap) = load(&config, &harness.state.storage).await;
+    let (stop, shutdown) = watch::channel(false);
+    let state = ServerState {
+        ai: Arc::clone(&ai),
+        shutdown,
+        ..harness.state.clone()
+    };
+    let reviewer = tokio::spawn(worker::task(state, tap));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while ai.state() != State::KeyRefused {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the refused key was never noticed"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(ai.last_error(), Some(KEY_REFUSED));
+    assert!(ai.tap().is_none(), "nothing more goes out with it");
+    let sent = stub.requests();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].target, "/api/v1/key");
+    stop.send(true).expect("signal shutdown");
+    reviewer.await.expect("the reviewer returns");
+}
+
+/// D18 covers the key check too: one halted before it is sent sends nothing, and one on the wire
+/// is tracked, so a halt aborts it with the decisions requests.
+#[tokio::test]
+async fn a_key_check_is_behind_the_send_gate() {
+    let stub = Stub::serve(vec![(KEY_INFO, Canned::json(200, "{}").held())]);
+    let (_harness, _state, rig) = wired(&stub).await;
+    let generation = rig.ai.generation();
+    rig.ai.halt(Halt::Off);
+    worker::refresh_key_info(&rig.ai, generation);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        stub.requests().is_empty(),
+        "a halted key check sends nothing"
+    );
+
+    let (_harness, _state, rig) = wired(&stub).await;
+    worker::refresh_key_info(&rig.ai, rig.ai.generation());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while stub.requests().is_empty() {
+        assert!(tokio::time::Instant::now() < deadline, "never sent");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        lock(&rig.ai.inflight).contains_key(&0),
+        "tracked while on the wire"
+    );
+    rig.ai.halt(Halt::Off);
+    assert!(lock(&rig.ai.inflight).is_empty(), "and aborted by the halt");
 }

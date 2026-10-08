@@ -12,7 +12,7 @@ use super::prompt::{self, Choice, Context, Effect, Parsed, Provider};
 use super::spend::{Cost, charge_micro, micro_to_usd, reserve_micro};
 use super::{AiState, KEY_REFUSED, OUT_OF_CREDIT, Passed, REDIRECTED, State, model_list};
 use crate::http::ApiError;
-use crate::state::{ServerState, lock, read};
+use crate::state::{ServerState, lock, now_secs, read};
 use serde::Serialize;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -154,7 +154,7 @@ pub(super) async fn test_once(
     let body = prompt::body(model, &context, Some(Effect::Blocked), &provider);
     let reserve = reserve_micro(body.len(), price);
     let started = Instant::now();
-    let sent = client::decide(ai.client(), &ai.base, key, body).await;
+    let sent = client::decide(&ai.client, &ai.base, key, body).await;
     let latency = started.elapsed();
     let reply = match sent {
         Ok(reply) => reply,
@@ -178,7 +178,7 @@ pub(super) async fn test_once(
     }
     // A failed write is logged by `settle` and stays counted in memory; the answer still stands.
     let _ = ai
-        .settle(&state.storage, Cost::request(micro), Vec::new())
+        .settle(&state.storage, now_secs(), Cost::request(micro), Vec::new())
         .await;
 
     let Some(answer) = parsed.answer else {

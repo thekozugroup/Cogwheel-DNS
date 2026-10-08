@@ -4,7 +4,7 @@
 use super::AiState;
 use super::client::{self, ModelList};
 use crate::http::ApiError;
-use crate::state::{ServerState, now_secs, read, write};
+use crate::state::{ServerState, now_secs, read};
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -31,12 +31,11 @@ pub async fn model_list(state: &ServerState) -> Result<Arc<ModelList>, ApiError>
     if let Some(list) = ai.models.get() {
         return Ok(list);
     }
-    let list = client::models(ai.client(), &ai.base, now_secs())
+    let list = client::models(&ai.client, &ai.base, now_secs())
         .await
         .map(Arc::new)
         .ok_or_else(|| ApiError::unavailable(NO_MODEL_LIST))?;
     ai.models.set(Arc::clone(&list));
-    *write(&ai.last_models) = Some(Arc::clone(&list));
     Ok(list)
 }
 
@@ -99,7 +98,8 @@ impl AiState {
 
     /// A model's name for a sentence: the listed name without its vendor ("Jev 1.13"), or the id.
     pub(super) fn display_name(&self, id: &str) -> String {
-        read(&self.last_models)
+        self.models
+            .last()
             .as_ref()
             .and_then(|list| list.get(id))
             .map(|model| {

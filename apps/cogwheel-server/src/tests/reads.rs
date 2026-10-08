@@ -304,7 +304,8 @@ async fn the_settings_dump_describes_this_process() {
         ai,
         serde_json::json!({"available": true, "unavailable_reason": null, "enabled": false,
                            "key_source": "none", "model": null, "daily_limit_usd": 0.1,
-                           "zero_retention": true, "base_url": "http://127.0.0.1:1"})
+                           "zero_retention": true, "base_url": "http://127.0.0.1:1",
+                           "sends_to": "127.0.0.1:1"})
     );
 }
 

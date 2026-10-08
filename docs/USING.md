@@ -175,17 +175,22 @@ While it is on:
   blocks, the lookup is still blocked, and Why? says so.
 - **Keeping a name of your own out of it.** Give it a household rule — allow is
   the usual one. A name a household rule covers, and everything under it, is
-  never sent. Local names (`.lan`, `.home` and the like), the appliance's own
-  names, and names that look like they carry an identifier are never sent
-  either.
+  never sent. Local names (`.lan`, `.home`, `fritz.box`, `speedport.ip` and the
+  like), names under address, tailnet and dynamic-DNS services (`nip.io`,
+  `ts.net`, `duckdns.org` and the like), the appliance's own names, and names
+  that look like they carry an identifier are never sent either. Any other
+  domain of your own is sent like a website's, whether or not it resolves: if
+  your router hands out a local domain of its own, or you use another
+  dynamic-DNS provider, give that domain a household rule.
 - **"No lists" on a device means your rules and the AI list.** The AI list is
   household-wide and reaches every filtered device, including one set to No
   lists; the device editor says so. A device that should get nothing automated
   can have filtering off.
 - **It is judged against the household's lists, not each device's.** A device
   on fewer lists gets the AI list's blocks only for names no household list
-  blocks. For a name only a list it does not use blocks, it gets nothing from
-  the AI list, and that name resolves for it as it always did.
+  blocks. For a name only a list it does not use blocks, the AI list changes
+  nothing: the name resolves for it as it always did. If the AI list allows
+  that name, Activity still shows the lookup as *AI list*.
 - **Undoing it.** A rule of yours beats it. On Lists, a verdict's menu can
   forget it — it is judged again the next time a website loads it — and *Clear
   AI list* forgets them all.
@@ -229,11 +234,12 @@ entirely while keeping the charts —
 also switches AI review off and empties the AI list.
 
 If AI review has been used, the AI list is a record too. It keeps its blocks and
-allows for up to 90 days, and the names it left to your lists for at most 30
-days — or for the log's number of days, if that is fewer. Which website a
-verdict was judged for is forgotten after the log's number of days. **Clear
-log** forgets both: the websites, and the names left to your lists. Like the
-log, anyone who can open the web UI can read the AI list.
+allows, and any name two websites disagreed about, for up to 90 days; the other
+names it left to your lists for at most 30 days — or for the log's number of
+days, if that is fewer. Which website a verdict was judged for is forgotten
+after the log's number of days. **Clear log** forgets the websites and those
+other names; blocks, allows and disagreements stay. Like the log, anyone who
+can open the web UI can read the AI list.
 
 Nothing leaves the house except the lookups themselves, which go to the upstream
 resolver, and the blocklist downloads — and, only while AI review is on, the

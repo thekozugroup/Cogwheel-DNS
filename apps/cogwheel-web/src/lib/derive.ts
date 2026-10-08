@@ -1,5 +1,23 @@
-import type { AiExplanation, AiState, CheckResult, Device, ListKind, Reason } from "@/lib/api";
+import type {
+  AiExplanation,
+  AiState,
+  AiVerdictRow,
+  CheckResult,
+  Device,
+  ListKind,
+  Reason,
+  Settings,
+} from "@/lib/api";
+import { formatCount, formatSure } from "@/lib/format";
 import type { Tone } from "@/components/app/status-indicator";
+
+/** The Status dot for a tone, wherever a dot stands beside the words. */
+export const TONE_VARIANT = {
+  good: "success",
+  warn: "warning",
+  bad: "destructive",
+  idle: "default",
+} as const satisfies Record<Tone, "success" | "warning" | "destructive" | "default">;
 
 export type ProtectionState = { tone: Tone; label: string; detail: string; paused: boolean };
 
@@ -65,9 +83,7 @@ export function protectionState({
       paused: false,
     };
   }
-  // An AI list holding only allows blocks nothing, so only its blocks earn it
-  // a place in these two sentences.
-  const blockers = ai && ai.applied_block > 0 ? "your own rules and the AI list are" : "your own rules are";
+  const blockers = aiBlockers(ai);
   if (day.enabled === 0) {
     return {
       tone: "warn",
@@ -91,10 +107,33 @@ export function protectionState({
 }
 
 /**
+ * Whether the AI list blocks anything right now. One holding only allows
+ * blocks nothing, and one that is not applying blocks nothing either, so
+ * neither is named as though it filtered a device.
+ */
+export function aiBlocking(ai: { applying: boolean; applied_block: number } | undefined): boolean {
+  return Boolean(ai?.applying && ai.applied_block > 0);
+}
+
+/** Who blocks anything while no list does, after "Only". */
+export function aiBlockers(ai: { applying: boolean; applied_block: number } | undefined): string {
+  return aiBlocking(ai) ? "your own rules and the AI list are" : "your own rules are";
+}
+
+/** The states in which AI review has stopped judging new names on its own. */
+export const AI_STOPPED: ReadonlySet<AiState> = new Set<AiState>([
+  "key_refused",
+  "out_of_credit",
+  "model_refused",
+  "stopped",
+]);
+
+/**
  * AI review's state in a word, for a dot beside it. The four ways it can stop
  * share one word; the Lists page, where it is fixed, says which.
  */
 export function aiStateWord(state: AiState): { tone: Tone; word: string } {
+  if (AI_STOPPED.has(state)) return { tone: "bad", word: "Stopped" };
   switch (state) {
     case "reviewing":
       return { tone: "good", word: "On" };
@@ -104,11 +143,6 @@ export function aiStateWord(state: AiState): { tone: Tone; word: string } {
       return { tone: "warn", word: "Retrying" };
     case "no_key":
       return { tone: "warn", word: "Waiting for a key" };
-    case "key_refused":
-    case "out_of_credit":
-    case "model_refused":
-    case "stopped":
-      return { tone: "bad", word: "Stopped" };
     case "unavailable":
       return { tone: "idle", word: "Unavailable" };
     default:
@@ -217,7 +251,7 @@ export function checkSentence(result: CheckResult): string {
 
 /** "the model was 93% sure": always the model's certainty, never Cogwheel's. */
 function modelSure(confidence: number | null): string {
-  return confidence === null ? "" : ` (the model was ${Math.round(confidence * 100)}% sure)`;
+  return confidence === null ? "" : ` (the model was ${formatSure(confidence)} sure)`;
 }
 
 /**
@@ -230,7 +264,9 @@ function aiDecided(ai: AiExplanation): string | null {
   const sure = modelSure(ai.confidence);
   if (ai.verdict === "allow") {
     const needed = ai.site ? `needed by ${ai.site}` : "judged needed";
-    return `${needed}${sure}; your lists block it`;
+    // The household's lists, not the device's: an allow compiles only over a household list
+    // block, and a device on fewer lists or none reaches the AI list too.
+    return `${needed}${sure}; the household's lists block it`;
   }
   if (ai.verdict === "block") return `${ai.site ? `not needed by ${ai.site}` : "judged not needed"}${sure}`;
   return null;
@@ -271,18 +307,27 @@ function aiAside(ai: AiExplanation, reason: Reason): string | null {
 
 /**
  * "Why?" for a row of the log, which answers with what decided the name
- * *then*, against `/check`, which says what decides it *now*. The two
- * disagree in two ways a household meets, and both are about a redirect: a
- * row blocked because the name it redirected to was on a list, which checked
- * on its own is not blocked at all; and an AI allow, which lifts a list's
- * block on the name the model judged but not on the names it redirects to.
- * Everything else is `checkSentence`.
+ * *then*, against `/check`, which says what decides it *now*. When the two
+ * verdicts differ the row's is said first and today's after it: a name AI
+ * review judged has older rows the lists alone decided, and "Allowed for
+ * everyone" beside a row that reads "Blocked" told a household the opposite
+ * of what happened. A later rule, a list change or a pause does the same.
+ *
+ * Two more ways a household meets are both about a redirect: a row blocked
+ * because the name it redirected to was on a list, which checked on its own
+ * is not blocked at all; and an AI allow, which lifts a list's block on the
+ * name the model judged but not on the names it redirects to.
  */
 export function whySentence(
-  row: { domain: string; reason: Reason; list: string | null },
+  row: { domain: string; blocked: boolean; reason: Reason; list: string | null },
   result: CheckResult,
 ): string {
-  if (row.reason !== "cname") return checkSentence(result);
+  if (row.reason !== "cname") {
+    if (row.blocked === (result.verdict === "block")) return checkSentence(result);
+    const step = reasonLabel(row.reason, row.list);
+    const then = `${row.domain} — ${row.blocked ? "Blocked" : "Allowed"} when it was looked up${step ? ` — ${step}` : ""}.`;
+    return `${then} Since then: ${checkSentence(result)}`;
+  }
   const then = `${row.domain} — Blocked when it was looked up — ${reasonLabel("cname", row.list)}.`;
   if (result.reason === "no_match") {
     return `${then} Checked on its own, nothing blocks it: the block was on the name it redirects to.`;
@@ -291,6 +336,76 @@ export function whySentence(
     return `${then} The AI list allows ${row.domain} itself, but not the names it redirects to, so the lookup is still blocked.`;
   }
   return checkSentence(result);
+}
+
+/** Whether AI review has ever been set up here: a key, a model, or switched on. */
+export function aiSetUp(settings: Settings): boolean {
+  const { ai } = settings;
+  return ai.enabled || ai.key_source !== "none" || ai.model !== null;
+}
+
+/**
+ * What Clear log does besides deleting the rows, for both of its dialogs, so
+ * Activity's cannot leave out what Settings' says. `counters` is the line
+ * about the 24-hour counters, worded for the page it is on. The AI line is
+ * there only once review has been set up: before that there is no AI list.
+ */
+export function clearLogConsequences(settings: Settings, counters: string): string[] {
+  if (!aiSetUp(settings)) return [counters];
+  return [
+    counters,
+    "The AI list also forgets which websites its verdicts were judged for, and the names it left to your lists, which are judged, and paid for, again when next seen. Its blocks and allows stay, and so do names two websites disagreed about.",
+  ];
+}
+
+/** The most questions AI review asks in a UTC day: `REQUESTS_PER_DAY` in the server's ai/review.rs. */
+export const AI_REQUESTS_PER_DAY = 2_000;
+
+/** Questions still in flight when that cap stops review: `IN_FLIGHT` in ai/review.rs. */
+const AI_IN_FLIGHT = 2;
+
+/**
+ * About how many names a daily spending limit pays for at a model's price,
+ * never more than the day's questions, and what those questions cost. With a
+ * cheap model the cap comes first: Jev at a 10¢ limit stops at about 4¢, and
+ * "about 4,800 names a day" promised more than twice what review would ask.
+ */
+export function aiDailyReach(
+  limitUsd: number,
+  usdPerThousand: number,
+): { names: number; capped: boolean; capUsd: number } {
+  const paidFor = (limitUsd / usdPerThousand) * 1000;
+  return {
+    names: Math.min(paidFor, AI_REQUESTS_PER_DAY),
+    capped: paidFor > AI_REQUESTS_PER_DAY,
+    capUsd: (AI_REQUESTS_PER_DAY * usdPerThousand) / 1000,
+  };
+}
+
+/**
+ * Which daily limit paused review: the question cap or the spending limit.
+ * The server stops at the cap counting the questions still in flight, so a
+ * count within those of it is the cap.
+ */
+export function aiPausedBy(requestsToday: number): "requests" | "spend" {
+  return requestsToday >= AI_REQUESTS_PER_DAY - AI_IN_FLIGHT ? "requests" : "spend";
+}
+
+/**
+ * What Forget means for one verdict, from the card's last read of AI review's
+ * state. A name a household rule covers is never sent for review while the
+ * rule stands, so it is not promised a second judgement.
+ */
+export function aiForgetSentence(row: Pick<AiVerdictRow, "outranked_by">, state: AiState): string {
+  if (row.outranked_by === "household_rule") {
+    return "your rule decides for it, and it is not sent for review while the rule stands.";
+  }
+  if (state === "reviewing") return "judged again the next time a website loads it.";
+  if (state === "paused_budget") {
+    return "your lists decide for it until today's limit resets; then it is judged again when a website loads it.";
+  }
+  if (state === "retrying") return "judged again once OpenRouter answers and a website loads it.";
+  return "your lists decide for it.";
 }
 
 /**
@@ -471,6 +586,44 @@ export function devicesOnlyOnList<D extends ListChoice & { filtering: boolean }>
     const chosen = chosenEnabledLists(device, enabled);
     return chosen.length === 1 && chosen[0] === listId;
   });
+}
+
+const deviceNames = new Intl.ListFormat(undefined, { style: "long", type: "conjunction" });
+
+/**
+ * "Every device using Cogwheel is filtered except Work Laptop (filtering off)."
+ * Only a claim the device list backs. A device with filtering on but no list
+ * behind it blocks by rules alone, and the Devices page already calls that a
+ * warning — so it is an exception here too, named in the Devices page's words.
+ * Counting only the filtering-off devices had this line call such a device
+ * filtered directly under a headline that promises the household is protected.
+ */
+export function filteredSentence(
+  off: readonly string[],
+  noLists: readonly string[],
+  ai: { applying: boolean; applied_block: number },
+): string {
+  const aiBlocks = aiBlocking(ai);
+  const total = off.length + noLists.length;
+  if (total === 0) return "Every device using Cogwheel is filtered.";
+  // The AI list applies to a device on no lists too (ADR 0002 puts it above
+  // every list), so while it blocks something "no lists" is not the whole
+  // story. An AI list of allows, or an empty one, filters nothing for it.
+  const noListsWord = aiBlocks ? "no lists; AI list only" : "no lists";
+  if (total <= 3) {
+    const named = [
+      ...off.map((name) => `${name} (filtering off)`),
+      ...noLists.map((name) => `${name} (${noListsWord})`),
+    ];
+    return `Every device using Cogwheel is filtered except ${deviceNames.format(named)}.`;
+  }
+  const counts = [
+    off.length > 0 ? `${formatCount(off.length)} with filtering off` : null,
+    noLists.length > 0
+      ? `${formatCount(noLists.length)} with no lists${aiBlocks ? " (AI list only)" : ""}`
+      : null,
+  ].filter((part): part is string => part !== null);
+  return `Every device using Cogwheel is filtered except ${deviceNames.format(counts)}.`;
 }
 
 /** "Sam's iPhone", "Sam's iPhone and Kids' iPad", "A, B and 3 more". */

@@ -25,7 +25,7 @@ impl AiState {
                 0
             }
         };
-        let names = read(&self.last_models).clone();
+        let names = self.models.last();
         AiStatus {
             available: self.unavailable.is_none(),
             unavailable_reason: self.unavailable,
@@ -96,6 +96,7 @@ impl AiState {
             daily_limit_usd: f64::from(settings.daily_limit_cents) / 100.0,
             zero_retention: self.zero_retention,
             base_url: self.base.as_str().trim_end_matches('/').to_owned(),
+            sends_to: self.sends_to(),
         }
     }
 
@@ -207,4 +208,6 @@ pub struct AiSettingsView {
     pub daily_limit_usd: f64,
     pub zero_retention: bool,
     pub base_url: String,
+    /// The same host `AiStatus::sends_to` names, so Settings does not work it out again.
+    pub sends_to: String,
 }

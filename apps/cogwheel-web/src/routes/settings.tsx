@@ -3,8 +3,8 @@ import { Link } from "react-router-dom";
 import { ChevronDownIcon, Trash2Icon } from "lucide-react";
 import { api, type Settings } from "@/lib/api";
 import { emptySettings } from "@/lib/constants";
-import { formatBytes, formatCount, formatInterval, pluralize } from "@/lib/format";
-import { aiStateWord, blockModeLabel } from "@/lib/derive";
+import { formatBytes, formatCents, formatCount, formatInterval, pluralize } from "@/lib/format";
+import { aiStateWord, blockModeLabel, clearLogConsequences } from "@/lib/derive";
 import { cn } from "@/lib/utils";
 import { useCogwheelActions, useCogwheelStatus, useSnapshot } from "@/data/context";
 import { Button } from "@/components/ui/button";
@@ -73,16 +73,10 @@ export function SettingsScreen() {
 
       <ConfirmDialog
         confirmLabel="Clear log"
-        consequence={[
+        consequence={clearLogConsequences(
+          settings,
           "The 24-hour counters are kept — they are stored separately from the log.",
-          // Only once AI review has been set up: before that there is no AI
-          // list to forget anything.
-          ...(aiSetUp(settings)
-            ? [
-                "The AI list also forgets which websites its verdicts were judged for, and the names it left to your lists; those are judged, and paid for, again when next seen. Its blocks and allows stay.",
-              ]
-            : []),
-        ]}
+        )}
         description="Every stored query row is deleted. This cannot be undone."
         tone="bad"
         onConfirm={async () => {
@@ -296,14 +290,6 @@ function Loaded({ settings, onClear }: { settings: Settings; onClear: () => void
   );
 }
 
-/** Whether AI review has ever been set up here: a key, a model, or switched on. */
-function aiSetUp(settings: Settings): boolean {
-  const { ai } = settings;
-  return ai.enabled || ai.key_source !== "none" || ai.model !== null;
-}
-
-const AI_DEFAULT_BASE = "https://openrouter.ai";
-
 /**
  * AI review, read-only like the rest of this page. It is the one feature set
  * up in the UI rather than the environment — its key, model and daily limit
@@ -312,7 +298,6 @@ const AI_DEFAULT_BASE = "https://openrouter.ai";
  */
 function AiReviewCard({ settings }: { settings: Settings }) {
   const { ai } = settings;
-  const host = hostOf(ai.base_url);
   return (
     <ConfigCard
       footer={
@@ -337,12 +322,12 @@ function AiReviewCard({ settings }: { settings: Settings }) {
             ? "Saved on this appliance"
             : "None"}
       </Row>
-      <Row label="Daily limit">{dailyLimitLabel(ai.daily_limit_usd)}</Row>
+      <Row label="Daily limit">{`${formatCents(ai.daily_limit_usd)} a day`}</Row>
       <Row env="COGWHEEL_AI__ZERO_RETENTION" label="Providers">
         {ai.zero_retention ? "Zero data retention only" : "Any that do not collect data"}
       </Row>
       <Row env="COGWHEEL_AI__BASE_URL" label="Sends to">
-        <Mono>{!ai.base_url || ai.base_url.replace(/\/$/, "") === AI_DEFAULT_BASE ? "openrouter.ai" : host}</Mono>
+        <Mono>{ai.sends_to}</Mono>
       </Row>
     </ConfigCard>
   );
@@ -364,19 +349,6 @@ function AiStatusValue({ settings }: { settings: Settings }) {
   }
   const { tone, word } = aiStateWord(ai.state);
   return <StatusPill label={word} tone={tone} />;
-}
-
-function hostOf(url: string): string {
-  try {
-    return new URL(url).host;
-  } catch {
-    return url;
-  }
-}
-
-/** "10¢ a day", "$1 a day": the four limits the server accepts, as the set-up form words them. */
-function dailyLimitLabel(usd: number): string {
-  return usd >= 1 ? `$${usd.toFixed(usd % 1 === 0 ? 0 : 2)} a day` : `${Math.round(usd * 100)}¢ a day`;
 }
 
 /**

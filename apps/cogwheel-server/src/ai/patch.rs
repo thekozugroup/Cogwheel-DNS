@@ -36,6 +36,51 @@ const PICK_A_MODEL: &str = "Pick a model before turning AI review on.";
 /// The 400/409/429/503 of route 24's tables, a failing Test's own status and sentence, or a 500
 /// when the database or the key file could not be written.
 pub async fn apply_patch(state: &ServerState, patch: AiPatch) -> Result<(), ApiError> {
+    // D18 at once: a bare Turn off or Remove key closes the gate before it waits for the writes
+    // lock, which a Test or a key check can hold for 20 s while names keep going out. Step 6
+    // halts again under the lock.
+    if let Some(reason) = bare_withdrawal(&state.ai, &patch) {
+        state.ai.halt(reason);
+    }
+    // Spawned, so a client that hangs up cannot drop the change between saving it and installing
+    // it: the AI list in force, and the state, always end up matching what was saved.
+    let state = state.clone();
+    tokio::spawn(async move { apply(&state, patch).await })
+        .await
+        .unwrap_or_else(|error| {
+            tracing::error!(%error, "an AI review change failed part-way");
+            Err(ApiError::internal("The change could not be applied."))
+        })
+}
+
+/// The halt a Turn off or a Remove key asks for when the body carries nothing else, so nothing
+/// before step 6 can refuse it.
+fn bare_withdrawal(ai: &AiState, patch: &AiPatch) -> Option<Halt> {
+    let removing = matches!(patch.key, Some(None));
+    let slot = ai.key();
+    // An environment key cannot be removed here: step 1 refuses that.
+    let environment = slot
+        .as_ref()
+        .is_some_and(|slot| slot.source == KeySource::Environment);
+    if patch.model.is_some()
+        || patch.daily_limit_usd.is_some()
+        || matches!(patch.key, Some(Some(_)))
+        || patch.enabled == Some(true)
+        || (removing && environment)
+    {
+        return None;
+    }
+    if patch.enabled == Some(false) && read(&ai.settings).enabled {
+        Some(Halt::Off)
+    } else if removing && slot.is_some() {
+        Some(Halt::NoKey)
+    } else {
+        None
+    }
+}
+
+/// Steps 1–8, under the writes lock.
+async fn apply(state: &ServerState, patch: AiPatch) -> Result<(), ApiError> {
     let ai = &state.ai;
     let _writes = ai.writes.lock().await;
 
@@ -112,7 +157,7 @@ pub async fn apply_patch(state: &ServerState, patch: AiPatch) -> Result<(), ApiE
     // 4. A new key must be one OpenRouter accepts. Only its limits are kept.
     let key_info = match &new_key {
         Some(key) => Some(
-            client::key_info(ai.client(), &ai.base, key)
+            client::key_info(&ai.client, &ai.base, key)
                 .await
                 .map_err(key_check_error)?,
         ),
@@ -150,6 +195,11 @@ pub async fn apply_patch(state: &ServerState, patch: AiPatch) -> Result<(), ApiE
     if let Some(reason) = halt {
         ai.halt(reason);
     }
+    // The names already judged, which review needs and nothing reads while it is off: read
+    // before the switch is saved, so review never runs without them.
+    if turning_on {
+        ai.load_known(&state.storage).await?;
+    }
 
     // 7. Persist the settings, then the key file.
     let next = Settings {
@@ -164,6 +214,9 @@ pub async fn apply_patch(state: &ServerState, patch: AiPatch) -> Result<(), ApiE
         if matches!(halt, Some(Halt::KeyChanged | Halt::ModelChanged)) {
             ai.resume();
         }
+        if turning_on {
+            ai.unload_known();
+        }
         return Err(error);
     }
 
@@ -173,6 +226,11 @@ pub async fn apply_patch(state: &ServerState, patch: AiPatch) -> Result<(), ApiE
     let installed = if next.enabled == current.enabled {
         Ok(())
     } else {
+        if !next.enabled {
+            ai.unload_known();
+        }
+        // Told first: an install that fails here is retried by the installer (§5.3).
+        ai.notify_install();
         policy_build::rebuild(state, Rebuild::Ai).await.map(|_| ())
     };
     if next.enabled && tested && (halt.is_some() || !was_reviewing) {

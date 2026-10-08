@@ -1,7 +1,7 @@
 import React from "react";
 import { PauseIcon, PlayIcon } from "lucide-react";
 import { useCogwheelStatus } from "@/data/context";
-import type { ProtectionState } from "@/lib/derive";
+import { TONE_VARIANT } from "@/lib/derive";
 import { formatDuration, pluralize } from "@/lib/format";
 import { PAUSE_OPTIONS } from "@/lib/constants";
 import { useProtectionActions } from "@/hooks/use-protection";
@@ -29,13 +29,6 @@ import { useProtectionSummary } from "@/components/layout/protection-state";
  *   rail or phone      ProtectionChip in the top bar, whenever the state is
  *                      anything but Protected
  */
-
-const DOT: Record<ProtectionState["tone"], "success" | "warning" | "destructive" | "default"> = {
-  good: "success",
-  warn: "warning",
-  bad: "destructive",
-  idle: "default",
-};
 
 /** "Paused · 12:31 left", with the numerals tabular so it does not jitter. */
 function StateWords({ label, paused, remaining }: { label: string; paused: boolean; remaining: number }) {
@@ -121,7 +114,7 @@ export function ProtectionPanel() {
   return (
     <div className="flex flex-col gap-3">
       <p className="flex items-center gap-2 text-sm">
-        <Status size="sm" variant={DOT[state.tone]} />
+        <Status size="sm" variant={TONE_VARIANT[state.tone]} />
         <span className="font-medium text-foreground">{state.label}</span>
         {/* What the protection is made of, as a qualifier on the same line:
             "Protected" by nothing would be a different sentence. Only once
@@ -212,7 +205,7 @@ export function ProtectionRailButton() {
 /** The dot on the mark tile in the icon rail. Words are in the tooltip and the link's name. */
 export function ProtectionDot({ className }: { className?: string }) {
   const { state } = useProtectionSummary();
-  return <Status className={cn("ring-2 ring-sidebar", className)} size="md" variant={DOT[state.tone]} />;
+  return <Status className={cn("ring-2 ring-sidebar", className)} size="md" variant={TONE_VARIANT[state.tone]} />;
 }
 
 /**

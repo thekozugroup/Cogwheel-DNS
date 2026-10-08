@@ -34,6 +34,17 @@ pub const ZDR_LISTING: &str = "/api/v1/models?output_modalities=decisions&zdr=tr
 /// The longest a held reply waits for its release, so a test that forgets cannot hang the suite.
 const HOLD_LIMIT: Duration = Duration::from_secs(10);
 
+/// How a reply's body goes on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Framing {
+    /// `Content-Length`, then the whole body.
+    Length,
+    /// `Transfer-Encoding: chunked` and no length, as a proxy or a CDN may send it.
+    Chunked,
+    /// A `Content-Length` for the whole body, then half of it and a closed connection.
+    Truncated,
+}
+
 /// One canned answer.
 #[derive(Debug, Clone)]
 pub struct Canned {
@@ -41,6 +52,7 @@ pub struct Canned {
     headers: Vec<(String, String)>,
     body: String,
     hold: bool,
+    framing: Framing,
 }
 
 impl Canned {
@@ -51,7 +63,20 @@ impl Canned {
             headers: vec![("Content-Type".to_owned(), "application/json".to_owned())],
             body: body.into(),
             hold: false,
+            framing: Framing::Length,
         }
+    }
+
+    /// Sent in chunks, with no `Content-Length` to refuse it by in advance.
+    pub fn chunked(mut self) -> Self {
+        self.framing = Framing::Chunked;
+        self
+    }
+
+    /// Promised in full, broken off half-way.
+    pub fn truncated(mut self) -> Self {
+        self.framing = Framing::Truncated;
+        self
     }
 
     /// The same, with one more header.
@@ -233,17 +258,36 @@ fn answer(stream: TcpStream, shared: &Shared) {
             .wait_timeout_while(released, HOLD_LIMIT, |released| !*released);
     }
     let mut stream = reader.into_inner();
+    let body = reply.body.as_bytes();
+    let length = match reply.framing {
+        Framing::Chunked => "Transfer-Encoding: chunked".to_owned(),
+        Framing::Length | Framing::Truncated => format!("Content-Length: {}", body.len()),
+    };
     let mut head = format!(
-        "HTTP/1.1 {} Stub\r\nContent-Length: {}\r\nConnection: close\r\n",
-        reply.status,
-        reply.body.len()
+        "HTTP/1.1 {} Stub\r\n{length}\r\nConnection: close\r\n",
+        reply.status
     );
     for (name, value) in &reply.headers {
         head.push_str(&format!("{name}: {value}\r\n"));
     }
     head.push_str("\r\n");
     let _ = stream.write_all(head.as_bytes());
-    let _ = stream.write_all(reply.body.as_bytes());
+    match reply.framing {
+        Framing::Length => {
+            let _ = stream.write_all(body);
+        }
+        Framing::Truncated => {
+            let _ = stream.write_all(&body[..body.len() / 2]);
+        }
+        Framing::Chunked => {
+            for chunk in body.chunks(4_096) {
+                let _ = write!(stream, "{:x}\r\n", chunk.len());
+                let _ = stream.write_all(chunk);
+                let _ = stream.write_all(b"\r\n");
+            }
+            let _ = stream.write_all(b"0\r\n\r\n");
+        }
+    }
     let _ = stream.flush();
 }
 

@@ -1,7 +1,7 @@
 import React from "react";
 import { Trash2Icon } from "lucide-react";
 import { api, errorMessage, type AiOverview, type AiState, type AiStatus } from "@/lib/api";
-import { aiStateWord } from "@/lib/derive";
+import { AI_REQUESTS_PER_DAY, TONE_VARIANT, aiPausedBy, aiStateWord } from "@/lib/derive";
 import { emptyOverview } from "@/lib/constants";
 import { formatCount, formatUsd, pluralize } from "@/lib/format";
 import { useCogwheelActions, useCogwheelStatus, useSnapshot } from "@/data/context";
@@ -20,8 +20,6 @@ const MEASURE = "max-w-[56ch]";
 
 /** How often the card re-reads AI review's status while the page is in view. */
 const STATUS_INTERVAL_MS = 30_000;
-
-const DOT = { good: "success", warn: "warning", bad: "destructive", idle: "default" } as const;
 
 const clock = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
 
@@ -48,11 +46,17 @@ function StatusLine({ status, state, onChange }: { status: AiStatus; state: AiSt
   const { today, verdicts } = status;
   const kept = verdicts.block + verdicts.allow;
   const judged = today.requests > 0 || kept + verdicts.ignore > 0;
+  const resumes = `resumes at ${clock.format(today.resets_at * 1000)}`;
   const words: Record<AiState, string> = {
     reviewing: judged
       ? `On · judged ${pluralize(today.requests, "name")} today · ${formatUsd(today.spent_usd)} of ${formatUsd(status.daily_limit_usd)}`
       : "On · nothing judged yet; open a website on any device",
-    paused_budget: `Daily limit reached · resumes at ${clock.format(today.resets_at * 1000)}`,
+    // Two limits pause review: with a cheap model the day's questions run out
+    // first, under a spend that is plainly short of the limit just above.
+    paused_budget:
+      aiPausedBy(today.requests) === "requests"
+        ? `Today's ${formatCount(AI_REQUESTS_PER_DAY)} questions are used · ${resumes}`
+        : `Daily limit reached · ${resumes}`,
     no_key: "Waiting for a key",
     retrying: "OpenRouter is not answering · retrying; DNS is unaffected",
     key_refused: "Stopped · OpenRouter refused the key",
@@ -76,7 +80,7 @@ function StatusLine({ status, state, onChange }: { status: AiStatus; state: AiSt
       {/* The dot runs inline with the words, so on a phone it wraps with
           them instead of standing alone on a line above them. */}
       <span className="text-foreground">
-        <Status className="me-2 inline-block align-middle ring-0" size="sm" variant={DOT[shown]} />
+        <Status className="me-2 inline-block align-middle ring-0" size="sm" variant={TONE_VARIANT[shown]} />
         {words[state]}
       </span>
       {fixable ? (
@@ -358,8 +362,9 @@ export function AiListCard() {
           <p className={`${MEASURE} min-w-0 text-muted-foreground text-sm`}>
             Exact names only: a verdict on cdn.site.com says nothing about img.cdn.site.com, and an allow lifts a
             list's block on that name, not on a name it redirects to. Your own rules beat the AI list; it beats every
-            subscribed list. A name is judged again the first time a website loads it 30 days or more after its last
-            judgement.
+            subscribed list. A block or allow is judged again the first time a website loads it 30 days or more after
+            its last judgement; a name left to your lists, once your activity log has forgotten it or after 30 days,
+            whichever is sooner (90 days if two websites disagreed about it).
           </p>
           {total > 0 ? (
             <Button onClick={askClear} variant="destructive">
@@ -372,17 +377,26 @@ export function AiListCard() {
       title="AI list"
     >
       {watcher}
-      <div className="space-y-6">
-        {testing ? <p className="text-muted-foreground text-sm">Asking the model a test question…</p> : null}
+      {/* Always mounted, so Test now's answer is announced when it lands: a
+          live region inserted already holding its sentence is not read. It
+          takes room only while it says something. */}
+      <div className={testing || outcome ? "mb-6 flex flex-wrap items-start justify-between gap-3" : undefined}>
+        <TestLine outcome={outcome} pending={testing ? "Asking the model a test question…" : undefined} />
         {outcome ? (
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <TestLine outcome={outcome} />
-            <Button onClick={() => setOutcome(null)} size="sm" variant="outline">
-              Dismiss
-            </Button>
-          </div>
+          <Button
+            onClick={() => {
+              setOutcome(null);
+              // The button goes with the answer; focus goes back to the menu that asked.
+              actionsRef.current?.querySelector<HTMLElement>('[aria-haspopup="menu"]')?.focus();
+            }}
+            size="sm"
+            variant="outline"
+          >
+            Dismiss
+          </Button>
         ) : null}
-
+      </div>
+      <div className="space-y-6">
         {form === "edit" ? <div className="border-border border-b pb-6">{setupForm("edit")}</div> : null}
 
         <p className="text-foreground text-sm">

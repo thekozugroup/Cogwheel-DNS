@@ -1,3 +1,4 @@
+import { TONE_VARIANT } from "@/lib/derive";
 import { cn } from "@/lib/utils";
 import { Status } from "@/components/ui/status";
 
@@ -7,12 +8,7 @@ export type Tone = "good" | "warn" | "bad" | "idle";
  * Colour never carries meaning on its own here: every tone pairs a 400-weight
  * dot with a word, and the accessible name states the status in text.
  */
-const TONE: Record<Tone, { variant: "success" | "warning" | "destructive" | "default"; word: string }> = {
-  good: { variant: "success", word: "OK" },
-  warn: { variant: "warning", word: "Warning" },
-  bad: { variant: "destructive", word: "Problem" },
-  idle: { variant: "default", word: "Idle" },
-};
+const WORD: Record<Tone, string> = { good: "OK", warn: "Warning", bad: "Problem", idle: "Idle" };
 
 /**
  * The compact status used inside table rows: a bordered pill whose text sits in
@@ -40,7 +36,8 @@ export function StatusPill({
   verdict?: boolean;
   className?: string;
 }) {
-  const { variant, word } = TONE[tone];
+  const variant = TONE_VARIANT[tone];
+  const word = WORD[tone];
 
   return (
     <span

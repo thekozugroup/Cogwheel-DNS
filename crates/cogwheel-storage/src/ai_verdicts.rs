@@ -55,6 +55,13 @@ const UPSERT: &str = "INSERT INTO ai_verdicts (domain, verdict, why, choice, con
          rechecks = excluded.rechecks, model = excluded.model, judged_at = excluded.judged_at,
          review_after = excluded.review_after";
 
+/// A cross-site re-check: only the columns it changes, and only while the row is still a block or
+/// an allow. A row Forget or Clear deleted after the re-check read it stays deleted, and a website
+/// Clear log scrubbed meanwhile stays scrubbed.
+const RECHECK: &str = "UPDATE ai_verdicts SET verdict = ?2, why = ?3, conflict_site = ?4,
+         rechecks = ?5, review_after = ?6
+     WHERE domain = ?1 AND verdict IN ('block','allow')";
+
 record! {
     /// One AI review verdict (ADR 0002). Strings, not policy types: storage is a leaf crate.
     #[derive(PartialEq)]
@@ -84,6 +91,32 @@ record! {
         judged_at: i64,
         /// When the name is due to be judged again, or, for an ordinary ignore, pruned.
         review_after: i64,
+    }
+}
+
+record! {
+    /// What a policy compile reads of a block or an allow: the columns its bars judge, and none of
+    /// the text a page or the reviewer needs. Every build reads all of them, so it reads no more.
+    #[derive(PartialEq)]
+    AiDecision from "ai_verdicts" {
+        domain: String,
+        /// `block` or `allow`.
+        verdict: String,
+        confidence: Option<f64>,
+        effect: Option<String>,
+        effect_confidence: Option<f64>,
+    }
+}
+
+impl From<&AiVerdict> for AiDecision {
+    fn from(row: &AiVerdict) -> Self {
+        Self {
+            domain: row.domain.clone(),
+            verdict: row.verdict.clone(),
+            confidence: row.confidence,
+            effect: row.effect.clone(),
+            effect_confidence: row.effect_confidence,
+        }
     }
 }
 
@@ -128,7 +161,7 @@ pub struct AiPruned {
 
 impl Storage {
     /// Every row, in domain order. The table is capped at 10,000 rows, which is what makes reading
-    /// all of it for each policy compile and for the reviewer's `known` map affordable.
+    /// all of it for the reviewer's `known` map affordable.
     ///
     /// # Errors
     ///
@@ -136,6 +169,20 @@ impl Storage {
     pub async fn list_ai_verdicts(&self) -> Result<Vec<AiVerdict>, StorageError> {
         self.with_connection(|connection| AiVerdict::all(connection, "ORDER BY domain", []))
             .await
+    }
+
+    /// The blocks and allows, in domain order, as a policy compile reads them. Every build reads
+    /// this, so it leaves the ignores, most of a full table and never compiled, in the database:
+    /// reading all 10,000 full rows per build is what grew RSS past ADR 0002's budget.
+    pub async fn list_ai_decisions(&self) -> Result<Vec<AiDecision>, StorageError> {
+        self.with_connection(|connection| {
+            AiDecision::all(
+                connection,
+                "WHERE verdict IN ('block','allow') ORDER BY domain",
+                [],
+            )
+        })
+        .await
     }
 
     /// The row for one exact name, or `None` when it has never been judged (or was forgotten).
@@ -204,8 +251,24 @@ impl Storage {
         rows: Vec<AiVerdict>,
         ai_spend: String,
     ) -> Result<(), StorageError> {
+        self.record_ai_settlement(rows, None, ai_spend)
+            .await
+            .map(|_| ())
+    }
+
+    /// [`Self::record_ai_verdicts`], and a cross-site re-check of a stored block or allow in the
+    /// same transaction: `recheck` is the row as the re-check left it, of which only `verdict`,
+    /// `why`, `conflict_site`, `rechecks` and `review_after` are written, and only if the stored
+    /// row is still a block or an allow. Returns whether any row was written.
+    pub async fn record_ai_settlement(
+        &self,
+        rows: Vec<AiVerdict>,
+        recheck: Option<AiVerdict>,
+        ai_spend: String,
+    ) -> Result<bool, StorageError> {
         self.with_connection(move |connection| {
             let transaction = connection.transaction()?;
+            let mut changed = !rows.is_empty();
             {
                 let mut upsert = transaction.prepare_cached(UPSERT)?;
                 for row in &rows {
@@ -227,9 +290,22 @@ impl Storage {
                     ])?;
                 }
             }
+            if let Some(row) = &recheck {
+                changed |= transaction.execute(
+                    RECHECK,
+                    params![
+                        row.domain,
+                        row.verdict,
+                        row.why,
+                        row.conflict_site,
+                        row.rechecks,
+                        row.review_after
+                    ],
+                )? > 0;
+            }
             write_setting(&transaction, AI_SPEND, Some(&ai_spend))?;
             transaction.commit()?;
-            Ok(())
+            Ok(changed)
         })
         .await
     }

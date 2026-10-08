@@ -7,7 +7,6 @@
 
 use super::prompt::Usage;
 use super::{AiState, DAY};
-use crate::state::now_secs;
 use cogwheel_storage::{AiVerdict, Storage, StorageError};
 use std::sync::atomic::Ordering;
 
@@ -32,6 +31,29 @@ impl Cost {
             micro_usd,
             requests: 1,
             overrides: 0,
+        }
+    }
+}
+
+/// What one settlement writes, through [`AiState::commit`].
+#[derive(Debug, Default)]
+pub struct Written {
+    pub cost: Cost,
+    /// Fresh judgements, each replacing any stored row outright.
+    pub rows: Vec<AiVerdict>,
+    /// A stored block or allow as a cross-site re-check left it.
+    pub recheck: Option<AiVerdict>,
+    /// The Clear log epoch the question was asked under; `None` for a write with no website.
+    pub sites_epoch: Option<u64>,
+}
+
+impl Written {
+    /// A charge and fresh rows, and nothing else.
+    pub fn rows(cost: Cost, rows: Vec<AiVerdict>) -> Self {
+        Self {
+            cost,
+            rows,
+            ..Self::default()
         }
     }
 }
@@ -146,6 +168,10 @@ impl AiState {
     /// older figure can never overwrite a newer one. The rows share the spend's transaction, so a
     /// crash can neither lose a billed response nor store a verdict that was never paid for.
     ///
+    /// `now` is the clock the cost was settled on, so the day it is charged to is the day the
+    /// caller's caps were checked against. A day never goes back: a settlement from just before
+    /// midnight that lands after one is charged to the new day, which errs towards stopping.
+    ///
     /// # Errors
     ///
     /// The write failed. It is logged here at WARN; the in-memory spend stays raised, which errs
@@ -153,11 +179,44 @@ impl AiState {
     pub async fn settle(
         &self,
         storage: &Storage,
+        now: i64,
         cost: Cost,
         rows: Vec<AiVerdict>,
     ) -> Result<(), StorageError> {
+        self.commit(storage, now, Written::rows(cost, rows))
+            .await
+            .map(|_| ())
+    }
+
+    /// [`Self::settle`] for the reviewer: also a cross-site re-check, and every website dropped
+    /// when Clear log ran after the question was asked. Checked under the lock Clear log takes
+    /// ([`Self::forget_history`]), so a settlement made before a clear cannot land after it with
+    /// the websites it forgot. Returns whether a row was written, which is when to install.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::settle`].
+    pub async fn commit(
+        &self,
+        storage: &Storage,
+        now: i64,
+        write: Written,
+    ) -> Result<bool, StorageError> {
+        let Written {
+            cost,
+            mut rows,
+            mut recheck,
+            sites_epoch,
+        } = write;
         let mut spend = self.spend.lock().await;
-        spend.roll_over(utc_day(now_secs()));
+        if sites_epoch.is_some_and(|epoch| epoch != self.sites_epoch()) {
+            for row in rows.iter_mut().chain(recheck.as_mut()) {
+                row.site = None;
+                row.conflict_site = None;
+            }
+        }
+        let day = utc_day(now).max(spend.day);
+        spend.roll_over(day);
         spend.add(cost);
         // Mirrored before the write, so admission sees it even if the write fails.
         self.spend_day.store(spend.day, Ordering::Release);
@@ -165,11 +224,29 @@ impl AiState {
         self.requests_today.store(spend.requests, Ordering::Release);
         self.overrides_today
             .store(spend.overrides, Ordering::Release);
-        let result = storage.record_ai_verdicts(rows, spend.encode()).await;
+        let result = storage
+            .record_ai_settlement(rows, recheck, spend.encode())
+            .await;
         if let Err(error) = &result {
             tracing::warn!(%error, "recording AI review spend failed; it stays counted in memory");
         }
         result
+    }
+
+    /// Clear log's half of the AI list (§12): which website each name was judged for, in memory
+    /// and in the table, and the ordinary ignores. Under the spend lock, so a settlement waiting
+    /// to be written lands after this with no website. Returns how many ignores went.
+    ///
+    /// # Errors
+    ///
+    /// The table could not be written.
+    pub async fn forget_history(&self, storage: &Storage) -> Result<usize, StorageError> {
+        let _settling = self.spend.lock().await;
+        self.forget_sites();
+        storage.scrub_ai_sites(None).await?;
+        let forgotten = storage.forget_ai_negatives().await?;
+        self.forget_known(&forgotten);
+        Ok(forgotten.len())
     }
 
     /// Today's spend in micro-USD, requests and overrides, read without the lock. A figure from

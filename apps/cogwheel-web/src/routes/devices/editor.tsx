@@ -522,7 +522,6 @@ function ruleSummary(added: number, changed: number, removed: number): string {
   return parts.length > 0 ? `${parts.join(", ")}.` : "";
 }
 
-/** Native radio: the app has no radio primitive, and this is three options. */
 /**
  * What "No lists" leaves a device with. The AI list sits above every list and
  * applies to every filtered device, this one included, so while it is applying
@@ -536,6 +535,7 @@ function NoListsDetail() {
     : "Only rules apply. Nothing on a list is blocked for this device.";
 }
 
+/** Native radio: the app has no radio primitive, and this is three options. */
 function Radio({
   checked,
   label,

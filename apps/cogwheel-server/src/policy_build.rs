@@ -15,7 +15,7 @@ use crate::http::ApiError;
 use crate::state::{DeviceNames, ServerState, lock, read, write};
 use cogwheel_lists::{ParsedList, SourceKind, build_index, parse_list, protected_hits};
 use cogwheel_policy::{Action, ListIndex, Policy, RuleSet, Scope, normalize_rule_domain};
-use cogwheel_storage::{AiVerdict, Device, DeviceList, Rule, Source};
+use cogwheel_storage::{AiDecision, Device, DeviceList, Rule, Source};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -70,7 +70,7 @@ pub struct PolicyStats {
 pub async fn rebuild(state: &ServerState, kind: Rebuild) -> Result<PolicyStats, ApiError> {
     // Held across the whole build so two concurrent edits cannot interleave "read the rows" and
     // "install the policy" and leave the older read winning.
-    let _serialised = state.rebuild_lock.lock().await;
+    let serialised = Arc::clone(&state.rebuild_lock).lock_owned().await;
 
     let sources = state.storage.list_sources().await?;
     let devices = state.storage.list_devices().await?;
@@ -80,7 +80,7 @@ pub async fn rebuild(state: &ServerState, kind: Rebuild) -> Result<PolicyStats, 
     // `applying()` is read here, under the lock: turning review off is an `Ai` rebuild that
     // compiles an empty list, and the diff below then covers every name that was in force.
     let ai_rows = if state.ai.applying() {
-        state.storage.list_ai_verdicts().await?
+        state.storage.list_ai_decisions().await?
     } else {
         Vec::new()
     };
@@ -169,6 +169,9 @@ pub async fn rebuild(state: &ServerState, kind: Rebuild) -> Result<PolicyStats, 
             ai_changed = changed.len();
             // The sweep walks every cache shard, so it runs off the async workers.
             ai_dropped = tokio::task::spawn_blocking(move || {
+                // Held until the swap lands, even if the caller is dropped while it waits: the
+                // next build must diff against the policy this one installs.
+                let _serialised = serialised;
                 runtime.swap_policy_invalidating(policy, &changed)
             })
             .await
@@ -212,7 +215,7 @@ struct Rows<'a> {
     devices: &'a [Device],
     device_lists: &'a [DeviceList],
     rules: &'a [Rule],
-    ai: &'a [AiVerdict],
+    ai: &'a [AiDecision],
 }
 
 /// Build the list index from the cached bodies on disk (§2.6, §6 step 1).

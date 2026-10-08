@@ -383,6 +383,7 @@ async fn history_days_zero_makes_ai_review_unavailable_and_empties_the_ai_list()
         .ai
         .settle(
             &harness.state.storage,
+            now,
             crate::ai::Cost::default(),
             vec![row("ads.example.net", "block", 0.95, now)],
         )

@@ -1,39 +1,28 @@
 //! `patch.rs` and `test_run.rs`: route 24's order of work and route 26's table, driven through
 //! the functions the handlers call, against the loopback stub.
 
-use super::KEY;
-use super::stub::{Reply, Stub};
-use super::{Scratch, env_key, fixture};
+use super::{ANSWER, KEY, MODEL, patch, refused, verdict};
 use crate::ai::{
-    AiPatch, AiTestInput, KeySource, State, Unavailable, apply_patch, model_list, run_test,
+    AiTestInput, Cost, KeySource, State, Unavailable, apply_patch, model_list, run_test,
 };
-use crate::http::ApiError;
+use crate::policy_build::{Rebuild, rebuild};
 use crate::state::now_secs;
+use crate::tests::openrouter_stub::{Canned, DECISIONS, LISTING, Stub, ZDR_LISTING, keyed};
+use crate::tests::{Harness, TempDir};
 use axum::http::StatusCode;
+use cogwheel_policy::Action;
 use cogwheel_storage::AiCounts;
+use std::time::Duration;
 
-fn patch(body: &str) -> AiPatch {
-    serde_json::from_str(body).expect("a patch body")
-}
-
-fn refused(error: &ApiError, status: StatusCode, sentence: &str) {
-    assert_eq!(
-        (error.status(), error.to_string().as_str()),
-        (status, sentence)
-    );
-}
-
-const ANSWER: &str = r#"{"id":"gen-dec-1","model":"typesafe/jev-1.13-20260917","provider":"TypeSafe",
-  "answers":{"role":{"type":"choice","choice":"block","confidence":0.91},
-             "effect":{"type":"choice","choice":"works","confidence":0.94}},
-  "usage":{"input_tokens":510,"output_tokens":70,"cost":0.0000213}}"#;
-
-const LISTING: &str = r#"{"data":[{"id":"typesafe/jev-1.13","name":"TypeSafe: Jev 1.13",
+/// A listing of the one model these tests pick, priced at $0.042 per million prompt tokens.
+const MODELS: &str = r#"{"data":[{"id":"typesafe/jev-1.13","name":"TypeSafe: Jev 1.13",
   "description":"Jev","context_length":32000,"pricing":{"prompt":"0.000000042"}}]}"#;
+
+const ON: (&str, &str) = ("ai_enabled", "1");
 
 #[tokio::test]
 async fn the_operator_switch_refuses_every_write_but_removing_the_key() {
-    let off = fixture(|config| config.ai_available = false, &[]).await;
+    let off = Harness::with_ai(|config| config.ai_available = false, &[]).await;
     let sentence = Unavailable::OperatorOff.sentence();
     for body in [
         r#"{"enabled":true}"#,
@@ -63,7 +52,7 @@ async fn the_operator_switch_refuses_every_write_but_removing_the_key() {
 
 #[tokio::test]
 async fn an_environment_key_cannot_be_replaced_but_the_rest_can_change() {
-    let fixture = fixture(env_key, &[]).await;
+    let fixture = Harness::with_ai(keyed(KEY), &[]).await;
     let (state, ai) = (&fixture.state, &fixture.state.ai);
     let sentence = "The OpenRouter key is set in the environment \
                     (COGWHEEL_AI__OPENROUTER_API_KEY); change it there.";
@@ -100,7 +89,7 @@ async fn an_environment_key_cannot_be_replaced_but_the_rest_can_change() {
 
 #[tokio::test]
 async fn enabling_needs_a_key_and_a_model_and_every_shape_is_checked() {
-    let bare = fixture(|_| {}, &[]).await;
+    let bare = Harness::with_ai(|_| {}, &[]).await;
     let error = apply_patch(&bare.state, patch(r#"{"enabled":true}"#))
         .await
         .expect_err("no key");
@@ -109,7 +98,7 @@ async fn enabling_needs_a_key_and_a_model_and_every_shape_is_checked() {
         StatusCode::CONFLICT,
         "Add an OpenRouter key before turning AI review on.",
     );
-    let keyed = fixture(env_key, &[]).await;
+    let keyed = Harness::with_ai(keyed(KEY), &[]).await;
     let error = apply_patch(&keyed.state, patch(r#"{"enabled":true}"#))
         .await
         .expect_err("no model");
@@ -157,14 +146,14 @@ async fn enabling_needs_a_key_and_a_model_and_every_shape_is_checked() {
 #[tokio::test]
 async fn turning_review_on_tests_it_and_turning_it_off_closes_the_gate_at_once() {
     let stub = Stub::serve(vec![
-        Reply::json(200, LISTING),
-        Reply::json(200, LISTING),
-        Reply::json(200, ANSWER),
+        (ZDR_LISTING, Canned::json(200, MODELS)),
+        (LISTING, Canned::json(200, MODELS)),
+        (DECISIONS, Canned::json(200, ANSWER)),
     ]);
     let base = stub.base.clone();
-    let fixture = fixture(
+    let fixture = Harness::with_ai(
         move |config| {
-            env_key(config);
+            keyed(KEY)(config);
             config.ai_base_url = base;
         },
         &[],
@@ -223,6 +212,141 @@ async fn turning_review_on_tests_it_and_turning_it_off_closes_the_gate_at_once()
     assert_eq!(stub.requests().len(), 3, "and turning off sent nothing");
 }
 
+/// The known map is read when review is turned on and let go when it is turned off: off, nothing
+/// reads it (ADR 0002's RSS budget).
+#[tokio::test]
+async fn the_known_map_is_read_on_turn_on_and_let_go_on_turn_off() {
+    let stub = Stub::serve(vec![("", Canned::json(200, ANSWER))]);
+    let base = stub.base.clone();
+    let fixture = Harness::with_ai(
+        move |config| {
+            keyed(KEY)(config);
+            config.ai_base_url = base;
+        },
+        &[MODEL],
+    )
+    .await;
+    let (state, ai) = (&fixture.state, &fixture.state.ai);
+    let now = now_secs();
+    ai.settle(
+        &state.storage,
+        now,
+        Cost::default(),
+        vec![
+            verdict("ads.example.net", "block", now),
+            verdict("quiet.example.net", "ignore", now),
+        ],
+    )
+    .await
+    .expect("committed");
+    assert_eq!(ai.known_len(), 0, "off: not read");
+
+    apply_patch(state, patch(r#"{"enabled":true}"#))
+        .await
+        .expect("turned on");
+    assert_eq!(ai.known_len(), 2);
+    assert!(ai.known("quiet.example.net").is_some());
+
+    apply_patch(state, patch(r#"{"enabled":false}"#))
+        .await
+        .expect("turned off");
+    assert_eq!(ai.known_len(), 0);
+}
+
+/// D18 at once: a Turn off closes the gate before it waits for the writes lock, which a Test on
+/// the wire holds for as long as OpenRouter takes to answer.
+#[tokio::test]
+async fn turning_off_does_not_wait_behind_a_test_to_close_the_gate() {
+    // Held until released, then a 503: the Test fails.
+    let stub = Stub::serve(vec![(DECISIONS, Canned::json(503, "{}").held())]);
+    let base = stub.base.clone();
+    let fixture = Harness::with_ai(
+        move |config| {
+            keyed(KEY)(config);
+            config.ai_base_url = base;
+        },
+        &[ON, MODEL],
+    )
+    .await;
+    let (state, ai) = (&fixture.state, &fixture.state.ai);
+    let _alive = ai.reviewer_alive();
+    assert!(ai.tap().is_some(), "reviewing");
+    let generation = ai.generation();
+
+    let testing = tokio::spawn({
+        let state = state.clone();
+        async move { run_test(&state, AiTestInput::default()).await }
+    });
+    while stub.requests().is_empty() {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let off = tokio::spawn({
+        let state = state.clone();
+        async move { apply_patch(&state, patch(r#"{"enabled":false}"#)).await }
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    while ai.tap().is_some() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the gate waited for the Test"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(!ai.may_send(generation));
+    assert!(!off.is_finished(), "the PUT itself still waits its turn");
+
+    stub.release();
+    testing
+        .await
+        .expect("joined")
+        .expect_err("the Test got no answer");
+    off.await.expect("joined").expect("turned off");
+    assert_eq!(ai.state(), State::Off);
+    assert_eq!(
+        state.storage.setting("ai_enabled").await.expect("read"),
+        None
+    );
+}
+
+/// A Turn off whose client hangs up while the PUT waits still withdraws the AI list: the work is
+/// not the request's to drop.
+#[tokio::test]
+async fn a_turn_off_whose_client_hangs_up_still_withdraws_the_ai_list() {
+    let fixture = Harness::with_ai(keyed(KEY), &[ON, MODEL]).await;
+    let (state, ai) = (&fixture.state, &fixture.state.ai);
+    let now = now_secs();
+    ai.settle(
+        &state.storage,
+        now,
+        Cost::default(),
+        vec![verdict("ads.example.net", "block", now)],
+    )
+    .await
+    .expect("committed");
+    rebuild(state, Rebuild::Ai).await.expect("installed");
+    let applied = || state.runtime.current_policy().ai.get("ads.example.net");
+    assert_eq!(applied(), Some(Action::Block));
+
+    let held = state.rebuild_lock.lock().await;
+    let hung_up = tokio::time::timeout(
+        Duration::from_millis(300),
+        apply_patch(state, patch(r#"{"enabled":false}"#)),
+    )
+    .await;
+    assert!(hung_up.is_err(), "dropped while it waited to install");
+    drop(held);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while applied().is_some() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the AI list kept applying"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(ai.state(), State::Off);
+}
+
 #[tokio::test]
 async fn a_key_is_checked_before_it_is_kept_and_only_its_limits_are_shown() {
     let label = "sk-or-v1-012...def";
@@ -233,9 +357,9 @@ async fn a_key_is_checked_before_it_is_kept_and_only_its_limits_are_shown() {
         (429, StatusCode::TOO_MANY_REQUESTS),
         (503, StatusCode::SERVICE_UNAVAILABLE),
     ] {
-        let stub = Stub::serve(vec![Reply::json(status, "{}")]);
+        let stub = Stub::serve(vec![("", Canned::json(status, "{}"))]);
         let base = stub.base.clone();
-        let fixture = fixture(move |config| config.ai_base_url = base, &[]).await;
+        let fixture = Harness::with_ai(move |config| config.ai_base_url = base, &[]).await;
         let error = apply_patch(&fixture.state, patch(&format!(r#"{{"key":"{KEY}"}}"#)))
             .await
             .expect_err("not kept");
@@ -246,9 +370,9 @@ async fn a_key_is_checked_before_it_is_kept_and_only_its_limits_are_shown() {
     let body = format!(
         r#"{{"data":{{"label":"{label}","limit":5,"usage":0.88,"limit_remaining":4.12}}}}"#
     );
-    let stub = Stub::serve(vec![Reply::json(200, body)]);
+    let stub = Stub::serve(vec![("", Canned::json(200, body))]);
     let base = stub.base.clone();
-    let fixture = fixture(move |config| config.ai_base_url = base, &[]).await;
+    let fixture = Harness::with_ai(move |config| config.ai_base_url = base, &[]).await;
     let (state, ai) = (&fixture.state, &fixture.state.ai);
     apply_patch(state, patch(&format!(r#"{{"key":"{KEY}"}}"#)))
         .await
@@ -264,6 +388,10 @@ async fn a_key_is_checked_before_it_is_kept_and_only_its_limits_are_shown() {
     let status = ai.status(&state.runtime.current_policy(), AiCounts::default());
     assert_eq!(status.key.limit_usd, Some(5.0));
     assert_eq!(status.key.limit_remaining_usd, Some(4.12));
+    // Settings prints this host as it is, so it must be the AI card's, and a host.
+    let view = ai.settings_view();
+    assert_eq!(view.sends_to, status.sends_to);
+    assert!(!view.sends_to.contains('/'), "{}", view.sends_to);
     let shown = serde_json::to_string(&(
         status,
         ai.settings_view(),
@@ -288,14 +416,14 @@ async fn a_key_is_checked_before_it_is_kept_and_only_its_limits_are_shown() {
 
 #[tokio::test]
 async fn a_saved_key_is_written_owner_only_and_removed_with_its_file() {
-    let dir = Scratch::new("patch-key");
+    let dir = TempDir::new("patch-key");
     let database = format!("sqlite://{}/cogwheel.db", dir.path().display());
-    let stub = Stub::serve(vec![Reply::json(
-        200,
-        r#"{"data":{"limit":null,"limit_remaining":null}}"#,
+    let stub = Stub::serve(vec![(
+        "",
+        Canned::json(200, r#"{"data":{"limit":null,"limit_remaining":null}}"#),
     )]);
     let base = stub.base.clone();
-    let fixture = fixture(
+    let fixture = Harness::with_ai(
         move |config| {
             config.ai_base_url = base;
             config.database_url = database;

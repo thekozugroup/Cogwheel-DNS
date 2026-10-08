@@ -545,6 +545,7 @@ async fn check_reports_which_step_decided() {
         .ai
         .settle(
             &state.storage,
+            now,
             crate::ai::Cost::default(),
             vec![
                 judged("beacon.example.net", "block", "nothing"),

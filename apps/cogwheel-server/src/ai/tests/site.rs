@@ -99,6 +99,40 @@ fn identifier_labels_and_embedded_addresses_are_never_sendable() {
     }
 }
 
+/// What reached the stub in the review: a router's device names, a tailnet's, a home's
+/// remote-access names, and addresses spelled in hex or as IPv6.
+#[test]
+fn router_and_home_reaching_names_are_never_sendable() {
+    for name in [
+        "fritz.box",
+        "nas.fritz.box",
+        "jonas-macbook.fritz.box",
+        "fritz.nas",
+        "speedport.ip",
+        "printer.router",
+        "c0a80105.nip.io",
+        "app.c0a80105.nip.io",
+        "fd00--1.sslip.io",
+        "nas.tail1a2b3.ts.net",
+        "jonas-iphone.tail1a2b3.ts.net",
+        "smithnas.synology.me",
+        "smith-family.duckdns.org",
+        "abc123.myfritz.net",
+    ] {
+        assert!(!sendable(name, &NONE), "{name}");
+    }
+    // On a label boundary only: `.box` and `.io` are public, and so are look-alikes.
+    for name in [
+        "shop.box",
+        "notnip.io",
+        "cdn.nip-io.com",
+        "www.ip-api.com",
+        "ts.network.com",
+    ] {
+        assert!(sendable(name, &NONE), "{name}");
+    }
+}
+
 #[test]
 fn the_appliances_own_names_are_never_sendable() {
     let own = [
