@@ -6,6 +6,8 @@ Request: publish the first GitHub release and install it on Atlas.
 
 - Finalize first-release documentation and changelog.
 - Fix the release image smoke check's missing writable database volume.
+- Update vulnerable locked dependencies before publication.
+- Enable automatic updates on Atlas without an updater sidecar container.
 - Pass the full CI gate on the exact release commit.
 - Publish through the existing release workflow, including both architectures,
   binaries, checksums, SBOMs and provenance.
@@ -19,7 +21,11 @@ Request: publish the first GitHub release and install it on Atlas.
 - Source restored from GitHub main; no local changes existed.
 - Atlas inspected: no existing Cogwheel container, data or template. Port 53
   and web port 8081 are free; web port 8080 belongs to another application.
-- Release preparation in progress. Publication and installation remain pending.
+- First CI run passed builds, tests, web and both container smoke suites, then
+  stopped at the dependency audit. Patched quinn-proto to 0.11.18 and rustls
+  to 0.23.46; rerunning the full gate.
+- Automatic-update integration is being prepared. Publication and installation
+  remain pending.
 
 ## Acceptance boundary
 
