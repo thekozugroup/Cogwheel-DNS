@@ -12,11 +12,9 @@ Removed; this first one does not, because there is nothing to have changed from.
 
 ## [Unreleased]
 
-Nothing has been released yet. Everything below is the first release, written now rather than
-assembled from commit subjects on the day — the release workflow reads the section matching the
-tag verbatim as the release body, so it is worth writing while the reasoning is fresh.
-[docs/RELEASING.md](docs/RELEASING.md) has the steps that turn this heading into a tagged
-release.
+No changes yet.
+
+## [0.1.0] — 2026-10-16
 
 **Database schema: v2.** A fresh install creates it. A database written by an earlier build of
 this release (v1) is upgraded in place on first start, after a `cogwheel.db.pre-v2` snapshot; one
@@ -180,4 +178,5 @@ Because everything here is new, this entry describes what Cogwheel _is_ rather t
 - **No Raspberry Pi measurement yet.** Every number above was taken on a 4-vCPU x86_64 sandbox.
   They are reference points, not Pi 5 figures.
 
-[Unreleased]: https://github.com/thekozugroup/Cogwheel-DNS/commits/main
+[Unreleased]: https://github.com/thekozugroup/Cogwheel-DNS/compare/v0.1.0...main
+[0.1.0]: https://github.com/thekozugroup/Cogwheel-DNS/releases/tag/v0.1.0

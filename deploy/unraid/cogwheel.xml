@@ -64,10 +64,6 @@
     it, on any interface, stops it starting. Stop the other resolver, or give
     Cogwheel its own br0 address instead.
 
-    BEFORE v0.1.0: no image has been published yet, so Apply fails at the pull
-    until the first release. Build the image yourself and put its name in
-    Repository; docs/QUICKSTART.md#unraid has the commands.
-
     AFTER IT STARTS: open the WebUI, then set your router's DNS server to this
     server's LAN address. Set it on the ROUTER, in the DHCP settings, rather than
     on each device, so everything on the network is covered. On a dual-stack

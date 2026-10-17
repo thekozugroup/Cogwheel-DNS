@@ -3,11 +3,6 @@
 How a release is cut, how to verify one, and which image tag an operator should
 follow.
 
-> Nothing has been released yet. There are no tags and no image has been pushed
-> to `ghcr.io/thekozugroup/cogwheel-dns`. Everything below describes the
-> machinery, which is in place and tested; `v0.1.0` will be the first time it
-> runs for real.
-
 ---
 
 ## Versioning
@@ -18,7 +13,7 @@ changelog entry says so when it does.
 The one piece of version information that is not the version number is the
 **database schema version**, an integer the image advertises as the OCI label
 `io.cogwheel.schema-version`. It is what decides whether an upgrade is a swap or
-a migration, and therefore what a rollback costs. Today it is `1`.
+a migration, and therefore what a rollback costs. In v0.1.0 it is `2`.
 
 Every changelog entry states whether the release changes the schema. That is the
 fact an operator needs and the one they cannot get anywhere else.
@@ -29,7 +24,8 @@ fact an operator needs and the one they cannot get anywhere else.
 
 Releases are automated. Pushing a `v*` tag runs
 [`.github/workflows/release.yml`](../.github/workflows/release.yml), which
-re-runs the full gate against the tagged tree before publishing anything.
+builds the artifacts and tests the published image before creating the release.
+The full CI gate must pass on the exact commit before it is tagged.
 
 1. **Write the `CHANGELOG.md` section** for the version, dated, in
    [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) form —

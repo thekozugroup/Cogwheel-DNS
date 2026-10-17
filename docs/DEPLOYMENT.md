@@ -6,26 +6,13 @@ please [open an issue](https://github.com/thekozugroup/Cogwheel-DNS/issues).
 
 If you just want a filtered household and not the detail, start with
 **[the quick start](QUICKSTART.md)** instead; it is five minutes of attention
-once an image is published, and covers every host. This file is what you read
+and covers every host. This file is what you read
 when something here has to be decided rather than accepted.
 
 Cogwheel is a DNS filtering appliance. It binds port 53, answers queries for
 every device on your network, and serves a web control plane on port 8080. The
 reference target is a **Raspberry Pi 5 running 64-bit Raspberry Pi OS**, but any
 64-bit Linux host (`x86_64` or `aarch64`) works.
-
-> ### Before the first release
->
-> Nothing has been tagged and no image has been pushed to
-> `ghcr.io/thekozugroup/cogwheel-dns`. Five paths in this file depend on
-> published artifacts and will fail until `v0.1.0` exists: the one-line
-> installer ([§2](#2-the-one-line-installer)), `docker compose
-> pull` ([§3](#3-docker-compose)), the release tarball
-> ([§4](#4-native-install-with-systemd)), the Unraid template
-> ([§1](#1-choosing-an-install-method)) and pinning a version
-> ([§10](#10-upgrades-and-rollback)). Building the image yourself works today —
-> [§3](#3-docker-compose), or on Unraid
-> [QUICKSTART](QUICKSTART.md#building-the-image-yourself-on-unraid).
 
 ---
 
@@ -155,7 +142,7 @@ $EDITOR .env
 # Resolve the port-53 conflict first — Compose cannot do this for you.
 sudo ./scripts/install.sh --fix-port-53
 
-docker compose pull        # fails until v0.1.0 is published; build instead, below
+docker compose pull
 docker compose up -d
 docker compose ps          # wait for STATUS = healthy
 ```
@@ -163,8 +150,7 @@ docker compose ps          # wait for STATUS = healthy
 `.env.example` documents every variable. The defaults are sized for a
 Raspberry Pi 5: two CPUs, 1 GiB memory, three rotated 10 MB log files.
 
-To build locally instead of pulling a published image — which is the only
-option until `v0.1.0` is tagged:
+To build locally instead of pulling a published image:
 
 ```sh
 docker build -t cogwheel-dns:dev .
@@ -1040,8 +1026,7 @@ docker compose pull
 docker compose up -d
 ```
 
-**Built from source** — the only Compose path before `v0.1.0` — has nothing to
-pull. Rebuild from the clone and recreate:
+**Built from source** has nothing to pull. Rebuild from the clone and recreate:
 
 ```sh
 git pull
@@ -1055,7 +1040,7 @@ and Unraid compares digests; a pinned tag has a digest that never moves, so the
 Docker tab would report "up-to-date" forever, through a security release
 included. Pinning is a real choice — see
 [Which tag should I track?](RELEASING.md#which-tag-should-i-track) — but
-make it knowingly. An image you built yourself before `v0.1.0` has no registry
+make it knowingly. An image you built yourself has no registry
 digest to compare: rebuild it under the same name
 ([QUICKSTART](QUICKSTART.md#building-the-image-yourself-on-unraid)), then
 **Edit** → **Apply** on the container to recreate it from the new image.
@@ -1164,7 +1149,6 @@ curl -fsSL https://api.github.com/repos/thekozugroup/Cogwheel-DNS/releases/lates
 The first line is the version you run; the second is one anonymous request to
 `api.github.com`, made by you, which prints the newest final release's tag —
 `v0.1.0`, say. Prereleases are never "latest", so it will not offer you one.
-Before the first release exists, `curl` reports a 404 and nothing else prints.
 If the tag is newer than what `--version` prints, upgrade as
 [above](#the-two-commands). A build from `main` reports the version in
 `Cargo.toml`, which is the release it is heading towards, not one that has

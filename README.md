@@ -43,13 +43,6 @@ router — see the
 64-bit Linux (`x86_64` or `aarch64`), Docker with the Compose plugin, and root — binding port 53
 needs it. On a Raspberry Pi, use the 64-bit OS.
 
-> **Before the first release.** Nothing has been tagged yet and no image has been pushed to
-> `ghcr.io/thekozugroup/cogwheel-dns`, so the one-line installer below fails on the pull and puts
-> the host back the way it found it. Until `v0.1.0` exists, use the clone path — the **"Or from
-> a clone"** block below, or
-> [docs/QUICKSTART.md](docs/QUICKSTART.md#build-it-yourself-until-v010-is-tagged) — which builds
-> the image locally and works today.
-
 ```sh
 curl -fsSL https://raw.githubusercontent.com/thekozugroup/Cogwheel-DNS/main/scripts/install.sh | sudo sh
 ```
@@ -78,7 +71,7 @@ volume is touched, and everything it does change is recorded so `--uninstall` ca
 that and nothing else. `--help` lists the options.
 
 <details>
-<summary>Or from a clone — needed until the first release is published, and for building it yourself</summary>
+<summary>Or from a clone — build it yourself</summary>
 
 ```sh
 git clone https://github.com/thekozugroup/Cogwheel-DNS.git
@@ -96,8 +89,7 @@ Compose silently builds whenever the image is missing, which on a Raspberry Pi t
 pull into a forty-minute surprise.
 
 The one-line installer pulls `ghcr.io/thekozugroup/cogwheel-dns:latest`, which the
-[release workflow](.github/workflows/release.yml) publishes on a version tag. Before that tag
-exists, use this path.
+[release workflow](.github/workflows/release.yml) publishes on a version tag.
 
 </details>
 
@@ -116,10 +108,8 @@ image does not start at all. The database goes in a named volume; to keep it in
 `/mnt/user/appdata/cogwheel` instead, `chown -R 10001:10001` that folder first, because Cogwheel
 runs as uid 10001. Use host networking or a custom `br0` address, never plain bridge — under
 bridge, client IPs are rewritten to the Docker gateway and every device in the house looks like
-one client. Until `v0.1.0` there is no image for the template to pull, and the clone path above
-needs Compose, which Unraid does not ship; [docs/QUICKSTART.md](docs/QUICKSTART.md#unraid) has
-the walkthrough, the build that works there today, and how to verify the install from Unraid's
-terminal.
+one client. [docs/QUICKSTART.md](docs/QUICKSTART.md#unraid) has the walkthrough,
+an optional source build using plain Docker, and how to verify the install from Unraid's terminal.
 
 Either way it is one container and one volume. The binary serves the web UI from the same origin
 it serves the API on, so there is no reverse proxy to configure and no CORS policy to get wrong.
