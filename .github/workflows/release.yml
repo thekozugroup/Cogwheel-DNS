@@ -749,7 +749,7 @@ jobs:
           | Tag | You get |
           | --- | --- |
           | \`${VERSION}\` | exactly this release, forever |
-          | \`\${VERSION%.*}\` | the newest patch on this minor line |
+          | \`${VERSION%.*}\` | the newest patch on this minor line |
           | \`latest\` | the newest final release, never a prerelease |
 
           \`latest\` is the default the installer and the Unraid template use,

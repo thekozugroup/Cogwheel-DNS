@@ -195,6 +195,13 @@ it to come back ready, so give it that long before deciding it has hung.
 4. **Apply.**
 5. Open the WebUI link Unraid puts on the container.
 
+**Automatic updates:** in Unraid's **Auto Update Applications** settings,
+enable **cogwheel** and choose a schedule. Leave **Repository** on
+`ghcr.io/thekozugroup/cogwheel-dns:latest`. The host's native scheduler checks
+that tag and recreates the container from its saved template, preserving the
+data path and variables. No updater sidecar or Docker socket mount is needed.
+An exact version tag opts out of new releases.
+
 The container is called `cogwheel`, as it is on every other host, so the
 `docker exec cogwheel …` and `docker logs cogwheel` commands in these docs work
 on Unraid unchanged.

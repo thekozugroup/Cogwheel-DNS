@@ -92,6 +92,9 @@
     again if the field is ever emptied.
 
     UPDATES: the Docker tab's update check works against the :latest tag above.
+    For automatic updates, enable cogwheel in Unraid's Auto Update Applications
+    settings and choose a schedule. The host uses this saved template and the
+    same data path; no updater sidecar or Docker socket mount is needed.
     An upgrade that changes the database schema migrates it in place and leaves
     a copy of the previous file beside it as cogwheel.db.pre-vN, so going back
     to an older version means restoring that copy first — the older build

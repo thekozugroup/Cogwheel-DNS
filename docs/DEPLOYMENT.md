@@ -1038,7 +1038,15 @@ COGWHEEL_IMAGE=cogwheel-dns:dev docker compose up -d
 That works because `deploy/unraid/cogwheel.xml` tracks the moving `:latest` tag
 and Unraid compares digests; a pinned tag has a digest that never moves, so the
 Docker tab would report "up-to-date" forever, through a security release
-included. Pinning is a real choice — see
+included. To apply releases automatically, enable **cogwheel** in Unraid's
+**Auto Update Applications** settings and choose a schedule. This runs on the
+host and uses the saved Unraid template; it needs no updater sidecar and no
+Docker socket mounted inside Cogwheel. Keep the template's repository on
+`:latest`, and retain the same persistent data path. Back up the data before
+upgrades; the schema migration snapshot still governs rollback across schema
+changes.
+
+Pinning is a real choice — see
 [Which tag should I track?](RELEASING.md#which-tag-should-i-track) — but
 make it knowingly. An image you built yourself has no registry
 digest to compare: rebuild it under the same name
